@@ -7289,6 +7289,9 @@ class Client:
     async def run_stock_interactions(self) -> None:
         interact = asyncio.Queue(maxsize=_LOCAL_STOCK_INPUT_BACKLOG)
         controls = asyncio.Queue(maxsize=_LOCAL_STOCK_INPUT_BACKLOG)
+        ladders = asyncio.Queue(maxsize=_LOCAL_STOCK_INPUT_BACKLOG)
+        ladder_worker = None
+        ladder_visit = None
         pickups = {}
         power_slots = asyncio.Semaphore(4)
         power_requests = {}
@@ -7318,6 +7321,16 @@ class Client:
                             del latest_power_request[key]
                         await request
                 scope = self.stock_interaction_scope()
+                if scope != ladder_visit:
+                    if ladder_worker is not None:
+                        ladder_worker.cancel()
+                        await asyncio.gather(ladder_worker, return_exceptions=True)
+                        scope = self.stock_interaction_scope()
+                        ladders = asyncio.Queue(maxsize=_LOCAL_STOCK_INPUT_BACKLOG)
+                    ladder_worker = asyncio.create_task(self.run_stock_input_queue(ladders)) if scope is not None else None
+                    ladder_visit = scope
+                if ladder_worker is not None and ladder_worker.done():
+                    await ladder_worker
                 self.prop_carry.poll_local_edges(scope)
                 inputs = self.bridge.interactions() if self.bridge.stock_interaction_ready(crates=False) else ()
                 if scope is not None:
@@ -7342,15 +7355,21 @@ class Client:
                                 latest_power_request[key] = request
                                 power_requests[request] = key
                             continue
-                        # Linked switches and door latches stay ordered together.
-                        queue = controls if (native_stock_door.target_actor(target) or native_stock_switch.input_target(target)
-                                             or native_ladder.target_parts(target)) else interact
+                        if native_ladder.target_parts(target):
+                            queue = ladders
+                        elif native_stock_door.target_actor(target) or native_stock_switch.input_target(target):
+                            # Linked switches and door latches stay ordered together.
+                            queue = controls
+                        else:
+                            queue = interact
                         try:
                             queue.put_nowait((scope, operation, target))
                         except asyncio.QueueFull:
                             self.control.event("interaction_rejected", operation_id=operation, reason="stock_input_queue_full")
                 await asyncio.sleep(.012)
         finally:
+            if ladder_worker is not None:
+                workers.append(ladder_worker)
             for worker in workers:
                 worker.cancel()
             await asyncio.gather(*workers, return_exceptions=True)

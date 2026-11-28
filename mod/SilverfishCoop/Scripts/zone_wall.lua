@@ -238,16 +238,16 @@ function wall.placed_actor(world, class, name)
     if in_world(actor, world) and actor:GetFullName() == class .. " " .. path then return actor end
 end
 
-local function nearby_exit(location, range, managed)
+local function nearby_exit(x, y, z, range, managed)
     local name, nearest = nil, range ^ 2
     for key, record in pairs(records) do
         if not managed or record.managed then
             local center = record.center
-            local x, y, z = location.X - center.X, location.Y - center.Y, location.Z - center.Z
+            local dx, dy, dz = x - center.X, y - center.Y, z - center.Z
             local squared = 0
             for index, length in ipairs(record.extent) do
                 local axis = record.axes[index]
-                local outside = math.max(0, math.abs(x * axis.X + y * axis.Y + z * axis.Z) - length)
+                local outside = math.max(0, math.abs(dx * axis.X + dy * axis.Y + dz * axis.Z) - length)
                 squared = squared + outside ^ 2
             end
             if squared < nearest or (squared == nearest and name and key < name) then
@@ -269,12 +269,20 @@ end
 function wall.update(get_world)
     local scope = approach_scope
     if not scope then return end
-    if not valid(scope.pawn) or not same(scope.pawn:GetWorld(), scope.world) then
-        close_approach()
-        approach_scope = nil
-        return
+    local x, y, z
+    if type(SilverfishReadNativeExitApproachPosition) == "function" then
+        x, y, z = SilverfishReadNativeExitApproachPosition(scope.world_address, scope.pawn_address)
     end
-    local key, squared = nearby_exit(scope.pawn:K2_GetActorLocation(), approach_range, true)
+    if not finite(x) or not finite(y) or not finite(z) then
+        if not valid(scope.pawn) or not same(scope.pawn:GetWorld(), scope.world) then
+            close_approach()
+            approach_scope = nil
+            return
+        end
+        local position = scope.pawn:K2_GetActorLocation()
+        x, y, z = position.X, position.Y, position.Z
+    end
+    local key, squared = nearby_exit(x, y, z, approach_range, true)
     local selected = key and records[key]
     if not selected and not open_exit then return end
     if not same(scope.world, get_world()) or not same(scope.capsule, scope.pawn.CapsuleComponent) then
@@ -478,7 +486,8 @@ function wall.sync(state, phase, fixture, accepting, secondary)
     local permitted, blockers
     if hosting then permitted, blockers = host_can_pass(state, local_pawn, world, accepting) end
     local manages_overlap = hosting and type(SilverfishSetNativeExitApproach) == "function"
-    approach_scope = manages_overlap and accepting and {pawn = local_pawn, capsule = local_capsule, world = world} or nil
+    approach_scope = manages_overlap and accepting and {pawn = local_pawn, capsule = local_capsule, world = world,
+        pawn_address = local_pawn:GetAddress(), world_address = world:GetAddress()} or nil
     if open_exit and (not approach_scope or not same(open_exit.host_capsule, local_capsule)) then close_approach() end
     local scope = {map = state.map, world = world, pawn = local_pawn, capsule = local_capsule,
         hosting = hosting, permitted = permitted == true, manages_overlap = manages_overlap,
@@ -488,7 +497,11 @@ function wall.sync(state, phase, fixture, accepting, secondary)
         sync_geometry(scope, route)
     end
     if not hosting then return end
-    local near = blockers and #blockers > 0 and nearby_exit(local_pawn:K2_GetActorLocation(), 450)
+    local near
+    if blockers and #blockers > 0 then
+        local position = local_pawn:K2_GetActorLocation()
+        near = nearby_exit(position.X, position.Y, position.Z, 450)
+    end
     if near and not valid(records[near].host_capsule) then
         regroup.show(state, near, blockers)
     else

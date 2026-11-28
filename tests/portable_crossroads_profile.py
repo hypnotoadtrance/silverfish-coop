@@ -115,14 +115,15 @@ def instrument_profile(source, *, stock_receipts=False):
     observer_start = rest.index(first_observer)
     observer_end = rest.index(last_observer) + len(last_observer)
     observers = "".join("    " + line for line in rest[observer_start:observer_end].splitlines(keepends=True))
-    rest = (rest[:observer_start] + '    local suspended = status_publication.profile.host_maintenance_suspended()\n'
-            '    if not suspended then\n'
+    rest = (rest[:observer_start]
+            + '    local observers_suspended, status_suspended = status_publication.profile.host_maintenance_suspended()\n'
+            '    if not observers_suspended then\n'
             '        local profile_at, profile_cycles = status_publication.profile.observers_begin()\n'
             + observers + '        status_publication.profile.observers_end(profile_at, profile_cycles)\n'
             '    end\n' + rest[observer_end:])
     periodic = "    local periodic = now >= status_publication.next_snapshot or now >= status_publication.next_frame\n"
     assert rest.count(periodic) == 1
-    rest = rest.replace(periodic, "    local periodic = not suspended and (now >= status_publication.next_snapshot"
+    rest = rest.replace(periodic, "    local periodic = not status_suspended and (now >= status_publication.next_snapshot"
                         " or now >= status_publication.next_frame)\n")
     if cache in rest:
         lookup = 'status_publication.observer_world = ' + wrapper + '("current_world", current_world)'
@@ -249,8 +250,46 @@ async def verify_crossroads_recovery(host, guest, _pawn):
 def instrument_zone_walls(source):
     anchor = "local sources = wall_sources(world, scope.map, route, scope.fixture, scope.secondary)"
     assert source.count(anchor) == 1
-    return source.replace(anchor, 'local sources = SilverfishProfileCrossroadsCall("zone_wall_sources", '
-                          'wall_sources, world, scope.map, route, scope.fixture, scope.secondary)')
+    source = source.replace(anchor, 'local sources = SilverfishProfileCrossroadsCall("zone_wall_sources", '
+                            'wall_sources, world, scope.map, route, scope.fixture, scope.secondary)')
+    end = "\nreturn wall\n"
+    assert source.count(end) == 1
+    fixture = """
+function SilverfishProfileCrossroadsExitPosition()
+    local read, scope, stamp = SilverfishReadNativeExitApproachPosition, approach_scope, SilverfishBridgeProfileStamp
+    if type(read) ~= "function" or not scope then return "unavailable" end
+    local world, address = scope.world_address, scope.pawn_address
+    local x, y, z = read(world, address)
+    local expected = scope.pawn:K2_GetActorLocation()
+    assert(finite(x) and finite(y) and finite(z) and math.abs(x - expected.X) <= .001
+        and math.abs(y - expected.Y) <= .001 and math.abs(z - expected.Z) <= .001,
+        "native exit position differs from the stock location")
+    assert(read(0, address) == nil and read(world, 0) == nil, "native exit position accepted a different scope")
+    local running = collectgarbage("isrunning")
+    collectgarbage("stop")
+    local ok, result = pcall(function()
+        local count = 64
+        local function measure(call, ...)
+            local heap, start = collectgarbage("count"), stamp()
+            for _ = 1, count do call(...) end
+            return (stamp() - start) / 1000, collectgarbage("count") - heap
+        end
+        local function stock()
+            local point = scope.pawn:K2_GetActorLocation()
+            return point.X, point.Y, point.Z
+        end
+        local n1, nk1 = measure(read, world, address)
+        local s1, sk1 = measure(stock)
+        local s2, sk2 = measure(stock)
+        local n2, nk2 = measure(read, world, address)
+        return ("%d,%.3f,%.3f,%.3f,%.3f"):format(count * 2, n1 + n2, s1 + s2, nk1 + nk2, sk1 + sk2)
+    end)
+    if running then collectgarbage("restart") end
+    if not ok then error(result, 0) end
+    return result
+end
+"""
+    return source.replace(end, fixture + end)
 
 
 def instrument_stash_binding(source):
@@ -723,11 +762,10 @@ def read_comparison(raw):
         slow_calls[name], call_cycles[name] = float(wall), int(cycles)
     frame_size, *stages = status.split(";")
     (max_rows, max_bytes, heap_start, heap_peak, max_drop, large_drops,
-     old_pause, old_step, pause, step, skipped_maintenance) = frame_size.split(",")
-    skipped_maintenance = int(skipped_maintenance)
-    if skipped_maintenance:
-        assert "delayed_observers" not in totals
-    else:
+     old_pause, old_step, pause, step, skipped_observers, skipped_status) = frame_size.split(",")
+    skipped_observers, skipped_status = int(skipped_observers), int(skipped_status)
+    assert ("delayed_observers" not in totals) is (skipped_observers > 0)
+    if not skipped_status:
         assert totals["write_status"]["count"] > 3
     heap = {"start_kib": float(heap_start), "peak_kib": float(heap_peak),
             "largest_drop_kib": float(max_drop), "drops_over_one_mib": int(large_drops)}
@@ -739,7 +777,7 @@ def read_comparison(raw):
         name, wall, cycles, heap_delta = entry.split(",")
         status_peaks[name] = {"elapsed_ms": float(wall), "thread_cycles": int(cycles),
                               "lua_heap_delta_kib": float(heap_delta)}
-    if not skipped_maintenance:
+    if not skipped_status:
         assert int(max_bytes) > 0 and int(max_rows) > 0 and "status_native_publish" in status_peaks, status
     heap_calls = {}
     for entry in memory.split(";")[1:]:
@@ -747,13 +785,13 @@ def read_comparison(raw):
         heap_calls[name] = {"nonnegative_samples": int(count), "heap_drops": int(drops),
                             "inclusive_growth_kib": float(growth), "peak_inclusive_growth_kib": float(peak_growth)}
     status_bytes_by_tag = {entry.split(",")[0]: int(entry.split(",")[1]) for entry in sizes.split(";")[1:]}
-    if not skipped_maintenance:
+    if not skipped_status:
         assert status_bytes_by_tag and sum(status_bytes_by_tag.values()) <= int(max_bytes)
     tick_sources = {}
     for entry in commands.split(";")[1:]:
         name, ticks, snapshots = entry.split(",")
         tick_sources[name] = {"ticks": int(ticks), "snapshot_attempts": int(snapshots)}
-    if skipped_maintenance:
+    if skipped_status:
         assert "due/scheduled" not in tick_sources
     else:
         assert tick_sources
@@ -767,14 +805,30 @@ def read_comparison(raw):
     assert not slow_intervals or slow_intervals[0]["elapsed_ms"] == float(elapsed)
     native_interval = {}
     if engine_tick:
-        count, longest, engine, cycles, engine_cycles = map(int, engine_tick.split(","))
-        assert count > 10 and 0 <= engine <= longest and 0 <= engine_cycles <= cycles, engine_tick
-        native_interval = {"engine_tick_intervals": count, "max_interval_ms": longest / 1000,
-                           "engine_tick_ms_in_max_interval": engine / 1000,
-                           "interval_thread_cycles": cycles, "engine_tick_cycles_in_max_interval": engine_cycles}
+        fields = [int(value) for value in engine_tick.split(",")]
+        count, longest = fields[:2]
+        assert count > 10, engine_tick
+        native_interval = {"engine_tick_intervals": count, "max_interval_ms": longest / 1000}
+        if len(fields) == 5:
+            engine, cycles, engine_cycles = fields[2:]
+            assert 0 <= engine <= longest and 0 <= engine_cycles <= cycles, engine_tick
+            native_interval.update(engine_tick_ms_in_max_interval=engine / 1000,
+                                   interval_thread_cycles=cycles, engine_tick_cycles_in_max_interval=engine_cycles)
+        else:
+            pre, engine, between, cycles, pre_cycles, engine_cycles, between_cycles, inside, outside = fields[2:]
+            assert min(fields) >= 0 and pre + engine + between == longest, engine_tick
+            assert pre_cycles + engine_cycles + between_cycles == cycles, engine_tick
+            native_interval.update(pre_tick_ms_in_max_interval=pre / 1000,
+                                   engine_tick_ms_in_max_interval=engine / 1000,
+                                   between_ticks_ms_in_max_interval=between / 1000, interval_thread_cycles=cycles,
+                                   pre_tick_cycles_in_max_interval=pre_cycles,
+                                   engine_tick_cycles_in_max_interval=engine_cycles,
+                                   between_ticks_cycles_in_max_interval=between_cycles,
+                                   lua_scheduler_inside_pre_bracket=inside, lua_scheduler_outside_pre_bracket=outside)
     return {"seconds": float(duration), "timings": totals, "status_sections": status_peaks,
             "native_engine_tick": native_interval,
-            "longest_intervals_over_16ms": slow_intervals, "skipped_maintenance_ticks": skipped_maintenance,
+            "longest_intervals_over_16ms": slow_intervals, "skipped_observer_updates": skipped_observers,
+            "skipped_status_checks": skipped_status,
             "max_status_bytes": int(max_bytes), "max_status_rows": int(max_rows), "lua_heap": heap,
             "heap_calls": heap_calls, "sample_status_bytes_by_tag": status_bytes_by_tag, "tick_sources": tick_sources,
             "slowest_interval": {"elapsed_ms": float(elapsed), "inclusive_calls_ms": slow_calls,
@@ -1003,17 +1057,26 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             coarse["uncached_world_displacement_cm"] = raw_displacement
         if host_maintenance_trial:
             trials = {}
-            for label, action in (("before", "coarse"), ("suspended_first", "coarsequiet"),
-                                  ("suspended_second", "coarsequiet"), ("after", "coarse")):
-                await arm(action)
-                travelled = await walk(2)
-                samples = await asyncio.gather(*(read(seat) for seat in seats.values()))
-                assert all(sample["seconds"] >= 5 for sample in samples), samples
-                host_sample, guest_sample = samples
-                assert not guest_sample["skipped_maintenance_ticks"]
-                assert (host_sample["skipped_maintenance_ticks"] > 0) is (action == "coarsequiet")
-                await wait_resident_status(guest_run, pawns_here)
-                trials[label] = {"displacement_cm": travelled, **dict(zip(seats, samples, strict=True))}
+            modes = (("normal", "coarse", False, False), ("observers_suspended", "quietobservers", True, False),
+                     ("status_suspended", "quietstatus", False, True), ("both_suspended", "coarsequiet", True, True))
+            for repetition, order in enumerate((modes, reversed(modes)), 1):
+                for label, action, observers_off, status_off in order:
+                    await arm(action)
+                    travelled = await walk(2)
+                    samples = await asyncio.gather(*(read(seat) for seat in seats.values()))
+                    assert all(sample["seconds"] >= 5 and sample["native_engine_tick"] for sample in samples), samples
+                    for sample in samples:
+                        ticks = sample["native_engine_tick"]
+                        inside = ticks.get("lua_scheduler_inside_pre_bracket", 0)
+                        outside = ticks.get("lua_scheduler_outside_pre_bracket", 0)
+                        assert inside > 10 and outside <= inside * .05 + 2, ticks
+                    host_sample, guest_sample = samples
+                    assert not guest_sample["skipped_observer_updates"] and not guest_sample["skipped_status_checks"]
+                    assert (host_sample["skipped_observer_updates"] > 0) is observers_off
+                    assert (host_sample["skipped_status_checks"] > 0) is status_off
+                    await wait_resident_status(guest_run, pawns_here)
+                    trials[f"{label}_{repetition}"] = {"displacement_cm": travelled,
+                                                      **dict(zip(seats, samples, strict=True))}
             coarse["host_maintenance_comparison"] = trials
         if gc_trial == "minor":
             assert {entry["active"] for entry in collector_modes.values()} == {"generational"}, collector_modes
@@ -1114,6 +1177,15 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     rows = await asyncio.gather(*(compare_rows(seat) for seat in seats.values()))
     reused_rows = await asyncio.gather(*(compare_status_reuse(seat) for seat in seats.values()))
     switches = await asyncio.gather(*(compare_switch_reads(seat) for seat in seats.values()))
+    exit_result = await command(host, "exitposition")
+    exit_position = None
+    if exit_result != "unavailable":
+        assert not exit_result.startswith("exit position comparison failed"), exit_result
+        reads, native_ms, lua_ms, native_kib, lua_kib = map(float, exit_result.split(","))
+        exit_position = {"reads_per_reader": int(reads), "all_positions_matched": True,
+                         "wrong_scope_refused": True, "native_ms": native_ms, "lua_ms": lua_ms,
+                         "native_heap_growth_kib": native_kib, "lua_heap_growth_kib": lua_kib}
+    assert not host_maintenance_trial or exit_position is not None
     lean = await asyncio.gather(*(compare_lean_reader(seat, probe) for seat in seats.values()))
     journal = {}
     anomaly_samples = {}
@@ -1165,6 +1237,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             "pawn_replication_rates": pawn_rates,
             "row_format_comparison": dict(zip(seats, rows, strict=True)),
             "status_row_reuse_comparison": dict(zip(seats, reused_rows, strict=True)),
+            "exit_position_comparison": exit_position,
             "switch_reader_comparison": dict(zip(seats, switches, strict=True)),
             "lean_reader_comparison": dict(zip(seats, lean, strict=True)),
             "zone_walls": {seat: frame["game"]["native_zone_wall"]

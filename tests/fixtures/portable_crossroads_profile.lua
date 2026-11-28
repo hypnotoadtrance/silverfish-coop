@@ -72,9 +72,10 @@ function probe.observer_resolver(cached)
 end
 
 function probe.host_maintenance_suspended()
-    if not capture or not capture.suspend_host_maintenance then return false end
-    capture.skipped_maintenance = capture.skipped_maintenance + 1
-    return true
+    if not capture then return false, false end
+    if capture.suspend_observers then capture.skipped_observers = capture.skipped_observers + 1 end
+    if capture.suspend_status then capture.skipped_status = capture.skipped_status + 1 end
+    return capture.suspend_observers, capture.suspend_status
 end
 
 function probe.observers_begin()
@@ -173,11 +174,11 @@ local function result()
             peak[#peak + 1] = (";%s,%.4f,%d"):format(tag, call.wall, call.cycles)
         end
     end
-    local status = {("^%d,%d,%.3f,%.3f,%.3f,%d,%d,%d,%d,%d,%d"):format(
+    local status = {("^%d,%d,%.3f,%.3f,%.3f,%d,%d,%d,%d,%d,%d,%d"):format(
         complete.max_status_rows, complete.max_status_bytes, complete.heap_start, complete.heap_peak,
         complete.heap_max_drop, complete.heap_large_drops, complete.previous_pause or 0,
         complete.previous_step_multiplier or 0, complete.restored_pause or 0, complete.restored_step_multiplier or 0,
-        complete.skipped_maintenance)}
+        complete.skipped_observers, complete.skipped_status)}
     for tag, sample in pairs(complete.status_peaks) do
         status[#status + 1] = (";%s,%.4f,%d,%.3f"):format(tag, sample.wall, sample.cycles, sample.heap_delta)
     end
@@ -446,6 +447,9 @@ end
 LoopInGameThreadWithDelay(1, function()
     local active = capture
     if not active then return end
+    if active.native_tick_started and type(SilverfishWitnessEngineTickProfile) == "function" then
+        SilverfishWitnessEngineTickProfile()
+    end
     local now, cycles = stamp()
     local heap = collectgarbage("count")
     active.heap_peak = math.max(active.heap_peak, heap)
@@ -474,8 +478,7 @@ LoopInGameThreadWithDelay(1, function()
     previous, previous_cycles = now, cycles
     if now >= active.deadline then
         if active.native_tick_started then
-            local count, longest, engine, cycles, engine_cycles = SilverfishFinishEngineTickProfile()
-            active.engine_tick = ("%d,%d,%d,%d,%d"):format(count, longest, engine, cycles, engine_cycles)
+            active.engine_tick = table.concat({SilverfishFinishEngineTickProfile()}, ",")
         end
         active.elapsed = (now - active.started) / 1e6
         status_publication.mirror = active.original_mirror
@@ -500,6 +503,7 @@ LoopInGameThreadWithDelay(50, function()
     if action == "coarseraw" and type(status_publication.get_observer_world) ~= "function" then
         message = "unavailable"
     elseif (action == "arm" or action == "coarse" or action == "coarseraw" or action == "coarsequiet"
+        or action == "quietobservers" or action == "quietstatus"
         or action == "gcbaseline" or action == "gctuned" or action == "gcmode") and not capture then
         local now, cycles
         if type(stamp) == "function" then now, cycles = stamp() end
@@ -511,7 +515,9 @@ LoopInGameThreadWithDelay(50, function()
                 rows = {}, calls = {}, peak = 0, peak_calls = {}, started = now,
                 coarse = coarse, deadline = now + (gc_trial and gc_window_us or coarse and coarse_window_us or window_us),
                 uncached_world = action == "coarseraw",
-                suspend_host_maintenance = action == "coarsequiet" and role == "host", skipped_maintenance = 0,
+                suspend_observers = role == "host" and (action == "coarsequiet" or action == "quietobservers"),
+                suspend_status = role == "host" and (action == "coarsequiet" or action == "quietstatus"),
+                skipped_observers = 0, skipped_status = 0,
                 long_intervals = {},
                 status_peaks = {}, heap_calls = {}, tick_sources = {}, snapshot_sources = {},
                 max_status_rows = 0, max_status_bytes = 0,
@@ -597,6 +603,13 @@ LoopInGameThreadWithDelay(50, function()
     elseif action == "inspectcompare" and not capture then
         local ok, value = pcall(compare_inspection)
         if ok then message = value else message = "inspection comparison failed: " .. tostring(value) end
+    elseif action == "exitposition" and not capture then
+        if type(SilverfishProfileCrossroadsExitPosition) == "function" then
+            local ok, value = pcall(SilverfishProfileCrossroadsExitPosition)
+            if ok then message = value else message = "exit position comparison failed: " .. tostring(value) end
+        else
+            message = "unavailable"
+        end
     elseif action == "headrotation" and not capture then
         local ok, value = pcall(SilverfishProfileRemoteHeadRotation)
         if ok then message = value else message = "head rotation comparison failed: " .. tostring(value) end

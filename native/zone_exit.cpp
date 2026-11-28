@@ -1167,6 +1167,31 @@ namespace
         return 1;
     }
 
+    int lua_exit_approach_position(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || !installed.load(std::memory_order_acquire) ||
+            !scope.host || !scope.accepting || scope.generation != generation.load(std::memory_order_acquire) ||
+            Clock::now() >= scope.expires || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_integer(2))
+            return 0;
+        const auto world_address = static_cast<Address>(lua.get_integer());
+        const auto pawn_address = static_cast<Address>(lua.get_integer());
+        auto* world = scope.world.Get();
+        auto* pawn = scope.local.Get();
+        auto* driver = scope.roster.driver.Get();
+        if (!live_object(world) || !live_object(pawn) || !live_object(driver) ||
+            address(world) != world_address || address(pawn) != pawn_address ||
+            pawn->GetClassPrivate() != scope.pawn_class || !scope.role ||
+            scope.role->GetPropertyValueInContainer(pawn) != 3 || actor_world(pawn) != world ||
+            read_object(scope.roster.world_driver, world) != driver)
+            return 0;
+        const auto position = actor_position(pawn);
+        if (!position.finite()) return 0;
+        lua.set_number(position.x);
+        lua.set_number(position.y);
+        lua.set_number(position.z);
+        return 3;
+    }
+
     int lua_exit_approach(const Lua& lua)
     {
         bool allowed{};
@@ -1784,6 +1809,7 @@ namespace silverfish::native_zone
         lua.register_function("SilverfishClearNativeZoneScope", lua_clear);
         lua.register_function("SilverfishPauseNativeZoneScope", lua_pause);
         lua.register_function("SilverfishSetNativeExitApproach", lua_exit_approach);
+        lua.register_function("SilverfishReadNativeExitApproachPosition", lua_exit_approach_position);
         lua.register_function("SilverfishSnapshotDiscoveredOverlaps", lua_snapshot_discovered_overlaps);
         lua.register_function("SilverfishInspectMapPackage", lua_inspect_map_package);
         lua.register_function("SilverfishSnapshotNativeWorldActorPaths", lua_snapshot_world_actor_paths);

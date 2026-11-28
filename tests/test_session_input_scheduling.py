@@ -779,6 +779,65 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         settle.set()
         await client.stock_door_requests[actor]
 
+    async def test_ladder_reports_bypass_linked_switches_and_keep_mount_release_order(self):
+        for travel in (False, True):
+            with self.subTest(travel=travel):
+                epoch, pawn = "a" * 32, "Player_FP_C guest"
+                latch = f"Prop_Latch_C {OBSERVATORY}.Observitory_P:PersistentLevel.Prop_Latch_C_3"
+                mount = "ladder:mount:100,200,300"
+                release = "ladder:release:100,200,300"
+                inputs = [("latch", service.native_stock_switch.TARGET + latch)]
+                switch_sent, finish_mount, mount_cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                ladder_sent = asyncio.Queue()
+
+                async def request(body, *, timeout):
+                    operation = body["operation_id"]
+                    if operation == "latch":
+                        switch_sent.set()
+                        await asyncio.Future()
+                    self.assertEqual(body["action"], service.native_ladder.ACTION)
+                    ladder_sent.put_nowait((operation, body["target"]))
+                    if operation == "mount":
+                        try:
+                            await finish_mount.wait()
+                        except asyncio.CancelledError:
+                            mount_cancelled.set()
+                            raise
+                    return {"ok": True}
+
+                client = self.guest(AsyncMock(side_effect=request))
+                client.transport.connected = True
+                client.host_session, client.zone_epoch, client.expected_zone = "session", epoch, OBSERVATORY
+                client.last_game = {"state": "connected", "map": OBSERVATORY, "pawns": {"local": {"name": pawn}}}
+
+                def read_inputs():
+                    batch = inputs.copy()
+                    inputs.clear()
+                    return batch
+
+                client.bridge.stock_interaction_ready.side_effect = lambda **_: bool(inputs)
+                client.bridge.interactions.side_effect = read_inputs
+                worker = asyncio.create_task(client.run_stock_interactions())
+                try:
+                    await asyncio.wait_for(switch_sent.wait(), .5)
+                    inputs.extend((("mount", mount), ("release", release)))
+                    self.assertEqual(await asyncio.wait_for(ladder_sent.get(), .5), ("mount", f"{epoch}@{mount}"))
+                    self.assertTrue(ladder_sent.empty())
+                    if travel:
+                        client.zone_epoch = "b" * 32
+                        await asyncio.wait_for(mount_cancelled.wait(), .5)
+                        inputs.append(("next-mount", mount))
+                        self.assertEqual(await asyncio.wait_for(ladder_sent.get(), .5),
+                                         ("next-mount", f"{client.zone_epoch}@{mount}"))
+                        self.assertTrue(ladder_sent.empty())
+                    else:
+                        finish_mount.set()
+                        self.assertEqual(await asyncio.wait_for(ladder_sent.get(), .5), ("release", f"{epoch}@{release}"))
+                finally:
+                    worker.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await worker
+
     async def test_independent_power_reports_bypass_a_linked_control_and_keep_device_order(self):
         switch = service.native_stock_switch
         epoch = "a" * 32

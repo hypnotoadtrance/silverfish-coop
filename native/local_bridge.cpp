@@ -15,6 +15,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
@@ -293,14 +294,17 @@ namespace
     struct EngineTickProfile
     {
         bool active{};
-        TickMark previous_pre, previous_post;
-        std::int64_t count{}, longest{}, engine_micros{};
-        ULONG64 interval_cycles{}, engine_cycles{};
+        TickMark early, late, post;
+        std::int64_t count{}, longest{}, pre_micros{}, engine_micros{}, between_micros{};
+        ULONG64 interval_cycles{}, pre_cycles{}, engine_cycles{}, between_cycles{};
+        std::int64_t scheduler_inside{}, scheduler_outside{};
     };
 
     thread_local EngineTickProfile engine_profile;
-    Hooks::GlobalCallbackId engine_profile_pre = Hooks::ERROR_ID;
+    Hooks::GlobalCallbackId engine_profile_early = Hooks::ERROR_ID;
+    Hooks::GlobalCallbackId engine_profile_late = Hooks::ERROR_ID;
     Hooks::GlobalCallbackId engine_profile_post = Hooks::ERROR_ID;
+    constexpr auto engine_profile_owner = STR("SilverfishCoopNative");
 
     TickMark tick_mark()
     {
@@ -311,45 +315,65 @@ namespace
         return mark;
     }
 
+    void record_engine_interval()
+    {
+        auto& sample = engine_profile;
+        if (!sample.active) return;
+        const auto now = tick_mark();
+        const auto [early, late, post] = std::tuple{sample.early, sample.late, sample.post};
+        if (early.micros > 0 && late.micros >= early.micros && post.micros >= late.micros && now.micros >= post.micros)
+        {
+            const auto interval = now.micros - early.micros;
+            ++sample.count;
+            if (interval > sample.longest)
+            {
+                sample.longest = interval;
+                sample.pre_micros = late.micros - early.micros;
+                sample.engine_micros = post.micros - late.micros;
+                sample.between_micros = now.micros - post.micros;
+                sample.interval_cycles = now.cycles - early.cycles;
+                sample.pre_cycles = late.cycles - early.cycles;
+                sample.engine_cycles = post.cycles - late.cycles;
+                sample.between_cycles = now.cycles - post.cycles;
+            }
+        }
+        sample.early = now;
+        sample.late = sample.post = {};
+    }
+
+    void register_early_engine_tick_profile()
+    {
+        if (engine_profile_early != Hooks::ERROR_ID) return;
+        // The Lua mod has not loaded its script yet. Its delayed EngineTick
+        // callbacks are installed later. A witness verifies the order at run time.
+        engine_profile_early = Hooks::RegisterEngineTickPreCallback(
+            [](auto&, RC::Unreal::UEngine*, float, bool) { record_engine_interval(); },
+            {false, false, engine_profile_owner, STR("Measure before the diagnostic Lua schedule")});
+    }
+
     void stop_engine_tick_profile()
     {
-        if (engine_profile_pre != Hooks::ERROR_ID) Hooks::UnregisterCallback(engine_profile_pre);
-        if (engine_profile_post != Hooks::ERROR_ID) Hooks::UnregisterCallback(engine_profile_post);
-        engine_profile_pre = engine_profile_post = Hooks::ERROR_ID;
+        for (auto* hook : {&engine_profile_early, &engine_profile_late, &engine_profile_post})
+        {
+            if (*hook != Hooks::ERROR_ID) Hooks::UnregisterCallback(*hook);
+            *hook = Hooks::ERROR_ID;
+        }
     }
 
     int begin_engine_tick_profile(const Lua& lua)
     {
-        if (lua.get_stack_size() != 0 || engine_profile.active) return 0;
-        if (engine_profile_pre == Hooks::ERROR_ID)
+        if (lua.get_stack_size() != 0 || engine_profile.active || engine_profile_early == Hooks::ERROR_ID) return 0;
+        if (engine_profile_late == Hooks::ERROR_ID)
         {
-            constexpr auto owner = STR("SilverfishCoopNative");
-            engine_profile_pre = Hooks::RegisterEngineTickPreCallback(
+            engine_profile_late = Hooks::RegisterEngineTickPreCallback(
                 [](auto&, RC::Unreal::UEngine*, float, bool) {
-                    auto& sample = engine_profile;
-                    if (!sample.active) return;
-                    const auto now = tick_mark();
-                    if (sample.previous_pre.micros > 0 && sample.previous_post.micros >= sample.previous_pre.micros
-                        && now.micros >= sample.previous_post.micros)
-                    {
-                        const auto interval = now.micros - sample.previous_pre.micros;
-                        ++sample.count;
-                        if (interval > sample.longest)
-                        {
-                            sample.longest = interval;
-                            sample.engine_micros = sample.previous_post.micros - sample.previous_pre.micros;
-                            sample.interval_cycles = now.cycles - sample.previous_pre.cycles;
-                            sample.engine_cycles = sample.previous_post.cycles - sample.previous_pre.cycles;
-                        }
-                    }
-                    sample.previous_pre = now;
-                    sample.previous_post = {};
-                }, {false, false, owner, STR("Measure the start of a diagnostic engine tick")});
+                    if (engine_profile.active) engine_profile.late = tick_mark();
+                }, {false, false, engine_profile_owner, STR("Measure after the diagnostic Lua schedule")});
             engine_profile_post = Hooks::RegisterEngineTickPostCallback(
                 [](auto&, RC::Unreal::UEngine*, float, bool) {
-                    if (engine_profile.active) engine_profile.previous_post = tick_mark();
-                }, {false, false, owner, STR("Measure the end of a diagnostic engine tick")});
-            if (engine_profile_pre == Hooks::ERROR_ID || engine_profile_post == Hooks::ERROR_ID)
+                    if (engine_profile.active) engine_profile.post = tick_mark();
+                }, {false, false, engine_profile_owner, STR("Measure the end of a diagnostic engine tick")});
+            if (engine_profile_late == Hooks::ERROR_ID || engine_profile_post == Hooks::ERROR_ID)
             {
                 stop_engine_tick_profile();
                 return 0;
@@ -361,16 +385,36 @@ namespace
         return 1;
     }
 
+    int witness_engine_tick_profile(const Lua&)
+    {
+        auto& sample = engine_profile;
+        if (sample.active && sample.early.micros > 0)
+        {
+            if (sample.late.micros == 0)
+                ++sample.scheduler_inside;
+            else
+                ++sample.scheduler_outside;
+        }
+        return 0;
+    }
+
     int finish_engine_tick_profile(const Lua& lua)
     {
-        if (lua.get_stack_size() != 0 || !engine_profile.active) return 0;
-        engine_profile.active = false;
-        lua.set_integer(engine_profile.count);
-        lua.set_integer(engine_profile.longest);
-        lua.set_integer(engine_profile.engine_micros);
-        lua.set_integer(static_cast<std::int64_t>(engine_profile.interval_cycles));
-        lua.set_integer(static_cast<std::int64_t>(engine_profile.engine_cycles));
-        return 5;
+        auto& sample = engine_profile;
+        if (lua.get_stack_size() != 0 || !sample.active) return 0;
+        sample.active = false;
+        lua.set_integer(sample.count);
+        lua.set_integer(sample.longest);
+        lua.set_integer(sample.pre_micros);
+        lua.set_integer(sample.engine_micros);
+        lua.set_integer(sample.between_micros);
+        lua.set_integer(static_cast<std::int64_t>(sample.interval_cycles));
+        lua.set_integer(static_cast<std::int64_t>(sample.pre_cycles));
+        lua.set_integer(static_cast<std::int64_t>(sample.engine_cycles));
+        lua.set_integer(static_cast<std::int64_t>(sample.between_cycles));
+        lua.set_integer(sample.scheduler_inside);
+        lua.set_integer(sample.scheduler_outside);
+        return 11;
     }
 
     int enqueue_input(const Lua& lua)
@@ -1027,7 +1071,9 @@ namespace silverfish::local_bridge
         if (timing_fixture_enabled())
         {
             lua.register_function("SilverfishBridgeProfileStamp", profile_stamp);
+            register_early_engine_tick_profile();
             lua.register_function("SilverfishBeginEngineTickProfile", begin_engine_tick_profile);
+            lua.register_function("SilverfishWitnessEngineTickProfile", witness_engine_tick_profile);
             lua.register_function("SilverfishFinishEngineTickProfile", finish_engine_tick_profile);
             lua.register_function("SilverfishFormatLocalStatusRowUncached", format_status_row<false>);
         }

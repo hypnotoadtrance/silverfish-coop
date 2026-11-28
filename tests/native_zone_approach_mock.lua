@@ -3,7 +3,7 @@ package.path = "mod/SilverfishCoop/Scripts/?.lua;" .. package.path
 
 local map, first, second = "/Game/Classes/Maps/Test", "Level_Exit_BP_C_1", "Level_Exit_BP_C_2"
 local auth, receipts, walls = false, {}, {}
-local now, shape_reads = 10, 0
+local now, shape_reads, lua_position_reads, native_position_reads = 10, 0, 0, 0
 os.clock = function() return now end
 local function point(x, y, z) return {X = x or 0, Y = y or 0, Z = z or 0} end
 local function object(methods)
@@ -97,7 +97,10 @@ end
 local function pawn(x)
     local player = actor()
     player.at, player.ignores = point(x), {}
-    player.K2_GetActorLocation = function(self) return self.at end
+    player.K2_GetActorLocation = function(self)
+        lua_position_reads = lua_position_reads + 1
+        return self.at
+    end
     player.CapsuleComponent = object({
         GetCollisionObjectType = function() return 2 end,
         GetCollisionResponseToChannel = function() return 2 end,
@@ -109,6 +112,15 @@ end
 local host, guest = pawn(900), pawn(1400)
 local state = {world = world, map = map, local_pawn = {pawn = host}, clients = 1,
     pawns = {{kind = "guest", pawn = guest}}}
+local position_scope = "current"
+local function read_approach_position(world_address, pawn_address)
+    assert(world_address == world:GetAddress() and pawn_address == host:GetAddress())
+    native_position_reads = native_position_reads + 1
+    if position_scope == "stale" then return end
+    if position_scope == "invalid" then return 0 / 0, 0, 0 end
+    return host.at.X, host.at.Y, host.at.Z
+end
+SilverfishReadNativeExitApproachPosition = read_approach_position
 local wall = require("zone_wall")
 local function tick(x)
     host.at = point(x)
@@ -120,18 +132,27 @@ local after_host_setup = shape_reads
 wall.sync(state, "hosting", nil, true)
 assert(shape_reads == after_host_setup, "A settled host should reuse verified geometry")
 auth = true
+local stock_reads_before = lua_position_reads
 tick(900)
 assert(#receipts == 0 and not host.ignores[walls[0]] and not host.ignores[walls[2000]], "distant walls remain closed")
 tick(-140)
 assert(receipts[#receipts] == first and host.ignores[walls[0]] and not host.ignores[walls[2000]], "only exact wall opens")
+assert(native_position_reads == 2 and lua_position_reads == stock_reads_before, "native polls avoid reflected position reads")
+position_scope = "stale"
 tick(-35)
 tick(-120)
 assert(receipts[#receipts] == "" and not host.ignores[walls[0]], "a clear retreat closes the wall")
+assert(lua_position_reads == stock_reads_before + 2, "stale native scope uses the stock position")
+position_scope = "invalid"
 tick(1850)
 assert(receipts[#receipts] == second and host.ignores[walls[2000]], "next wall requires its own authorization")
+assert(lua_position_reads == stock_reads_before + 3, "invalid native coordinates use the stock position")
 auth = false
+SilverfishReadNativeExitApproachPosition = nil
 tick(1870)
 assert(not host.ignores[walls[2000]], "native refusal restores collision")
+assert(lua_position_reads == stock_reads_before + 4, "an unavailable native reader preserves the stock path")
+position_scope, SilverfishReadNativeExitApproachPosition = "current", read_approach_position
 local approve_approach = SilverfishSetNativeExitApproach
 SilverfishSetNativeExitApproach = nil
 wall.sync(state, "hosting", nil, true)
