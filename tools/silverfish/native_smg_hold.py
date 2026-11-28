@@ -178,7 +178,7 @@ class Authority:
             area = self.host.last_game.get("map")
             pawn = self.host.native_recipients().get(character, {}).get("pawn")
             melee_input = getattr(self.host, "melee_input", None)
-            if (not current and token not in self.used and pawn and not (melee_input and melee_input.scope)
+            if (not current and token not in self.used and pawn and not (melee_input and character in melee_input.scopes)
                     and self._eligible(character, area, pawn, guid)):
                 return {KEY: await self._start(character, area, pawn, guid, token, *view)}
             raise party.RuleError("native_guest_held_fire_scope_unavailable")

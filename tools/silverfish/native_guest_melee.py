@@ -27,6 +27,7 @@ COMPACT_ACTIONS = frozenset((INPUT + "-start", INPUT + "-edge", SWING + "-start"
 REPLY_HEADER = "native-guest-melee-reply\t1\n"
 REPLY_BYTES = "native_guest_melee_reply_bytes"
 INPUT_KEY = "native_guest_melee_input_state"
+INPUTS_KEY = "native_guest_melee_input_states"
 INPUT_FIXTURE = "native-guest-melee-input-fixture"
 INPUT_FIXTURE_KEY = "native_guest_melee_input_fixture"
 AIM_FIXTURE = "native-guest-melee-aim-fixture"
@@ -273,7 +274,7 @@ class AuthorityInput:
 
     def __init__(self, host):
         self.host = host
-        self.scope: InputScope | None = None
+        self.scopes: dict[str, InputScope] = {}
         self.receipts: dict[tuple[str, str, str, str, str], dict] = {}
         self.report_scopes: dict[tuple[str, str, str, str], float] = {}
 
@@ -282,7 +283,9 @@ class AuthorityInput:
         raise RuntimeError(reason)
 
     def _proof(self, snapshot, scope=None):
-        frame = snapshot.get(INPUT_KEY, {})
+        frame = (snapshot.get(INPUTS_KEY, {}).get(str(scope.frame["serial"])) if scope else None)
+        if frame is None:
+            frame = snapshot.get(INPUT_KEY, {})
         if (scope is None or scope.observes(frame)) and frame.get("status", "").startswith(DIRTY):
             self._fail(frame["status"])
         if scope is not None and scope.observes(frame):
@@ -293,24 +296,22 @@ class AuthorityInput:
 
     def observe(self):
         host = self.host
-        if not self.scope:
-            return
-        scope = self.scope
-        if scope.epoch != host.zone_epoch or (host.last_game.get("map") or scope.area) != scope.area:
-            self.scope = None
-            return
-        if scope.frame["status"] in TERMINAL:
-            frame = scope.frame
-        elif scope.reply_sequence is not None and host.last_game.get("sequence", -1) <= scope.reply_sequence:
-            return
-        else:
-            frame = self._proof(host.last_game, scope)
-        if scope.observes(frame):
-            if frame["presses"] == frame["releases"]:
-                scope.held = None
-            if frame["status"] in TERMINAL:
-                host.control.event("native_guest_melee_input_settled", character_id=scope.character, **frame)
-                self.scope = None
+        for character, scope in tuple(self.scopes.items()):
+            if scope.epoch != host.zone_epoch or (host.last_game.get("map") or scope.area) != scope.area:
+                self.scopes.pop(character)
+                continue
+            if scope.frame["status"] in TERMINAL:
+                frame = scope.frame
+            elif scope.reply_sequence is not None and host.last_game.get("sequence", -1) <= scope.reply_sequence:
+                continue
+            else:
+                frame = self._proof(host.last_game, scope)
+            if scope.observes(frame):
+                if frame["presses"] == frame["releases"]:
+                    scope.held = None
+                if frame["status"] in TERMINAL:
+                    host.control.event("native_guest_melee_input_settled", character_id=character, **frame)
+                    self.scopes.pop(character)
 
     async def request(self, bridge, character, target, operation):
         parts = target.split("@") if isinstance(target, str) else []
@@ -328,7 +329,7 @@ class AuthorityInput:
             return self.receipts[receipt]
 
         self.observe()
-        scope = self.scope
+        scope = self.scopes.get(character)
         owner = host.native_recipients().get(character) or {}
         area, pawn = host.last_game.get("map"), owner.get("pawn")
         if scope and (character, epoch, area, pawn, guid, reports_npc) != (
@@ -343,7 +344,7 @@ class AuthorityInput:
                     or host.party["players"].get(character, {}).get("downed")
                     or character in host.party["pending_spawns"] or host.last_game.get("state") != "hosting"
                     or time.monotonic() - host.last_seen > 3 or not is_equipped(equipped, area, guid)
-                    or scope and scope.held or host.smg_holds and host.smg_holds.strokes
+                    or scope and scope.held or host.smg_holds and character in host.smg_holds.strokes
                     or any(receipt[:4] + (previous,) in self.receipts for previous in (*EDGES, TAP))):
                 raise party.RuleError("native_guest_melee_combat_busy")
             if scope is None and not await native_inventory.retain_guest_save(host, bridge, character, pawn):
@@ -374,7 +375,7 @@ class AuthorityInput:
                                                          prior_releases + (edge != "press")):
             self._fail("The stock melee input did not execute the exact edge")
         if scope is None:
-            scope = self.scope = InputScope(character, epoch, area, pawn, guid, frame, reports_npc=reports_npc)
+            scope = self.scopes[character] = InputScope(character, epoch, area, pawn, guid, frame, reports_npc=reports_npc)
         if reports_npc:
             now = time.monotonic()
             self.report_scopes = {key: until for key, until in self.report_scopes.items() if until > now and key[1] == epoch}
@@ -502,8 +503,8 @@ async def perform(host, bridge, action: str, character: str, guid: str, operatio
         equipped = host.last_game.get("native_guest_equipped_weapons", {}).get(pawn, {})
         if not is_equipped(equipped, area, guid):
             raise party.RuleError("native_guest_melee_exact_equipment_required")
-        if ordinary and ((host.smg_holds is not None and host.smg_holds.strokes)
-                         or (input_scope := getattr(host, "melee_input", None)) and input_scope.scope):
+        if ordinary and ((host.smg_holds is not None and character in host.smg_holds.strokes)
+                         or (input_scope := getattr(host, "melee_input", None)) and character in input_scope.scopes):
             raise party.RuleError("native_guest_melee_combat_busy")
     else:
         claimed = host.party.get(native_authored_pickup.STATE_KEY, {}).get(native_authored_pickup.OLD_PIPE, {})

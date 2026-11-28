@@ -27,7 +27,14 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
 local fixtures = enabled and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
     and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
-local latest, equipment, staged_aim, input_scope
+local latest, equipment, staged_aim
+local input_world, input_scopes
+local function current_scopes(world)
+    if not input_world or not input_world:IsValid() or input_world:GetAddress() ~= world:GetAddress() then
+        input_world, input_scopes = world, {}
+    end
+    return input_scopes
+end
 local receipt = require("native_combat_receipts").cache("native_guest_melee_operation_conflict")
 
 local function qualified_host(state, phase, testing)
@@ -77,6 +84,8 @@ local function command_input(fields, state, phase, standing)
         or type(SilverfishReadNativeGuestMeleeInput) ~= "function" then
         error("native_guest_melee_swing_unavailable", 0)
     end
+    local scopes = current_scopes(state.world)
+    local scope
     if fields[2] == input_start then
         local name, guid = fields[3], fields[4]
         local edge, mode = fields[5], fields[6]
@@ -95,22 +104,26 @@ local function command_input(fields, state, phase, standing)
         else
             proof = melee_input_proof(SilverfishStartNativeGuestMeleeInput(pawn:GetAddress(), save:GetAddress(), guid))
         end
-        latest = nil
-        input_scope = {map = state.map, pawn = name, guid = guid, proof = proof}
+        if latest and latest.pawn == name then latest = nil end
+        scope = {map = state.map, pawn = name, guid = guid, proof = proof}
+        scopes[name] = scope
     else
         local serial, edge = math.tointeger(fields[3]), fields[4]
-        if #fields ~= 4 or not input_scope or input_scope.map ~= state.map or serial ~= input_scope.proof.serial
+        for _, candidate in pairs(scopes) do
+            if candidate.proof.serial == serial then scope = candidate; break end
+        end
+        if #fields ~= 4 or not scope or scope.map ~= state.map
             or (edge ~= "press" and edge ~= "release" and edge ~= "cancel" and edge ~= "tap") then
             error("native_guest_melee_exact_edge_required", 0)
         end
-        if (edge == "press" or edge == "tap") and not exact_guest(state, phase, input_scope.pawn, standing) then
+        if (edge == "press" or edge == "tap") and not exact_guest(state, phase, scope.pawn, standing) then
             error("native_guest_melee_exact_owner_required", 0)
         end
         local proof = melee_input_proof(SilverfishApplyNativeGuestMeleeInputEdge(serial, edge))
         if proof.serial ~= serial then error("mutation_unverified_guest_melee_input_owner", 0) end
-        input_scope.proof = proof
+        scope.proof = proof
     end
-    return "stock guest melee input observed"
+    return "stock guest melee input observed", scope
 end
 
 local function finite(value)
@@ -396,7 +409,7 @@ function melee.command(fields, state, phase, standing)
         end
         latest = {map = state.map, pawn = name, guid = guid, address = pawn:GetAddress(), damage = damage,
             ordinary = ordinary, pose = pose, proof = proof, fixture_target = fixture_bound and target}
-        input_scope = nil
+        current_scopes(state.world)[name] = nil
         if latest.proof.status ~= "pending" and latest.pose then
             restore_pose(latest.pose)
             latest.pose = nil
@@ -456,13 +469,13 @@ end
 
 local function observe_command(fields, state, phase, status_row, standing)
     if fields[2] == contact_report then return reported_contact(fields, state, phase, status_row, standing) end
-    local accepted, message = pcall(melee.command, fields, state, phase, standing)
+    local accepted, message, scope = pcall(melee.command, fields, state, phase, standing)
     local report
     if accepted then
         if fields[2] == swing_start then
             if latest and latest.map == state.map then report = swing_row(latest, status_row) end
-        elseif input_scope and input_scope.map == state.map then
-            report = input_row(input_scope, status_row)
+        elseif scope and scope.map == state.map then
+            report = input_row(scope, status_row)
         end
         if not report then accepted, message = false, "mutation_unverified_guest_melee_readback" end
     end
@@ -494,15 +507,18 @@ function melee.rows(state, phase, status_row, standing)
         rows[#rows + 1] = status_row("native-guest-melee-equip", state.map, equipment.pawn, equipment.guid,
             equipment.ok and 1 or 0, equipment.status)
     end
-    if input_scope and input_scope.map == state.map then
-        local scope = input_scope
+    local scopes = current_scopes(state.world)
+    for name, scope in pairs(scopes) do
         local proof = scope.proof
         if proof.status == "pending" then
             proof = melee_input_proof(SilverfishReadNativeGuestMeleeInput(proof.serial))
             if proof.serial ~= scope.proof.serial then error("mutation_unverified_guest_melee_input_owner", 0) end
             scope.proof = proof
         end
-        rows[#rows + 1] = input_row(scope, status_row)
+        if scope.map == state.map then rows[#rows + 1] = input_row(scope, status_row) end
+        if scope.map ~= state.map or (proof.status ~= "pending" and not exact_guest(state, phase, name, standing)) then
+            scopes[name] = nil
+        end
     end
     if not latest or latest.map ~= state.map then return rows end
     local pawn = exact_guest(state, phase, latest.pawn, standing)

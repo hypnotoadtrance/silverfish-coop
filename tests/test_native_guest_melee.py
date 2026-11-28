@@ -164,7 +164,7 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
                 host.checkpoint_native.assert_not_awaited()
                 self.assertFalse(host.native_checkpoint_unsafe)
 
-    async def test_ordinary_refuses_other_equipped_guid_and_open_smg_scope(self):
+    async def test_ordinary_refuses_other_equipped_guid_and_own_active_combat_scope(self):
         host, snapshot = self.ordinary_fixture(False)
         bridge = SimpleNamespace(command=AsyncMock())
         args = host, bridge, melee.SWING, "guest", GUID, OPERATION
@@ -172,11 +172,26 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(party.RuleError, "exact_equipment_required"):
             await melee.perform(*args)
         snapshot["native_guest_equipped_weapons"]["exact pawn"]["guid"] = GUID
-        host.smg_holds = SimpleNamespace(strokes={"someone else": True})
+        host.smg_holds = SimpleNamespace(strokes={"guest": True})
+        with self.assertRaisesRegex(party.RuleError, "combat_busy"):
+            await melee.perform(*args)
+        host.smg_holds = None
+        host.melee_input = melee.AuthorityInput(host)
+        host.melee_input.scopes["guest"] = Mock()
         with self.assertRaisesRegex(party.RuleError, "combat_busy"):
             await melee.perform(*args)
         bridge.command.assert_not_awaited()
         host.checkpoint_native.assert_not_awaited()
+
+    async def test_ordinary_swing_can_start_while_another_guest_has_an_open_scope(self):
+        host, snapshot = self.ordinary_fixture(False)
+        bridge = SimpleNamespace(command=AsyncMock(return_value=snapshot))
+        host.melee_input = melee.AuthorityInput(host)
+        other = host.melee_input.scopes["other"] = Mock()
+        host.smg_holds = SimpleNamespace(strokes={"another character": True})
+        result = await melee.perform(host, bridge, melee.SWING, "guest", GUID, OPERATION)
+        self.assertEqual(result[melee.SWING_KEY], snapshot[melee.SWING_KEY])
+        self.assertIs(host.melee_input.scopes["other"], other)
 
     def test_only_ordinary_actual_contact_accepts_each_registered_actor(self):
         for area, profile in melee.BY_MAP.items():
@@ -311,7 +326,7 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
                 await handler.request(bridge, "guest", first + "@release", OPERATION)
             combo = await handler.request(bridge, "guest", second + "@tap", OPERATION)
         self.assertEqual(combo[melee.INPUT_KEY]["releases"], 2)
-        self.assertIsNone(handler.scope.held)
+        self.assertIsNone(handler.scopes.get("guest").held)
         self.assertEqual([call.args for call in bridge.command.await_args_list], [
             (melee.INPUT + "-start", "exact pawn", GUID, "tap"),
             (melee.INPUT + "-edge", "3", "tap"),
@@ -346,6 +361,47 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
             (melee.CONTACT_REPORT, pawn, payload),
         ])
 
+    async def test_two_held_swings_observe_and_release_their_own_serials(self):
+        host = self.host()
+        host.zone_epoch = "epoch"
+        host.control = Mock()
+        pawns = {"guest": "first pawn", "second": "second pawn"}
+        host.native_recipients = lambda: {key: {"connected": True, "pawn": pawn} for key, pawn in pawns.items()}
+        host.last_game["native_guest_equipped_weapons"] = {pawn: {"kind": "old-pipe", "guid": GUID} for pawn in pawns.values()}
+        host.party["players"]["second"] = {"downed": False}
+        handler = melee.AuthorityInput(host)
+
+        def frame(character, serial, releases=0, status="pending"):
+            return dict(map=CROSSROADS, pawn=pawns[character], guid=GUID, serial=serial, status=status,
+                        presses=1, releases=releases, contacts=0, hits=0, charged=0, combo=0)
+
+        running = (frame("guest", 3), frame("second", 4))
+        first_done = frame("guest", 3, 1, "settled")
+        second_done = frame("second", 4, 1, "settled")
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[
+            dict(host.last_game, **{melee.INPUT_KEY: proof}) for proof in (*running, first_done, second_done)]))
+
+        async def edge(character, action):
+            token = ("1" if character == "guest" else "2") * 32
+            return await handler.request(bridge, character, f"epoch@{GUID}@{token}@{action}@reports-npc", OPERATION)
+
+        with patch.object(melee.native_inventory, "retain_guest_save", new=AsyncMock(return_value=True)):
+            await edge("guest", "press")
+            await edge("second", "press")
+        self.assertEqual({character: scope.frame["serial"] for character, scope in handler.scopes.items()},
+                         {"guest": 3, "second": 4})
+        await edge("guest", "release")
+        host.last_game.update({melee.INPUTS_KEY: {"3": first_done, "4": running[1]}, melee.INPUT_KEY: running[1]})
+        handler.observe()
+        self.assertEqual(tuple(handler.scopes), ("second",))
+        self.assertEqual(handler.scopes["second"].held, "2" * 32)
+        await edge("second", "release")
+        handler.observe()
+        self.assertEqual(handler.scopes, {})
+        self.assertEqual([call.args for call in bridge.command.await_args_list[-2:]],
+                         [(melee.INPUT + "-edge", "3", "release"), (melee.INPUT + "-edge", "4", "release")])
+        host.checkpoint_native.assert_not_awaited()
+
     async def test_unsubmitted_melee_press_can_be_retried_without_mutation_or_receipt(self):
         host = self.host()
         host.zone_epoch = "epoch"
@@ -368,7 +424,7 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(melee.native_inventory, "retain_guest_save", new=AsyncMock(return_value=True)):
             with self.assertRaisesRegex(party.RuleError, "did not claim.*before it expired"):
                 await handler.request(bridge, "guest", target, OPERATION)
-            self.assertIsNone(handler.scope)
+            self.assertIsNone(handler.scopes.get("guest"))
             self.assertFalse(handler.receipts)
             self.assertFalse(host.native_checkpoint_unsafe)
             self.assertFalse(host.stopping)
@@ -414,7 +470,7 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(melee.native_inventory, "retain_guest_save", new=AsyncMock(return_value=True)):
             with self.assertRaisesRegex(party.RuleError, "native_guest_melee_reply_unavailable"):
                 await handler.request(bridge, "guest", f"epoch@{GUID}@{'1' * 32}@tap", OPERATION)
-        self.assertIsNone(handler.scope)
+        self.assertIsNone(handler.scopes.get("guest"))
         self.assertFalse(host.stopping)
         self.assertFalse(host.native_checkpoint_unsafe)
         self.assertEqual(bridge.command.await_count, 2)
@@ -447,7 +503,7 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
                 await edge(stranger, "release")
             with self.assertRaisesRegex(party.RuleError, "exact_edge_required"):
                 await edge(old, "release", epoch="superseded")
-            with self.assertRaisesRegex(party.RuleError, "combat_busy"):
+            with self.assertRaisesRegex(party.RuleError, "swing_unavailable"):
                 await edge(old, "release", character="stranger")
             await edge(old, "release")
             await edge(new, "press")
@@ -460,7 +516,7 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
         settled = frame(2, 2, 2, 2, combo=1, status="settled")
         host.last_game[melee.INPUT_KEY] = settled
         handler.observe()
-        self.assertIsNone(handler.scope)
+        self.assertIsNone(handler.scopes.get("guest"))
         host.control.event.assert_called_once_with("native_guest_melee_input_settled", character_id="guest", **settled)
         host.checkpoint_native.assert_not_awaited()
 
@@ -494,12 +550,12 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await handler.request(bridge, "guest", target + "@release", OPERATION), release)
         host.last_game.update(sequence=40, **{melee.INPUT_KEY: press[melee.INPUT_KEY]})
         handler.observe()
-        self.assertEqual(handler.scope.frame["releases"], 1)
+        self.assertEqual(handler.scopes.get("guest").frame["releases"], 1)
         self.assertFalse(host.stopping)
         settled = dict(release[melee.INPUT_KEY], status="settled", contacts=1, hits=1)
         host.last_game.update(sequence=42, **{melee.INPUT_KEY: settled})
         handler.observe()
-        self.assertIsNone(handler.scope)
+        self.assertIsNone(handler.scopes.get("guest"))
         host.control.event.assert_called_once_with("native_guest_melee_input_settled", character_id="guest", **settled)
         self.assertEqual(bridge.local_bridge.command.await_count, 2)
         host.checkpoint_native.assert_not_awaited()

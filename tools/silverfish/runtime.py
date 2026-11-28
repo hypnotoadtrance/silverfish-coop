@@ -1713,7 +1713,10 @@ class Bridge:
                 elif fields[0] == native_guest_melee.INPUT_STATE:
                     row = native_guest_melee.parse_input_state(fields)
                     if row and (data.get("state"), data.get("map")) == ("hosting", row["map"]):
-                        data[native_guest_melee.INPUT_KEY] = row
+                        data.setdefault(native_guest_melee.INPUTS_KEY, {})[str(row["serial"])] = row
+                        latest = data.get(native_guest_melee.INPUT_KEY)
+                        if latest is None or row["serial"] > latest["serial"]:
+                            data[native_guest_melee.INPUT_KEY] = row
                 elif fields[0] == native_guest_melee.INPUT_FIXTURE and len(fields) == 7:
                     _, area, pawn, guid, sequence, stroke, edge = fields
                     record = "\t".join((native_guest_melee.INPUT_RECORD, sequence, area, pawn, guid, "melee", edge, stroke, "0"))

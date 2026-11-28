@@ -144,11 +144,12 @@ local function corpse_carry(action, world, pawn, actor, host)
     error("unknown corpse probe action")
 end
 
-local function authoritative_guest(world)
+local function authoritative_guest(world, name)
     local guest
     for _, candidate in ipairs(FindAllOf("Player_FP_C") or {}) do
         if valid(candidate) and not candidate:IsActorBeingDestroyed() and candidate:HasAuthority()
-            and not candidate:IsLocallyControlled() and same(candidate:GetWorld(), world) then
+            and not candidate:IsLocallyControlled() and same(candidate:GetWorld(), world)
+            and (not name or candidate:GetFullName() == name) then
             assert(not guest, "expected one authoritative guest")
             guest = candidate
         end
@@ -179,8 +180,8 @@ local function guid_of(row)
     return ("%08X%08X%08X%08X"):format(id.A & 0xffffffff, id.B & 0xffffffff, id.C & 0xffffffff, id.D & 0xffffffff)
 end
 
-local function seed_pipe(world, path)
-    local guest = authoritative_guest(world)
+local function seed_pipe(world, path, owner)
+    local guest = owner or authoritative_guest(world)
     local class = StaticFindObject(path)
     if not valid(class) then LoadAsset(path); class = StaticFindObject(path) end
     local factory = StaticFindObject(factory_path)
@@ -263,8 +264,8 @@ local function melee_lane(guest, target, angle)
     return count > 0, ("sphere hits=%d, blocking=%s, out=%s"):format(count, tostring(blocking), type(sphere.OutHits))
 end
 
-local function stage_melee(world, attempt, prop)
-    local guest = authoritative_guest(world)
+local function stage_melee(world, attempt, prop, owner)
+    local guest = owner or authoritative_guest(world)
     local target = prop or melee_target(world, true)
     local eye = guest.Camera:K2_GetComponentLocation()
     assert(valid(target) and target:HasAuthority() and (prop or target.Alive and target.bReplicates),
@@ -2392,6 +2393,47 @@ local function run(action, actor_path)
         end
         rivalry = nil
         return "cleared"
+    elseif action == "multi-melee-equip" then
+        assert(host, "only the host can seed the fixture loadout")
+        return seed_pipe(world, pipe_path, authoritative_guest(world, actor_path))
+    elseif action == "multi-melee-stage" then
+        assert(host, "only the host can stage the fixture target")
+        local first, second = actor_path:match("^(.-)|(.+)$")
+        assert(first and second)
+        local guest, other = authoritative_guest(world, first), authoritative_guest(world, second)
+        assert(not same(guest, other))
+        local target = spawn_stock_npc(pawn, world, "state")
+        target.Melee_SweepRange = 0
+        stage_melee(world, 1, nil, guest)
+        target.Max_Health = 300
+        target.Health = 300
+        local center = target:K2_GetActorLocation()
+        local initial = guest:K2_GetActorLocation()
+        local angle = math.atan(initial.Y - center.Y, initial.X - center.X)
+        local ready
+        for _, step in ipairs({100, -100, 150, -150, 65, -65}) do
+            local radians = angle + math.rad(step)
+            local candidate = {X=center.X+165*math.cos(radians), Y=center.Y+165*math.sin(radians), Z=initial.Z}
+            if other:K2_TeleportTo(candidate, heading(candidate, center)) then
+                local eye = other.Camera:K2_GetComponentLocation()
+                if melee_lane(other, target, heading(eye, center)) and math.sqrt(
+                    (candidate.X-initial.X)^2 + (candidate.Y-initial.Y)^2) >= 110 then
+                    ready = true
+                    break
+                end
+            end
+        end
+        assert(ready, "second guest has no stock melee lane to the target")
+        guest:ForceNetUpdate()
+        other:ForceNetUpdate()
+        return table.concat({point_string(center), point_string(guest:K2_GetActorLocation()),
+            point_string(other:K2_GetActorLocation())}, ";")
+    elseif action == "multi-melee-target" then
+        local center = position(actor_path)
+        local target = melee_target(world, host, center)
+        if not valid(target) then return "waiting" end
+        local key = require("native_npc_barter_identity").key(target)
+        return key and ("npc:%d;%.3f"):format(tonumber(key:sub(-4), 16), target.Health) or "waiting"
     elseif action == "seed-melee-edges" then
         assert(host, "only the host can grant the fixture item")
         return seed_pipe(world, pipe_path)
