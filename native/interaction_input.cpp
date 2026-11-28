@@ -2368,9 +2368,8 @@ namespace
         std::array<Unreal::FObjectProperty*, 6> assets{};
         std::array<Unreal::FStructProperty*, 3> colors{};
         std::array<Unreal::FFloatProperty*, 4> channels{};
-        Unreal::FProperty* eye{};
-        Unreal::FNumericProperty* eye_storage{};
-        bool unsigned_eye{};
+        Unreal::FIntProperty* eye{};
+        std::string_view binding_error{};
         std::uint64_t bound_generation{};
 
         static bool within(Unreal::FProperty* property, int size)
@@ -2379,15 +2378,16 @@ namespace
                 property->GetOffset_Internal() >= 0 && property->GetOffset_Internal() <= size - property->GetSize();
         }
 
-        bool bind(Unreal::UClass* type)
+        std::string_view bind(Unreal::UClass* type)
         {
             auto* stock = find<Unreal::UClass>(STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"));
             auto* appearance = find<Unreal::UScriptStruct>(
                 STR("/Game/Classes/Libraries/Structs/PlayerCharacter_Struct.PlayerCharacter_Struct"));
             auto* linear_color = find<Unreal::UScriptStruct>(STR("/Script/CoreUObject.LinearColor"));
-            if (!stock || stock != type || !appearance || !linear_color) return false;
+            if (!stock || stock != type || !appearance || !linear_color) return "stock appearance types";
             character = field<Unreal::FStructProperty>(stock, STR("Character"));
-            if (!within(character, stock->GetPropertiesSize()) || character->GetStruct().Get() != appearance) return false;
+            if (!within(character, stock->GetPropertiesSize()) || character->GetStruct().Get() != appearance)
+                return "save character layout";
             constexpr std::array asset_names{
                 STR("Mesh_Head_60_630BB776410363C64BE2C89A3F72B1C5"),
                 STR("Mesh_Plumage_80_4B6C3DD94D27DEC901D6829472D5F546"),
@@ -2396,16 +2396,13 @@ namespace
                 STR("Mesh_Tail_SK_77_F2B7A1A441682020D88D3AA95D84A47E"),
                 STR("ScalePattern_89_1A2997C4406AB83801A3CAA377A49D3A"),
             };
-            auto* mesh = find<Unreal::UClass>(STR("/Script/Engine.StaticMesh"));
-            auto* skeletal = find<Unreal::UClass>(STR("/Script/Engine.SkeletalMesh"));
-            auto* texture = find<Unreal::UClass>(STR("/Script/Engine.Texture2D"));
-            if (!mesh || !skeletal || !texture) return false;
-            const std::array asset_classes{mesh, mesh, skeletal, mesh, skeletal, texture};
             for (std::size_t i = 0; i < asset_names.size(); ++i)
             {
                 auto* property = field<Unreal::FObjectProperty>(appearance, asset_names[i]);
-                if (!within(property, character->GetSize()) || property->GetPropertyClass().Get() != asset_classes[i])
-                    return false;
+                // ScalePattern is declared as Texture. Lua owns asset admissibility;
+                // this read only compares the current hard reference to its sample.
+                if (!within(property, character->GetSize()) || property->GetSize() != sizeof(Unreal::UObject*))
+                    return "appearance asset layout";
                 assets[i] = property;
             }
             constexpr std::array color_names{
@@ -2418,28 +2415,21 @@ namespace
             {
                 auto* property = field<Unreal::FStructProperty>(appearance, color_names[i]);
                 if (!within(property, character->GetSize()) || property->GetStruct().Get() != linear_color ||
-                    property->GetSize() != sizeof(float) * channels.size()) return false;
+                    property->GetSize() != sizeof(float) * channels.size()) return "appearance color layout";
                 colors[i] = property;
             }
             for (std::size_t i = 0; i < channel_names.size(); ++i)
             {
                 auto* property = field<Unreal::FFloatProperty>(linear_color, channel_names[i]);
                 if (!within(property, colors.front()->GetSize()) || property->GetSize() != sizeof(float) ||
-                    property->GetOffset_Internal() != static_cast<int>(i * sizeof(float))) return false;
+                    property->GetOffset_Internal() != static_cast<int>(i * sizeof(float))) return "linear color channel layout";
                 channels[i] = property;
             }
-            eye = field<Unreal::FProperty>(appearance, STR("EyeType_83_470E782541AF25166B548AA28A834625"));
-            if (!within(eye, character->GetSize())) return false;
-            auto* enumeration = Unreal::CastField<Unreal::FEnumProperty>(eye);
-            eye_storage = enumeration ? enumeration->GetUnderlyingProperty() : Unreal::CastField<Unreal::FNumericProperty>(eye);
-            if (!eye_storage || !eye_storage->IsInteger() || eye_storage->GetArrayDim() != 1 ||
-                eye_storage->GetSize() != eye->GetSize() || eye->GetSize() > sizeof(std::int32_t)) return false;
-            constexpr auto unsigned_types = Unreal::CASTCLASS_FByteProperty | Unreal::CASTCLASS_FUInt16Property |
-                                            Unreal::CASTCLASS_FUInt32Property;
-            unsigned_eye = (eye_storage->GetClass().GetClassCastFlags() & unsigned_types) != 0;
+            eye = field<Unreal::FIntProperty>(appearance, STR("EyeType_83_470E782541AF25166B548AA28A834625"));
+            if (!within(eye, character->GetSize()) || eye->GetSize() != sizeof(std::int32_t)) return "appearance eye layout";
             character_type = appearance;
             color_type = linear_color;
-            return true;
+            return {};
         }
     };
 
@@ -2447,62 +2437,79 @@ namespace
     {
         auto* stack = lua.get_lua_state();
         constexpr int sample_index = 4;
-        if (lua_gettop(stack) != sample_index || !lua_isinteger(stack, 1) || !lua_isinteger(stack, 2) ||
-            !lua_isinteger(stack, 3) || !lua_istable(stack, sample_index) || !lua_checkstack(stack, 3)) return 0;
+        const auto arguments = lua_gettop(stack);
+        const bool diagnostic = arguments == sample_index + 1 && lua_isboolean(stack, sample_index + 1) &&
+            lua_toboolean(stack, sample_index + 1) && env_flag("SILVERFISH_COOP_HEADLESS") &&
+            env_flag("SILVERFISH_COOP_TITLE_FIXTURES");
+        if ((arguments != sample_index && !diagnostic) || !lua_checkstack(stack, 3)) return 0;
+        const auto refuse = [&](std::string_view reason) {
+            if (!diagnostic) return 0;
+            lua_settop(stack, arguments);
+            lua_pushnil(stack);
+            lua_pushlstring(stack, reason.data(), reason.size());
+            return 2;
+        };
+        const auto respond = [&](bool matches, std::string_view reason) {
+            lua_settop(stack, arguments);
+            lua_pushboolean(stack, matches);
+            if (!diagnostic || matches) return 1;
+            lua_pushlstring(stack, reason.data(), reason.size());
+            return 2;
+        };
+        if (!lua_isinteger(stack, 1) || !lua_isinteger(stack, 2) || !lua_isinteger(stack, 3) ||
+            !lua_istable(stack, sample_index)) return refuse("appearance arguments");
         auto* pawn = host_avatar_pawn(lua_tointeger(stack, 1), lua_tointeger(stack, 2));
         auto* host = scope.pawn.Get();
         auto* instance = scope.instance.Get();
         if (!pawn || !live(host) || !live(instance) || object_field(scope.world.Get(), STR("OwningGameInstance")) != instance)
-            return 0;
+            return refuse("appearance pawn scope");
         auto* save = object_field(pawn, STR("Save"));
         auto* canonical = object_field(instance, STR("SaveSlot_Ref"));
         if (address(save) != lua_tointeger(stack, 3) || !live(save) || !live(canonical) ||
             (pawn == host ? save != canonical : save == canonical || object_field(host, STR("Save")) != canonical))
-            return 0;
+            return refuse("appearance save scope");
 
         static AvatarAppearance schema;
         auto* save_class = save->GetClassPrivate();
-        if (save_class != canonical->GetClassPrivate()) return 0;
+        if (save_class != canonical->GetClassPrivate()) return refuse("appearance save class");
         if (schema.save_class.Get() != save_class || schema.bound_generation != scope.generation)
         {
             schema = {};
             schema.save_class = save_class;
             schema.bound_generation = scope.generation;
-            if (!schema.bind(save_class)) return 0;
+            schema.binding_error = schema.bind(save_class);
         }
-        if (!schema.character_type.Get() || !schema.color_type.Get()) return 0;
+        if (!schema.binding_error.empty()) return refuse(schema.binding_error);
+        if (!schema.character_type.Get() || !schema.color_type.Get()) return refuse("appearance type expired");
         auto* appearance = schema.character->ContainerPtrToValuePtr<void>(save);
-        const auto respond = [&](bool matches) {
-            lua_settop(stack, sample_index);
-            lua_pushboolean(stack, matches);
-            return 1;
-        };
         lua_pushliteral(stack, "addresses");
-        if (lua_rawget(stack, sample_index) != LUA_TTABLE) return 0;
+        if (lua_rawget(stack, sample_index) != LUA_TTABLE) return refuse("appearance asset sample");
         for (std::size_t i = 0; i < schema.assets.size(); ++i)
         {
             auto* field = schema.assets[i];
             auto* asset = field->GetObjectPropertyValue(field->ContainerPtrToValuePtr<void>(appearance));
-            if (asset && !live(asset)) return 0;
+            if (asset && !live(asset)) return refuse("appearance asset lifetime");
             const auto type = lua_rawgeti(stack, -1, static_cast<lua_Integer>(i + 1));
             const bool missing = type == LUA_TBOOLEAN && !lua_toboolean(stack, -1);
-            if (!missing && !lua_isinteger(stack, -1)) return 0;
+            if (!missing && !lua_isinteger(stack, -1)) return refuse("appearance asset sample value");
             const bool matches = asset ? !missing && lua_tointeger(stack, -1) == address(asset) : missing;
-            if (!matches) return respond(false);
+            if (!matches) return respond(false, "appearance asset changed");
             lua_pop(stack, 1);
         }
         lua_pop(stack, 1);
         lua_pushliteral(stack, "colors");
-        if (lua_rawget(stack, sample_index) != LUA_TTABLE) return 0;
+        if (lua_rawget(stack, sample_index) != LUA_TTABLE) return refuse("appearance color sample");
         for (std::size_t i = 0; i < schema.colors.size(); ++i)
         {
-            if (lua_rawgeti(stack, -1, static_cast<lua_Integer>(i + 1)) != LUA_TTABLE) return 0;
+            if (lua_rawgeti(stack, -1, static_cast<lua_Integer>(i + 1)) != LUA_TTABLE)
+                return refuse("appearance color sample row");
             const auto* color = schema.colors[i]->ContainerPtrToValuePtr<void>(appearance);
             for (std::size_t j = 0; j < schema.channels.size(); ++j)
             {
-                if (lua_rawgeti(stack, -1, static_cast<lua_Integer>(j + 1)) != LUA_TNUMBER) return 0;
+                if (lua_rawgeti(stack, -1, static_cast<lua_Integer>(j + 1)) != LUA_TNUMBER)
+                    return refuse("appearance color sample value");
                 if (schema.channels[j]->GetPropertyValueInContainer(color) != lua_tonumber(stack, -1))
-                    return respond(false);
+                    return respond(false, "appearance color changed");
                 lua_pop(stack, 1);
             }
             lua_pop(stack, 1);
@@ -2510,11 +2517,9 @@ namespace
         lua_pop(stack, 1);
         lua_pushliteral(stack, "eye");
         lua_rawget(stack, sample_index);
-        if (!lua_isinteger(stack, -1)) return 0;
-        auto* eye = schema.eye->ContainerPtrToValuePtr<void>(appearance);
-        const auto actual = schema.unsigned_eye ? static_cast<std::int64_t>(schema.eye_storage->GetUnsignedIntPropertyValue(eye))
-                                               : schema.eye_storage->GetSignedIntPropertyValue(eye);
-        return respond(actual == lua_tointeger(stack, -1));
+        if (!lua_isinteger(stack, -1)) return refuse("appearance eye sample");
+        return respond(schema.eye->GetPropertyValueInContainer(appearance) == lua_tointeger(stack, -1),
+                       "appearance eye changed");
     }
 
     struct HeadRotationWriter

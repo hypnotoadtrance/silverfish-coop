@@ -689,7 +689,10 @@ function SilverfishProfileAvatarAppearance()
         local sample = assert(observed_characters[address], "Missing qualified appearance sample")
         local save = sample.save
         local save_address = save:GetAddress()
-        assert(matches(world, address, save_address, sample) == true, "Native appearance did not match stock")
+        local seat = pawn:IsLocallyControlled() and "host" or "guest"
+        local matched, reason = matches(world, address, save_address, sample, true)
+        assert(matched == true, ("Native appearance %s comparison failed: %s (%s)"):format(seat,
+            tostring(matched), tostring(reason)))
         assert(matches(world + 1, address, save_address, sample) == nil
             and matches(world, address + 1, save_address, sample) == nil
             and matches(world, address, save_address + 1, sample) == nil,
@@ -707,7 +710,6 @@ function SilverfishProfileAvatarAppearance()
         assert(matches(world, address, save_address, sample) == true, "Appearance edits were not restored")
         local native_ms, native_kib = measure(fast, expected)
         local lua_ms, lua_kib = measure(stock, expected)
-        local seat = pawn:IsLocallyControlled() and "host" or "guest"
         return ("%s,%.3f,%.3f,%.3f,%.3f"):format(seat, native_ms, lua_ms, native_kib, lua_kib)
     end
     local running = collectgarbage("isrunning")
