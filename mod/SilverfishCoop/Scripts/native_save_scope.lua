@@ -27,14 +27,19 @@ local function same(first, second)
     return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
 end
 
-local function install_guest(world, guest)
-    if active.native then
-        if type(SilverfishPrepareNativeGuestSaveView) ~= "function"
-            or SilverfishPrepareNativeGuestSaveView(world, guest.instance, guest.save, active.id) ~= true then
-            error("The game did not retain the isolated co-op guest view", 0)
-        end
-        return
+local function prepare_native_guest(world)
+    local prepare = SilverfishPrepareNativeGuestSaveView
+    local save = type(prepare) == "function" and prepare(world, active.id)
+    if not valid(save) then error("The game did not retain the isolated co-op guest view", 0) end
+    local guest = active.guest
+    if guest then
+        if not same(guest.save, save) then error("The isolated co-op guest view changed identity", 0) end
+    else
+        active.guest = {instance = world.OwningGameInstance, save = save, slot = "SFCoopGuest_" .. active.id}
     end
+end
+
+local function install_guest(guest)
     local instance = guest.instance
     instance.SaveSlot_Ref = guest.save
     instance.CurrentSaveSlot = guest.slot
@@ -48,6 +53,10 @@ end
 function scope.prepare_guest(state)
     if not active or not valid(state.world) or state.listening and not state.server then
         error("The guest save view requires a private co-op scope", 0)
+    end
+    if active.native then
+        prepare_native_guest(state.world)
+        return
     end
     local instance = state.world.OwningGameInstance
     local class, api = StaticFindObject(save_class), StaticFindObject("/Script/Engine.Default__GameplayStatics")
@@ -63,15 +72,11 @@ function scope.prepare_guest(state)
         if not valid(save) or not same(save:GetClass(), class) or same(save, instance.SaveSlot_Ref) then
             error("The game could not allocate the isolated co-op guest view", 0)
         end
-        local guest = {instance = instance, save = save, slot = "SFCoopGuest_" .. active.id}
-        if not active.native then
-            guest.previous_save = instance.SaveSlot_Ref
-            guest.previous_slot = text(instance.CurrentSaveSlot)
-            guest.previous_autosave = instance.SaveAfterTransition
-        end
-        active.guest = guest
+        active.guest = {instance = instance, save = save, slot = "SFCoopGuest_" .. active.id,
+            previous_save = instance.SaveSlot_Ref, previous_slot = text(instance.CurrentSaveSlot),
+            previous_autosave = instance.SaveAfterTransition}
     end
-    install_guest(state.world, active.guest)
+    install_guest(active.guest)
 end
 
 local function bounded_integer(value, low, high)
@@ -137,9 +142,14 @@ function scope.bind_guest(state, phase)
     if not valid(pawn) or pawn:HasAuthority() or not pawn:IsLocallyControlled()
         or not same(pawn:GetWorld(), state.world) or not same(pawn.Controller, state.controller) then return end
     local guest = active.guest
-    if active.native or not same(guest.instance.SaveSlot_Ref, guest.save)
-        or text(guest.instance.CurrentSaveSlot) ~= guest.slot or guest.instance.SaveAfterTransition ~= false then
-        install_guest(state.world, guest)
+    if active.native then
+        local rebind = SilverfishRebindNativeGuestSaveView
+        if type(rebind) ~= "function" or rebind(state.world, active.id) ~= true then
+            error("The game did not retain the isolated co-op guest view", 0)
+        end
+    elseif not same(guest.instance.SaveSlot_Ref, guest.save) or text(guest.instance.CurrentSaveSlot) ~= guest.slot
+        or guest.instance.SaveAfterTransition ~= false then
+        install_guest(guest)
     end
     if not same(pawn.Save, guest.save) then
         pawn.Save = guest.save
@@ -262,8 +272,8 @@ function scope.release(id, world)
         error("The co-op save scope did not match", 0)
     end
     local guest = active.guest
-    if guest and active.native then
-        if SilverfishRestoreNativeGuestSaveView(world, id) ~= true then
+    if active.native then
+        if (guest or valid(world)) and SilverfishRestoreNativeGuestSaveView(world, id) ~= true then
             error("The isolated co-op guest view could not be restored", 0)
         end
     elseif guest and valid(guest.instance) then

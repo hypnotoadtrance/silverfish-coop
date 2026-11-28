@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -50,6 +51,14 @@ namespace
     };
 
     std::optional<GuestView> guest;
+    bool creating_guest{}, guest_restored{};
+
+    struct GuestReference
+    {
+        U::FWeakObjectPtr instance, save;
+    };
+
+    std::optional<GuestReference> retired_guest;
 
     struct Target
     {
@@ -194,23 +203,133 @@ namespace
         return GuestFields{instance, save_class, save, slot, autosave, step, at_title};
     }
 
-    bool capture_guest(const GuestFields& fields, U::UObject* save, std::string_view id)
+    U::UObject* create_guest_save(U::UClass* save_class)
     {
-        if (!live(save) || save->GetClassPrivate() != fields.save_class) return false;
-        std::scoped_lock lock{lifecycle};
-        if (!selected || selected->id != id) return false;
-        if (!guest)
+        static U::FWeakObjectPtr receiver_cache, function_cache, save_type;
+        const auto resolve = [](U::FWeakObjectPtr& cache, const U::TCHAR* path) {
+            if (auto* value = cache.Get()) return value;
+            auto* value = U::FUObjectHashTables::StaticFindObjectByPath(nullptr, path, false, true);
+            cache = value;
+            return value;
+        };
+        auto* receiver = resolve(receiver_cache, STR("/Script/Engine.Default__GameplayStatics"));
+        auto* function = U::Cast<U::UFunction>(resolve(function_cache, STR("/Script/Engine.GameplayStatics:CreateSaveGameObject")));
+        auto* base = loaded_class(save_type, STR("/Script/Engine.SaveGame"));
+        auto* input = field<U::FClassProperty>(function, STR("SaveGameClass"));
+        auto* output = field<U::FObjectProperty>(function, STR("ReturnValue"));
+        struct Arguments { U::UClass* type; U::UObject* result{}; } args{save_class};
+        if (!receiver || !receiver->HasAnyFlags(U::RF_ClassDefaultObject) || !function || !base || !save_class->IsChildOf(base) ||
+            function->GetOuterPrivate() != receiver->GetClassPrivate() ||
+            !function->HasAllFunctionFlags(U::FUNC_Native | U::FUNC_Static) || function->GetNumParms() != 2 ||
+            function->GetParmsSize() != sizeof(Arguments) || !input || !input->HasAnyPropertyFlags(U::CPF_Parm) ||
+            input->GetSize() != sizeof(args.type) || input->GetOffset_Internal() != offsetof(Arguments, type) ||
+            input->GetMetaClass().Get() != base || !output || output != function->GetReturnProperty() ||
+            output->GetSize() != sizeof(args.result) || output->GetOffset_Internal() != offsetof(Arguments, result) ||
+            output->GetPropertyClass().Get() != base) return nullptr;
+        receiver->ProcessEvent(function, &args);
+        auto* outer = live(args.result) ? args.result->GetOuterPrivate() : nullptr;
+        return live(outer) && outer->GetPathName() == STR("/Engine/Transient") &&
+            args.result->GetClassPrivate() == save_class ? args.result : nullptr;
+    }
+
+    U::FArrayProperty* save_references(U::UObject* instance)
+    {
+        auto* references = field<U::FArrayProperty>(instance, STR("ReferencedObjects"));
+        auto* entry = references ? U::CastField<U::FObjectProperty>(references->GetInner()) : nullptr;
+        return entry && entry->GetArrayDim() == 1 ? references : nullptr;
+    }
+
+    // GameInstance's reflected references keep the one private Save alive if
+    // stock swaps SaveSlot_Ref between a client visit and a return to title.
+    bool reference_guest(U::UObject* instance, U::UObject* save, bool retain)
+    {
+        if (!live(instance) || !live(save)) return !retain;
+        auto* references = save_references(instance);
+        if (!references) return false;
+        auto* entry = U::CastField<U::FObjectProperty>(references->GetInner());
+        U::FScriptArrayHelper objects(references, references->ContainerPtrToValuePtr<void>(instance));
+        for (int index = 0; index < objects.Num(); ++index)
         {
-            auto* previous = fields.current_save();
-            auto* outer = save->GetOuterPrivate();
-            if (!fields.at_title || previous == save || !live(outer) || outer->GetPathName() != STR("/Engine/Transient"))
-                return false;
-            guest = GuestView{fields.instance, save, live(previous) ? previous : nullptr,
-                L"SFCoopGuest_" + RC::to_wstring(id), std::wstring{fields.current_slot()}, fields.current_autosave()};
+            if (entry->GetObjectPropertyValue(objects.GetRawPtr(index)) != save) continue;
+            if (retain) return false;
+            objects.RemoveValues(index, 1);
+            return true;
         }
-        if (guest->instance.Get() != fields.instance || guest->save.Get() != save) return false;
+        if (!retain) return true;
+        const auto index = objects.AddValue();
+        if (index < 0 || index >= objects.Num()) return false;
+        auto* storage = objects.GetRawPtr(index);
+        entry->SetObjectPropertyValue(storage, save);
+        if (entry->GetObjectPropertyValue(storage) == save) return true;
+        objects.RemoveValues(index, 1);
+        return false;
+    }
+
+    bool release_retired_guest()
+    {
+        if (!retired_guest) return true;
+        if (!U::IsInGameThreadRaw() || !reference_guest(retired_guest->instance.Get(), retired_guest->save.Get(), false))
+            return false;
+        retired_guest.reset();
+        return true;
+    }
+
+    void retire_guest()
+    {
+        if (guest)
+        {
+            retired_guest = GuestReference{guest->instance, guest->save};
+            guest.reset();
+        }
+        release_retired_guest();
+    }
+
+    U::UObject* install_guest(const GuestFields& fields)
+    {
+        auto* save = guest->save.Get();
+        if (guest->instance.Get() != fields.instance || !live(save) || save->GetClassPrivate() != fields.save_class) return nullptr;
         fields.install(save, guest->slot);
-        return fields.installed(save, guest->slot);
+        return fields.installed(save, guest->slot) ? save : nullptr;
+    }
+
+    U::UObject* prepare_guest(U::UWorld* world, std::string_view id)
+    {
+        const auto fields = guest_fields(world);
+        if (!fields) return nullptr;
+        std::shared_ptr<const Route> lease;
+        {
+            std::scoped_lock lock{lifecycle};
+            if (!selected || selected->id != id || creating_guest || guest_restored) return nullptr;
+            if (guest) return install_guest(*fields);
+            if (!fields->at_title || !save_references(fields->instance)) return nullptr;
+            lease = selected;
+            creating_guest = true;
+        }
+        struct FinishCreation
+        {
+            ~FinishCreation()
+            {
+                std::scoped_lock lock{lifecycle};
+                creating_guest = false;
+            }
+        } finish_creation;
+
+        // Release the lifecycle lock while the engine executes the reflected
+        // constructor. Recheck the route and live objects before installing.
+        U::FWeakObjectPtr owning_world{world}, owning_instance{fields->instance};
+        auto* save = create_guest_save(fields->save_class);
+        const auto current = guest_fields(U::Cast<U::UWorld>(owning_world.Get()));
+        if (!save || !current || !current->at_title || current->instance != owning_instance.Get() ||
+            current->save_class != fields->save_class) return nullptr;
+
+        std::scoped_lock lock{lifecycle};
+        if (selected != lease || guest || !live(save) || current->current_save() == save) return nullptr;
+        auto* previous = current->current_save();
+        GuestView snapshot{current->instance, save, live(previous) ? previous : nullptr,
+            L"SFCoopGuest_" + RC::to_wstring(id), std::wstring{current->current_slot()}, current->current_autosave()};
+        if (!reference_guest(current->instance, save, true)) return nullptr;
+        guest.emplace(std::move(snapshot));
+        return install_guest(*current);
     }
 
     bool remember_travel_step(const GuestFields& fields, U::UObject* save, std::string_view id, double step)
@@ -248,7 +367,9 @@ namespace
             (restore_save && fields.current_save() != previous) || fields.current_autosave() != guest->previous_autosave ||
             (restore_travel && fields.travel_step->GetPropertyValueInContainer(fields.instance) != *guest->previous_travel_step))
             return false;
+        if (!reference_guest(fields.instance, save, false)) return false;
         guest.reset();
+        guest_restored = true;
         return true;
     }
 
@@ -403,20 +524,47 @@ namespace
         return valid ? lua.get_userdata<Wrapper>(index, true).get_remote_cpp_object() : Object{};
     }
 
-    int guest_command(const Lua& lua, bool remember)
+    int lua_prepare_guest(const Lua& lua)
     {
         if (!U::IsInGameThreadRaw()) return 0;
         auto* stack = lua.get_lua_state();
-        const auto id = stack_id(stack, 4, remember ? 5 : 4);
+        const auto id = stack_id(stack, 2, 2);
+        auto* save = scope_id(id) ? prepare_guest(wrapped<RC::LuaType::UWorld>(lua, 1, "UWorld"), id) : nullptr;
+        if (!save) return 0;
+        RC::LuaType::auto_construct_object(lua, save);
+        return 1;
+    }
+
+    int lua_rebind_guest(const Lua& lua)
+    {
+        if (!U::IsInGameThreadRaw()) return 0;
+        auto* stack = lua.get_lua_state();
+        const auto id = stack_id(stack, 2, 2);
+        const auto fields = scope_id(id) ? guest_fields(wrapped<RC::LuaType::UWorld>(lua, 1, "UWorld")) : std::nullopt;
         bool accepted{};
-        if (scope_id(id) && (!remember || lua_type(stack, 5) == LUA_TNUMBER))
+        if (fields)
+        {
+            std::scoped_lock lock{lifecycle};
+            accepted = selected && selected->id == id && guest && install_guest(*fields);
+        }
+        lua_pushboolean(stack, accepted);
+        return 1;
+    }
+
+    int lua_remember_travel_step(const Lua& lua)
+    {
+        if (!U::IsInGameThreadRaw()) return 0;
+        auto* stack = lua.get_lua_state();
+        const auto id = stack_id(stack, 4, 5);
+        bool accepted{};
+        if (scope_id(id) && lua_type(stack, 5) == LUA_TNUMBER)
         {
             auto* world = wrapped<RC::LuaType::UWorld>(lua, 1, "UWorld");
             auto* instance = wrapped<RC::LuaType::UObject>(lua, 2, "UObject");
             auto* save = wrapped<RC::LuaType::UObject>(lua, 3, "UObject");
             const auto fields = guest_fields(world);
             if (fields && instance == fields->instance && save)
-                accepted = remember ? remember_travel_step(*fields, save, id, lua_tonumber(stack, 5)) : capture_guest(*fields, save, id);
+                accepted = remember_travel_step(*fields, save, id, lua_tonumber(stack, 5));
         }
         lua_pushboolean(stack, accepted);
         return 1;
@@ -446,6 +594,7 @@ namespace
         {
             std::scoped_lock lock{lifecycle};
             if (selected) return "Release the current co-op save scope first";
+            if (!release_retired_guest()) return "The previous co-op guest save could not be released";
             before = generation;
         }
 
@@ -461,6 +610,7 @@ namespace
         if (selected) return "Release the current co-op save scope first";
         if (!install_hooks()) return {};
         selected = std::move(route);
+        guest_restored = false;
         return "selected";
     }
 
@@ -479,7 +629,7 @@ namespace
         bool released{};
         {
             std::scoped_lock lock{lifecycle};
-            if (selected && selected->id == id && !guest)
+            if (selected && selected->id == id && !creating_guest && !guest)
             {
                 selected.reset();
                 ++generation;
@@ -503,8 +653,9 @@ void silverfish::native_save_scope::register_lua(Lua& lua)
     lua.register_function("SilverfishSelectNativeSaveScope", lua_select);
     lua.register_function("SilverfishReleaseNativeSaveScope", lua_release);
     lua.register_function("SilverfishSelectedNativeSaveScope", lua_selected);
-    lua.register_function("SilverfishPrepareNativeGuestSaveView", [](const Lua& lua) { return guest_command(lua, false); });
-    lua.register_function("SilverfishRememberNativeGuestTravelStep", [](const Lua& lua) { return guest_command(lua, true); });
+    lua.register_function("SilverfishPrepareNativeGuestSaveView", lua_prepare_guest);
+    lua.register_function("SilverfishRebindNativeGuestSaveView", lua_rebind_guest);
+    lua.register_function("SilverfishRememberNativeGuestTravelStep", lua_remember_travel_step);
     lua.register_function("SilverfishRestoreNativeGuestSaveView", lua_restore_guest);
 }
 
@@ -517,7 +668,7 @@ void silverfish::native_save_scope::clear()
 {
     std::scoped_lock lock{lifecycle};
     selected.reset();
-    guest.reset();
+    retire_guest();
     ++generation;
 }
 
@@ -525,7 +676,7 @@ void silverfish::native_save_scope::uninstall_hooks()
 {
     std::scoped_lock lock{lifecycle};
     selected.reset();
-    guest.reset();
+    retire_guest();
     ++generation;
     remove_hooks();
 }
