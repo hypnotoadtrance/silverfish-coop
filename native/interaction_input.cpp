@@ -22,6 +22,7 @@
 #include <vector>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
+#include <LuaType/LuaUObject.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/FStrProperty.hpp>
@@ -493,6 +494,40 @@ namespace
     bool available()
     {
         return installed.load(std::memory_order_acquire) && Unreal::IsInGameThreadRaw();
+    }
+
+    int read_host_stash_status(const Lua& lua)
+    {
+        if (!available() || !scope.host || lua.get_stack_size() != 4 || !lua.is_string(1) ||
+            !lua.is_integer(2) || !lua.is_integer(3) || !lua.is_integer(4) || Clock::now() >= scope.expires) return 0;
+        const auto map = lua.get_string();
+        auto* world = scope.world.Get();
+        auto* pawn = scope.pawn.Get();
+        if (!world || !pawn || address(world) != lua.get_integer() || address(pawn) != lua.get_integer() ||
+            address(scope.controller.Get()) != lua.get_integer() || !live_scope(scope)) return 0;
+        const auto world_path = world->GetPathName();
+        const auto package = RC::StringViewType{world_path}.substr(0, world_path.find(STR('.')));
+        if (package != RC::to_wstring(map)) return 0;
+
+        auto* instance = scope.instance.Get();
+        auto* slot = field<Unreal::FObjectProperty>(instance, STR("SaveSlot_Ref"));
+        auto* save = slot ? slot->GetObjectPropertyValue(slot->ContainerPtrToValuePtr<void>(instance)) : nullptr;
+        auto* save_class = slot ? slot->GetPropertyClass().Get() : nullptr;
+        if (!live(save) || !live(save_class) || save->GetClassPrivate() != save_class ||
+            object_field(pawn, STR("Save")) != save) return 0;
+        static Unreal::FWeakObjectPtr known_save_class;
+        static Unreal::FBoolProperty* combine_stashes{};
+        if (known_save_class.Get() != save_class)
+        {
+            if (save_class->GetPathName() != STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C")) return 0;
+            combine_stashes = field<Unreal::FBoolProperty>(save_class, STR("CombineStashes"));
+            known_save_class = save_class;
+        }
+        if (!combine_stashes) return 0;
+        RC::LuaType::auto_construct_object(lua, instance);
+        RC::LuaType::auto_construct_object(lua, save);
+        lua.set_bool(combine_stashes->GetPropertyValueInContainer(save));
+        return 3;
     }
 
     int read_standing_action_mappings(const Lua& lua)
@@ -2035,8 +2070,10 @@ namespace
     int read_door_latch(const Lua& lua)
     {
         auto* stack = lua.get_lua_state();
-        if (!available() || lua_gettop(stack) != 5 || !lua_isinteger(stack, 1) || !lua_isinteger(stack, 2) ||
-            lua_type(stack, 3) != LUA_TSTRING || !lua_isinteger(stack, 4) || !lua_isinteger(stack, 5)) return 0;
+        const auto count = lua_gettop(stack);
+        if (!available() || (count != 5 && count != 6) || !lua_isinteger(stack, 1) || !lua_isinteger(stack, 2) ||
+            lua_type(stack, 3) != LUA_TSTRING || !lua_isinteger(stack, 4) || !lua_isinteger(stack, 5) ||
+            (count == 6 && !lua_isnil(stack, 6) && lua_type(stack, 6) != LUA_TSTRING)) return 0;
         std::size_t path_size{};
         const auto* path_text = lua_tolstring(stack, 3, &path_size);
         auto* actor = scoped_switch_actor(lua_tointeger(stack, 1), lua_tointeger(stack, 2), {path_text, path_size});
@@ -2075,7 +2112,14 @@ namespace
         }
         lua_pushboolean(stack, locked->GetPropertyValueInContainer(door));
         for (auto axis : values) lua_pushnumber(stack, axis);
-        lua.set_string(RC::to_string(door->GetFullName()));
+        const auto door_name = RC::to_string(door->GetFullName());
+        if (count == 6 && lua_type(stack, 6) == LUA_TSTRING)
+        {
+            std::size_t size{};
+            const auto* known_name = lua_tolstring(stack, 6, &size);
+            if (std::string_view{known_name, size} == door_name) return 4;
+        }
+        lua.set_string(door_name);
         return 5;
     }
 
@@ -3297,6 +3341,7 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishSetNativeInteractScope", set_scope);
         lua.register_function("SilverfishTakeNativeInteractPress", take_press);
         lua.register_function("SilverfishClearNativeInteractScope", lua_clear);
+        lua.register_function("SilverfishReadNativeHostStashStatus", read_host_stash_status);
         lua.register_function("SilverfishReadNativeStandingActionMappings", read_standing_action_mappings);
         const auto* grip_filter = std::getenv("SILVERFISH_COOP_PROP_GRIP_FILTER");
         if (!grip_filter || std::string_view{grip_filter} != "0")

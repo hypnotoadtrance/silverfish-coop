@@ -342,10 +342,17 @@ state.server = false
 assert(switches.command({"nonce", "native-stock-switch-interact", latch_name, "qualified guest"}, state, "hosting")
     == "stock switch interaction dispatched" and linked_door.Locked)
 local native_latch_calls = 0
-SilverfishReadNativeDoorLatch = function(scope, actor, path, door, dial)
+local remembered_door, remembered_yaw = linked_door:GetFullName(), -4
+local omitted_names = 0
+linked_door.GetFullName = function() return remembered_door end
+SilverfishReadNativeDoorLatch = function(scope, actor, path, door, dial, known_door)
     assert(scope == state.world and actor == latch and path == placed_latch and door == linked_door and dial == latch.Switch_Mesh)
     native_latch_calls = native_latch_calls + 1
-    return linked_door.Locked, 12, -4, 45, linked_door:GetFullName()
+    if remembered_door == known_door then
+        omitted_names = omitted_names + 1
+        return linked_door.Locked, 12, remembered_yaw, 45
+    end
+    return linked_door.Locked, 12, remembered_yaw, 45, remembered_door
 end
 local function latch_row(phase)
     for _, reading in ipairs(switches.rows(state, phase, row)) do
@@ -355,9 +362,22 @@ end
 local sampled = assert(latch_row("hosting"))
 assert(sampled[4] == "1" and sampled[5] == 12 and sampled[6] == -4 and sampled[7] == 45
     and sampled[10] == "door=" .. linked_door:GetFullName() and native_latch_calls == 1)
+assert(latch_row("hosting") == sampled and native_latch_calls == 2 and omitted_names == 1,
+    "An unchanged latch reuses the row after a fresh native observation")
+remembered_yaw = -8
+local rotated = assert(latch_row("hosting"))
+assert(rotated ~= sampled and rotated[6] == -8 and omitted_names == 2,
+    "The row must reflect a dial change even when the linked door name is unchanged")
+remembered_door = remembered_door .. "_Renamed"
+local renamed = assert(latch_row("hosting"))
+assert(renamed ~= rotated and renamed[10] == "door=" .. remembered_door and omitted_names == 2,
+    "A linked door name change invalidates the row without changing lock or angles")
 SilverfishReadNativeDoorLatch = function() end
 sampled = assert(latch_row("hosting"))
 assert(sampled[4] == "1" and sampled[5] == 0 and sampled[7] == 0, "A declined native read uses stock dial rotation")
+linked_door.IsActorBeingDestroyed = function() return true end
+assert(not latch_row("hosting"), "A retired linked door cannot publish the cached state")
+linked_door.IsActorBeingDestroyed = function() return false end
 SilverfishReadNativeDoorLatch = nil
 state.server = true
 local projection = {"nonce", "native-stock-switch-project", latch_name, state.map, "0", "0", "0", "45", "door=wrong"}

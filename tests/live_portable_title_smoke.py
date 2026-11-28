@@ -8862,7 +8862,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 instrument_crate_pickup_inventory_timing, instrument_crate_pickup_timing, instrument_crate_probe_timing,
                 instrument_crate_status_timing, instrument_death_poll,
                 instrument_flashlight_scope,
-                instrument_guest_status_binding, instrument_host_drop_context, instrument_inline_crate_scan,
+                instrument_guest_status_binding, instrument_host_drop_context, instrument_host_stash_status,
+                instrument_inline_crate_scan,
                 instrument_input_mappings, instrument_journal_context,
                 instrument_loose_discovery, instrument_npc_class_discovery, instrument_profile,
                 instrument_ready_roster, instrument_shop_discovery, instrument_spawn_context, instrument_stash_binding,
@@ -8898,6 +8899,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(portable_script_overlay(game, "zone_wall.lua", instrument_zone_walls))
                 probes.enter_context(portable_script_overlay(game, "native_stash_view.lua", instrument_stash_binding))
+                probes.enter_context(portable_script_overlay(game, "native_stash.lua", instrument_host_stash_status))
                 probes.enter_context(portable_script_overlay(game, "native_avatar_lean_bridge.lua", instrument_avatar_lean))
                 probes.enter_context(portable_script_overlay(game, "native_player_avatar.lua", instrument_avatar_observer))
                 probes.enter_context(portable_script_overlay(game, "native_avatar_gait.lua", instrument_avatar_gait))

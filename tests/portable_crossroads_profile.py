@@ -9,6 +9,7 @@ import time
 
 from portable_guest_world_start import wait_resident_status
 from tools.silverfish import native_downed_markers, native_kill_volume, native_loot, native_package_handoff_journal
+from tools.silverfish import native_stash
 from tools.silverfish.authored_loot import full_name
 from tools.silverfish.control import current_status, submit
 from tools.silverfish.travel import CROSSROADS
@@ -370,6 +371,47 @@ def instrument_stash_binding(source):
         insertion, 'local function report(...)\n'
         '    return SilverfishProfileCrossroadsCall("stash_ui_binding", qualify_binding, ...)\n'
         'end\n\n' + insertion)
+
+
+def instrument_host_stash_status(source):
+    native_start = "    local instance, pawn, save, combined\n    if observing and type(SilverfishReadNativeHostStashStatus)"
+    if native_start not in source:
+        return source
+    native_end = "    if not instance then instance, pawn, save, combined = stock_owner(state, phase) end\n"
+    assert source.count(native_start) == source.count(native_end) == 1
+    setup = source[source.index(native_start):source.index(native_end)]
+    end = "\nreturn stash\n"
+    assert source.count(end) == 1
+    return source.replace(end, """
+function SilverfishProfileCrossroadsHostStash(state, phase)
+    assert(phase == "hosting", "host stash benchmark requires the listen seat")
+    local native = SilverfishReadNativeHostStashStatus
+    assert(type(native) == "function", "missing native host stash status reader")
+    local function previous() return stock_owner(state, phase) end
+    local function current()
+        local observing = true
+""" + setup + """        return instance, pawn, save, combined
+    end
+    local old_instance, old_pawn, old_save, old_combined = previous()
+    local instance, pawn, save, combined = current()
+    assert(same(instance, old_instance) and same(pawn, old_pawn) and same(save, old_save)
+        and type(combined) == "boolean" and combined == old_combined, "native host stash owner differs from stock")
+    local world, address, controller = state.world:GetAddress(), pawn:GetAddress(), state.controller:GetAddress()
+    assert(native(state.map .. "_missing", world, address, controller) == nil
+        and native(state.map, world, address, controller + 1) == nil, "native stash accepted another map or controller")
+    local rows, owner = stash.rows(state, phase, table.pack)
+    local setting = rows[1]
+    assert(setting and setting[1] == "native-stash-setting" and setting[2] == state.map
+        and setting[3] == (combined and 1 or 0) and owner and same(owner.save, save)
+        and same(owner.instance, instance), "normal stash status lost its setting or canonical owner")
+    local count = 64
+    local native_ms, prior_ms, native_kib, prior_kib = SilverfishProfileCrossroadsCompare(count, current, previous)
+    return ("%d,%d,%.3f,%.3f,%.3f,%.3f"):format(combined and 1 or 0, count,
+        native_ms, prior_ms, native_kib, prior_kib)
+end
+
+return stash
+""", 1)
 
 
 def instrument_avatar_lean(source):
@@ -1327,11 +1369,75 @@ def instrument_switch_reads(source):
     census = "    local discovered = census(state, phase)\n"
     if source.count(read) != 1 or source.count(census) != 1:
         raise ValueError("The stock switch timing anchors changed")
-    return source.replace(read, """    local category = entry.latch and "switches.latch" or entry.candle and "switches.candle"
+    source = source.replace(read, """    local category = entry.latch and "switches.latch" or entry.candle and "switches.candle"
         or entry.power and "switches.powered_prop" or "switches.linked"
     local encoded = SilverfishProfileCrossroadsCall(category, read_switch, entry, name, state, phase, row,
         native_world_address)
 """).replace(census, '    local discovered = SilverfishProfileCrossroadsCall("switches.census", census, state, phase)\n')
+    if "local function latch_row(" not in source:
+        return source
+    end = "\nreturn switches\n"
+    assert source.count(end) == 1
+    return source.replace(end, """
+function SilverfishProfileStockLatchRows(state, phase, row)
+    if not state.map:match("/CrossRoads_P$") then return end
+    local native = SilverfishReadNativeDoorLatch
+    assert(type(native) == "function", "missing native cached latch reader")
+    local world = state.world:GetAddress()
+    local function read(entry, known)
+        if known then
+            return native(world, entry.address, entry.path, entry.door_address, entry.lever_address, known)
+        end
+        return native(world, entry.address, entry.path, entry.door_address, entry.lever_address)
+    end
+    local live = {}
+    for name, entry in pairs(census(state, phase)) do
+        if entry.latch and entry.address and type(read(entry)) == "boolean" then
+            live[#live + 1] = {name = name, entry = entry}
+        end
+    end
+    assert(#live > 0, "no qualified Crossroads latch entries for status comparison")
+    local function previous(name, entry)
+        local locked, pitch, yaw, roll, door = read(entry)
+        return row("native-stock-switch", state.map, name, bit(locked), pitch, yaw, roll, "-", "-", "door=" .. door)
+    end
+    local encoded = 0
+    local function count_rows(...)
+        encoded = encoded + 1
+        return row(...)
+    end
+    for _, sample in ipairs(live) do
+        local name, entry = sample.name, sample.entry
+        local locked, pitch, yaw, roll, door = read(entry)
+        assert(type(locked) == "boolean" and type(door) == "string", "missing verified stock latch")
+        local current, p, y, r, repeated = read(entry, door)
+        assert(current == locked and p == pitch and y == yaw and r == roll and repeated == nil,
+            "warm latch did not preserve the current stock fields and omit the unchanged name")
+        local stale, sp, sy, sr, refreshed = read(entry, door .. "_missing")
+        assert(stale == locked and sp == pitch and sy == yaw and sr == roll and refreshed == door,
+            "latch did not refresh a stale cached door name")
+        assert(native(world + 1, entry.address, entry.path, entry.door_address, entry.lever_address, door) == nil,
+            "warm latch accepted another world")
+        local expected = previous(name, entry)
+        assert(read_switch(entry, name, state, phase, count_rows, world) == expected, "cached latch bytes differ")
+        local encoded_on_first = encoded
+        assert(read_switch(entry, name, state, phase, count_rows, world) == expected and encoded == encoded_on_first,
+            "unchanged latch row was re-encoded")
+        assert(read_switch(entry, name, state, phase, row, world) == expected, "stock formatter latch bytes differ")
+    end
+    local count = 64
+    local function current()
+        for _, sample in ipairs(live) do read_switch(sample.entry, sample.name, state, phase, row, world) end
+    end
+    local function prior()
+        for _, sample in ipairs(live) do previous(sample.name, sample.entry) end
+    end
+    local native_ms, previous_ms, native_kib, previous_kib = SilverfishProfileCrossroadsCompare(count, current, prior)
+    return ("%d,%d,%.3f,%.3f,%.3f,%.3f"):format(#live, count, native_ms, previous_ms, native_kib, previous_kib)
+end
+
+return switches
+""", 1)
 
 
 def instrument_anomaly_work(source):
@@ -1901,15 +2007,24 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
         if reply == "unavailable":
             return None
         assert not reply.startswith("switch comparison failed"), reply
+        stock, _, cached_latch = reply.partition(";")
         (switches, streamed, native_ms, lua_ms, native_kib, lua_kib, candle_reads, candle_ms, candle_kib,
-         latch_reads, latch_ms, latch_kib) = map(float, reply.split(","))
-        return {"fast_reads_per_pass": int(switches), "streamed_fast_reads_per_pass": int(streamed),
+         latch_reads, latch_ms, latch_kib) = map(float, stock.split(","))
+        result = {"fast_reads_per_pass": int(switches), "streamed_fast_reads_per_pass": int(streamed),
                 "passes_per_reader": 32, "all_rows_matched": True,
                 "native_ms": native_ms, "lua_ms": lua_ms, "native_heap_growth_kib": native_kib,
                 "lua_heap_growth_kib": lua_kib, "native_candle_reads_per_pass": int(candle_reads),
                 "without_native_candle_ms": candle_ms, "without_native_candle_heap_growth_kib": candle_kib,
                 "native_latch_reads_per_pass": int(latch_reads), "without_native_latch_ms": latch_ms,
                 "without_native_latch_heap_growth_kib": latch_kib}
+        if cached_latch:
+            actors, count, cached_ms, prior_ms, cached_kib, prior_kib = map(float, cached_latch.split(","))
+            result["cached_latch_row"] = {"latches": int(actors), "passes_per_path": int(count),
+                                          "cached_ms": cached_ms, "previous_ms": prior_ms,
+                                          "cached_heap_growth_kib": cached_kib, "previous_heap_growth_kib": prior_kib,
+                                          "all_rows_matched": True, "unchanged_row_reused": True,
+                                          "stale_name_refreshed": True, "invalid_world_refused": True}
+        return result
 
     def position(status):
         return status.get("game", {}).get("pawns", {}).get("local", {}).get("location")
@@ -2214,12 +2329,28 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     zone_wall_sources = {}
     save_clock = {}
     save_clock_continuity = {}
+    host_stash = None
     avatar_clock = {}
     avatar_motion = {}
     avatar_appearance = {}
     avatar_gait = None
     standing_mapping = {}
     if area == CROSSROADS:
+        stash_reply = await command(host, "hoststash")
+        if stash_reply != "unavailable":
+            assert not stash_reply.startswith("host stash comparison failed"), stash_reply
+            combined, passes, native_ms, prior_ms, native_kib, prior_kib = map(float, stash_reply.split(","))
+            assert combined in (0, 1), stash_reply
+            combined = bool(combined)
+            frame = await wait_resident_status(runs["host"], lambda snapshot:
+                snapshot.get("game", {}).get("map") == area
+                and snapshot["game"].get(native_stash.SETTING) is combined, timeout=8)
+            host_stash = {"combined": combined, "passes_per_path": int(passes),
+                          "native_ms": native_ms, "previous_ms": prior_ms,
+                          "native_heap_growth_kib": native_kib, "previous_heap_growth_kib": prior_kib,
+                          "matched_stock_owner_and_setting": True, "wrong_map_and_controller_refused": True,
+                          "published_status_sequence": frame["game"]["sequence"]}
+
         def standing_controls(frame):
             game = frame.get("game", {})
             inputs = game.get("player_local_input", {})
@@ -2408,4 +2539,5 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             "remote_head_rotation_comparison": remote_head_rotation,
             "zone_wall_source_comparison": zone_wall_sources,
             "save_game_clock_comparison": save_clock,
-            "save_game_clock_continuity": save_clock_continuity}
+            "save_game_clock_continuity": save_clock_continuity,
+            "host_stash_status_comparison": host_stash}

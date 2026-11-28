@@ -9,7 +9,7 @@ import unittest
 import uuid
 from unittest.mock import AsyncMock, Mock, patch
 
-from tools.silverfish import guest_request_scope, native_loot, runtime, service
+from tools.silverfish import guest_request_scope, native_loot, native_world_loot, runtime, service
 from tools.silverfish.local_bridge import CRATE_OUTCOME_INPUT_LIMIT, INPUT_LIMIT, LocalBridge, LocalCommandNotSubmitted
 from tools.silverfish.control import Control
 from tools.silverfish.travel import OBSERVATORY
@@ -942,6 +942,99 @@ class WorldWeatherTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(RuntimeError, error):
                     await service.Client.project_world_view(client)
                 self.assertIsNone(bridge._local_world_view)
+
+    async def test_busy_local_lane_skips_replaceable_weather_before_ordered_pickups(self):
+        area = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+        actor = service.WORLD_VIEW_ACTORS[area]
+        epoch = uuid.uuid4().hex
+        pawn = f"Player_FP_C {area}.CrossRoads_P:PersistentLevel.Player_FP_C_1"
+        source = dict(map=area, actor=actor, mode="sample", sequence=13, game_seconds=1000, pitch=20, yaw=40, roll=0,
+                      sun_x=0, sun_y=0, sun_z=1, sun_intensity=5, sun_visible=True)
+        bridge = runtime.Bridge(Path("unused"), None)
+        library = Mock()
+        bridge.local_bridge = LocalBridge(library)
+        initial = {"state": "connected", "map": area, "sequence": 9, "pawns": {"local": {"name": pawn}},
+                   service.native_weather_view.LOCAL_CAPABILITY: True}
+        client = self.client(bridge, area, epoch, source, initial)
+        submitted = []
+        replies = {}
+        claim_in_flight, claim_reply = asyncio.Event(), asyncio.Event()
+        hold_ticket = 2
+        first_visit = epoch
+        identity = uuid.uuid4().hex
+
+        def submit(payload, _length):
+            nonce, action, visit, *arguments = payload.decode().rstrip("\n").split("\t")
+            submitted.append((action, visit, arguments[0]))
+            ticket = len(submitted)
+            if action == native_world_loot.PRESENT_CLAIM:
+                reply = f"pickup-presentation-ack\t{nonce}\taccepted\tpresented\n"
+            else:
+                sequence = arguments[0]
+                reply = (f"native-world-view-reply\t1\t9\t{pawn}\nack\t{nonce}\taccepted\tapplied\n"
+                         f"native-world-view\tapplied\t{area}\t{actor}\t{epoch}\t{sequence}\t1000\t20\t40\t0\t0\t0\t1\t1\t5\t"
+                         "0.3\t0.4\t0.5\t00:16\t1\t1\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\t0\n")
+            replies[ticket] = reply.encode()
+            return ticket
+
+        async def wait(_function, ticket, _delay):
+            if ticket == hold_ticket:
+                claim_in_flight.set()
+                await claim_reply.wait()
+            return len(replies[ticket])
+
+        def copy(ticket, buffer, size):
+            ctypes.memmove(buffer, replies[ticket], size)
+            return True
+
+        library.SilverfishBridgeSubmitV1.side_effect = submit
+        library.SilverfishBridgeCopyV1.side_effect = copy
+        with patch("tools.silverfish.local_bridge.asyncio.to_thread", side_effect=wait):
+            await client.project_world_view()
+            self.assertEqual(client.world_view_cursor, (client.stock_interaction_scope(), 13))
+            async with asyncio.TaskGroup() as tasks:
+                tasks.create_task(bridge.command(native_world_loot.PRESENT_CLAIM, epoch, identity))
+                try:
+                    await asyncio.wait_for(claim_in_flight.wait(), 1)
+                    source["sequence"] = 14
+                    await asyncio.wait_for(client.project_world_view(), 1)
+                    self.assertEqual(len(submitted), 2)
+                    self.assertEqual(client.world_view_cursor, (client.stock_interaction_scope(), 13))
+                    source["sequence"] = 15
+                    tasks.create_task(bridge.command(native_world_loot.PRESENT_CLAIM, epoch, identity))
+                    await asyncio.sleep(0)
+                finally:
+                    claim_reply.set()
+            await client.project_world_view()
+            self.assertEqual(client.world_view_cursor, (client.stock_interaction_scope(), 15))
+
+            for new_visit in (False, True):
+                if new_visit:
+                    epoch = uuid.uuid4().hex
+                    client.zone_epoch = epoch
+                    client._complete_game_link(initial)
+                    source["sequence"] = 1
+                else:
+                    client.world_view_projected_at -= 2
+                    source["sequence"] = 16
+                hold_ticket = len(submitted) + 1
+                claim_in_flight.clear()
+                claim_reply.clear()
+                async with asyncio.TaskGroup() as tasks:
+                    tasks.create_task(bridge.command(native_world_loot.PRESENT_CLAIM, epoch, identity))
+                    try:
+                        await asyncio.wait_for(claim_in_flight.wait(), 1)
+                        renewal = tasks.create_task(client.project_world_view())
+                        await asyncio.sleep(0)
+                        self.assertFalse(renewal.done())
+                    finally:
+                        claim_reply.set()
+                self.assertEqual(client.world_view_cursor, (client.stock_interaction_scope(), source["sequence"]))
+        local_view = service.native_weather_view.LOCAL_APPLY
+        claim = native_world_loot.PRESENT_CLAIM, first_visit, identity
+        self.assertEqual(submitted, [(local_view, first_visit, "13"), claim, claim, (local_view, first_visit, "15"),
+                                     claim, (local_view, first_visit, "16"),
+                                     (native_world_loot.PRESENT_CLAIM, epoch, identity), (local_view, epoch, "1")])
 
     async def test_repeated_world_sample_after_missing_reply_allows_the_next_sample_and_a_new_binding(self):
         area = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"

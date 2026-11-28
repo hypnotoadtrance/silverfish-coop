@@ -107,20 +107,34 @@ local function current_sites(cache)
     return sites
 end
 
-local function selected_sites(state, phase)
+local function stock_owner(state, phase)
+    local instance, pawn = host_save.canonical_host(state, phase)
+    local save = valid(instance) and instance.SaveSlot_Ref
+    if not valid(pawn) or not valid(save) or not same(pawn.Save, save) then return end
+    local combined = save.CombineStashes
+    if type(combined) == "boolean" then return instance, pawn, save, combined end
+end
+
+local function selected_sites(state, phase, observing)
     if phase ~= "hosting" or not state.listening or state.server ~= false
         or type(SilverfishReadNativeStashCensus) ~= "function" then
         if next(snapshots) then snapshots = {} end
         site_cache = nil
         return
     end
-    local instance, pawn = host_save.canonical_host(state, phase)
-    local save = valid(instance) and instance.SaveSlot_Ref
-    if not valid(pawn) or not valid(save) or not same(pawn.Save, save) or type(save.CombineStashes) ~= "boolean" then
+    local instance, pawn, save, combined
+    if observing and type(SilverfishReadNativeHostStashStatus) == "function" then
+        pawn = state.local_pawn and state.local_pawn.pawn
+        if valid(state.world) and valid(pawn) and valid(state.controller) then
+            instance, save, combined = SilverfishReadNativeHostStashStatus(state.map, state.world:GetAddress(),
+                pawn:GetAddress(), state.controller:GetAddress())
+        end
+    end
+    if not instance then instance, pawn, save, combined = stock_owner(state, phase) end
+    if not instance then
         if next(snapshots) then snapshots = {} end
         return
     end
-    local combined = save.CombineStashes
     local context_changed = not site_cache or not same(site_cache.world, state.world)
         or site_cache.map ~= state.map or not same(site_cache.instance, instance)
     if next(snapshots) then
@@ -368,7 +382,7 @@ function stash.command(fields, state, phase)
 end
 
 function stash.rows(state, phase, row)
-    local available, pawn, combined, instance, save = selected_sites(state, phase)
+    local available, pawn, combined, instance, save = selected_sites(state, phase, true)
     if not available then return {} end
     local rows = {row("native-stash-setting", state.map, combined and 1 or 0)}
     if type(SilverfishReadLiveNativeStashCensus) == "function" then

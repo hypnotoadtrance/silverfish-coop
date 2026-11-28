@@ -32,7 +32,7 @@ from . import native_map_preflight
 from .control import Control
 from .embedded_engine import BRIDGE_ENV, OPT_IN_ENV, EmbeddedEngine, select_save_scope
 from .local_bridge import (GUEST_INTERACTION_BROKER, GUEST_INTERACTION_DIALOGUE, GUEST_INTERACTION_MOSBY,
-                           GUEST_INTERACTION_SHOP)
+                           GUEST_INTERACTION_SHOP, LocalCommandDeferred)
 from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
 from . import native_guest_drop, native_guest_drop_projection, native_guest_drop_record
@@ -5556,6 +5556,7 @@ class Client:
         self.weather_lightning = native_weather_view.LightningPlayback()
         self.storm_ambience = native_storm_ambience.Projection()
         self.world_view_cursor = None
+        self.world_view_projected_at = 0.0
         self.anomaly_playback = native_anomaly_effects.Playback()
         self.acid_pool_playback = native_anomaly_effects.AcidPoolPlayback()
         self.destructible_playback = native_destructibles.Playback()
@@ -5803,6 +5804,7 @@ class Client:
     def _complete_game_link(self, connected: dict) -> None:
         self.last_game = connected
         self.world_view_cursor = None
+        self.world_view_projected_at = 0.0
         self.needs_travel = False
         self.loading_zone = None
         self.source_fade = None
@@ -6958,8 +6960,8 @@ class Client:
         if self.world_view_cursor and self.world_view_cursor[0] == scope and self.world_view_cursor[1] >= sequence:
             return
         prior = self.last_game.get("native_world_view", {})
-        if (prior.get("map") == area and prior.get("actor") == expected_actor
-                and prior.get("epoch") == epoch and prior.get("sequence", 0) >= sequence):
+        same_view = (prior.get("map"), prior.get("actor"), prior.get("epoch")) == (area, expected_actor, epoch)
+        if same_view and prior.get("sequence", 0) >= sequence:
             self.world_view_cursor = scope, prior["sequence"]
             return
         keys = ("game_seconds", "pitch", "yaw", "roll", "sun_x", "sun_y", "sun_z", "sun_intensity")
@@ -6981,12 +6983,21 @@ class Client:
         rain_args = tuple(map(str, rain)) if rain_present else ()
         action = (native_weather_view.LOCAL_APPLY if self.last_game.get(native_weather_view.LOCAL_CAPABILITY) is True
                   else "native-world-view-apply")
+        # Reserve half of the three-second visual lease to renew even
+        # under sustained input. The first sample in a visit also waits its turn.
+        replaceable = (action == native_weather_view.LOCAL_APPLY and same_view and prior.get("mode") == "applied"
+                       and self.world_view_cursor
+                       and self.world_view_cursor[0] == scope and time.monotonic() - self.world_view_projected_at < 1.5)
+        scheduling = {"skip_if_busy": True} if replaceable else {}
         try:
             snapshot = await self.bridge.command(
                 action, epoch, str(sequence), area, expected_actor,
                 *(str(value) for value in numeric[:-1]), "1" if frame["sun_visible"] else "0", str(numeric[-1]),
-                *("-" if value is None else str(value) for value in sky), *weather_args, *rain_args, timeout=3,
+                *("-" if value is None else str(value) for value in sky), *weather_args, *rain_args, timeout=3, **scheduling,
             )
+        except LocalCommandDeferred:
+            # The next projection pass can use the latest host sample.
+            return
         except RuntimeError as error:
             if str(error) != native_weather_view.ALREADY_OBSERVED:
                 raise
@@ -7006,9 +7017,10 @@ class Client:
                 or weather_present and proof.get("weather_verified") is not True
                 or rain_present and not (proof.get("rain_verified") is True or rain_skipped)):
             raise RuntimeError("The connected guest did not verify the host's rendered world frame")
-        self.world_view_cursor = scope, sequence
         self.last_game = (self.bridge.remember_local_world_view(self.last_game, snapshot)
                           if "native_world_view_local_scope" in snapshot else snapshot)
+        self.world_view_cursor = scope, sequence
+        self.world_view_projected_at = time.monotonic()
 
     async def service_requests(self) -> None:
         for path, request in self.control.requests():

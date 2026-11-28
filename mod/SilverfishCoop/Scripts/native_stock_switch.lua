@@ -322,20 +322,42 @@ local function suppress_candle_overlap(name, sphere)
     end
 end
 
+local function same_angle(previous, current)
+    return previous == current and math.type(previous) == math.type(current)
+        and (current ~= 0 or 1 / previous == 1 / current)
+end
+
+local function latch_row(entry, name, state, row, locked, pitch, yaw, roll, door)
+    if entry.latch_door_name ~= door then
+        entry.latch_door_name, entry.latch_door_link = door, "door=" .. door
+        entry.latch_row = nil
+    end
+    if not entry.latch_row or entry.latch_row_name ~= name or entry.latch_row_map ~= state.map
+        or entry.latch_row_encoder ~= row or entry.latch_locked ~= locked or not same_angle(entry.latch_pitch, pitch)
+        or not same_angle(entry.latch_yaw, yaw) or not same_angle(entry.latch_roll, roll) then
+        entry.latch_row = row("native-stock-switch", state.map, name, bit(locked), pitch, yaw, roll,
+            "-", "-", entry.latch_door_link)
+        entry.latch_row_name, entry.latch_row_map, entry.latch_row_encoder = name, state.map, row
+        entry.latch_locked, entry.latch_pitch, entry.latch_yaw, entry.latch_roll = locked, pitch, yaw, roll
+    end
+    return entry.latch_row
+end
+
 local function read_switch(entry, name, state, phase, row, native_world_address)
     if entry.latch then
         if native_world_address and entry.address and type(SilverfishReadNativeDoorLatch) == "function" then
             local locked, pitch, yaw, roll, door = SilverfishReadNativeDoorLatch(native_world_address, entry.address,
-                entry.path, entry.door_address, entry.lever_address)
-            if locked ~= nil then
-                return row("native-stock-switch", state.map, name, bit(locked), pitch, yaw, roll, "-", "-", "door=" .. door)
+                entry.path, entry.door_address, entry.lever_address, entry.latch_door_name)
+            door = door or entry.latch_door_name
+            if locked ~= nil and door then
+                return latch_row(entry, name, state, row, locked, pitch, yaw, roll, door)
             end
         end
         if qualified(entry.actor, state.world, entry.level) and qualified(entry.door, state.world)
             and valid(entry.lever) then
             local angles = entry.lever.RelativeRotation
-            return row("native-stock-switch", state.map, name, bit(entry.door.Locked),
-                angles.Pitch, angles.Yaw, angles.Roll, "-", "-", "door=" .. entry.door:GetFullName())
+            return latch_row(entry, name, state, row, entry.door.Locked, angles.Pitch, angles.Yaw, angles.Roll,
+                entry.door:GetFullName())
         end
     elseif entry.power then
         local actor = entry.actor

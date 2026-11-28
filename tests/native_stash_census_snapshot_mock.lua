@@ -231,3 +231,28 @@ instance.SaveSlot_Ref, host.Save = restored, restored
 local changed = save_row(observed)
 assert(class_reads > before and changed ~= full and changed:find("\tchanged\t") and changed == save_row())
 print("Host status reuses qualified stash ownership and rechecks a replaced canonical save")
+
+instance.SaveSlot_Ref, host.Save = stock, stock
+local fast_reads, qualify_in_native = 0, true
+function SilverfishReadNativeHostStashStatus(area, current_world, current_pawn, current_controller)
+    assert(area == map and current_world == world:GetAddress() and current_pawn == host:GetAddress()
+        and current_controller == controller:GetAddress())
+    fast_reads = fast_reads + 1
+    if qualify_in_native then return instance, stock, stock.CombineStashes end
+end
+
+local function stash_setting()
+    local rows, context = stash.rows(state, "hosting", row)
+    assert(context.instance == instance and context.pawn == host and context.save == stock)
+    assert(rows[1][1] == "native-stash-setting" and rows[1][2] == map)
+    return rows[1][3]
+end
+
+before = class_reads
+stock.CombineStashes = false
+assert(stash_setting() == 0)
+stock.CombineStashes = true
+assert(stash_setting() == 1 and fast_reads == 2 and class_reads == before)
+qualify_in_native = false
+assert(stash_setting() == 1 and fast_reads == 3 and class_reads > before)
+assert(#stash.rows(state, "singleplayer", row) == 0 and fast_reads == 3)

@@ -33,6 +33,10 @@ class LocalCommandNotSubmitted(RuntimeError):
     """The command was refused or cancelled before the game claimed it."""
 
 
+class LocalCommandDeferred(LocalCommandNotSubmitted):
+    """A replaceable sample did not wait behind other local commands."""
+
+
 class LocalCommandReplyUnavailable(RuntimeError):
     """The game could have executed the command before both replies were lost."""
 
@@ -158,6 +162,7 @@ class LocalBridge:
             self._publish_avatar_poses.restype = ctypes.c_int
             self._avatar_pose_buffer = ctypes.create_string_buffer(512)
         self._lock = asyncio.Lock()
+        self._command_count = 0
         self._status_buffer = None
         self._status_revision = 0
         self._status_frame = None
@@ -248,34 +253,39 @@ class LocalBridge:
     async def command(self, payload: bytes, timeout: float, *, skip_if_busy: bool = False, timing=None) -> str:
         if timing is not None:
             timing["lane_enter_us"] = time.monotonic_ns() // 1000
-        if skip_if_busy and self._lock.locked():
-            raise LocalCommandNotSubmitted("The local co-op command lane is busy")
-        async with self._lock:
-            if timing is not None:
-                timing["lane_acquired_us"] = time.monotonic_ns() // 1000
-            ticket = self._submit(payload, len(payload))
-            if timing is not None:
-                timing["native_submit_return_us"] = time.monotonic_ns() // 1000
-            if not ticket:
-                raise LocalCommandNotSubmitted("The game could not queue the local co-op command")
-            mark_effect("game_command")
-            try:
-                delay = max(1, min(120000, int(timeout * 1000)))
-                size = await asyncio.to_thread(self._wait, ticket, delay)
-                if size == -2:
-                    raise LocalCommandNotSubmitted("The game did not claim the local co-op command before it expired")
-                if size == 0:
-                    raise TimeoutError("The game did not acknowledge the local co-op command")
-                if size < 0:
-                    raise RuntimeError("The local co-op command receipt is unavailable")
+        # Account for waiting commands even during the lock's unlocked handoff.
+        if skip_if_busy and self._command_count:
+            raise LocalCommandDeferred("The local co-op command lane is busy")
+        self._command_count += 1
+        try:
+            async with self._lock:
                 if timing is not None:
-                    timing["native_reply_us"] = time.monotonic_ns() // 1000
-                buffer = ctypes.create_string_buffer(size)
-                if not self._copy(ticket, buffer, size):
-                    raise RuntimeError("The local co-op command receipt changed")
-                return buffer.raw.decode("utf-8")
-            finally:
-                self._cancel(ticket)
+                    timing["lane_acquired_us"] = time.monotonic_ns() // 1000
+                ticket = self._submit(payload, len(payload))
+                if timing is not None:
+                    timing["native_submit_return_us"] = time.monotonic_ns() // 1000
+                if not ticket:
+                    raise LocalCommandNotSubmitted("The game could not queue the local co-op command")
+                mark_effect("game_command")
+                try:
+                    delay = max(1, min(120000, int(timeout * 1000)))
+                    size = await asyncio.to_thread(self._wait, ticket, delay)
+                    if size == -2:
+                        raise LocalCommandNotSubmitted("The game did not claim the local co-op command before it expired")
+                    if size == 0:
+                        raise TimeoutError("The game did not acknowledge the local co-op command")
+                    if size < 0:
+                        raise RuntimeError("The local co-op command receipt is unavailable")
+                    if timing is not None:
+                        timing["native_reply_us"] = time.monotonic_ns() // 1000
+                    buffer = ctypes.create_string_buffer(size)
+                    if not self._copy(ticket, buffer, size):
+                        raise RuntimeError("The local co-op command receipt changed")
+                    return buffer.raw.decode("utf-8")
+                finally:
+                    self._cancel(ticket)
+        finally:
+            self._command_count -= 1
 
     def input_ready(self):
         return bool(self._input_ready())

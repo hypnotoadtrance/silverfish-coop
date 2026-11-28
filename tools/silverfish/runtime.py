@@ -4238,7 +4238,7 @@ class Bridge:
         return reply
 
     async def command(self, action: str, *arguments: str, timeout: float = 8, update_status: bool = True,
-                      catalog_body: bytes | None = None, timing=None) -> dict:
+                      catalog_body: bytes | None = None, timing=None, skip_if_busy: bool = False) -> dict:
         fields = (uuid.uuid4().hex, action, *arguments)
         if timing is not None:
             timing["bridge_ticket"] = fields[0]
@@ -4276,7 +4276,9 @@ class Bridge:
                                              interval=.025, file_reply=True)
         else:
             payload = header + (catalog_body or b"")
-            if timing is None:
+            if skip_if_busy:
+                raw = await self.local_bridge.command(payload, timeout, skip_if_busy=True, timing=timing)
+            elif timing is None:
                 raw = await self.local_bridge.command(payload, timeout)
             else:
                 raw = await self.local_bridge.command(payload, timeout, timing=timing)

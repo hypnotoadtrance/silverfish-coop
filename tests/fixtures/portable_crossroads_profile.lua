@@ -231,11 +231,13 @@ local function compare_switch_reads()
     local switched, streamed, candle_samples, candle_requests, first = 0, 0, 0, 0, nil
     local latch_samples, first_latch = 0, nil
     if type(read_latch) == "function" then
-        SilverfishReadNativeDoorLatch = function(world, address, path, door, dial)
-            local locked, pitch, yaw, roll, name = read_latch(world, address, path, door, dial)
+        SilverfishReadNativeDoorLatch = function(world, address, path, door, dial, known)
+            local locked, pitch, yaw, roll, name
+            if known then locked, pitch, yaw, roll, name = read_latch(world, address, path, door, dial, known)
+            else locked, pitch, yaw, roll, name = read_latch(world, address, path, door, dial) end
             local latch = StaticFindObject(path)
             local rotation = latch.SM_Prop_Kitchen_Grill_01_Dial_01.RelativeRotation
-            assert(locked == latch.Door.Locked and name == latch.Door:GetFullName() and pitch == rotation.Pitch
+            assert(locked == latch.Door.Locked and (name or known) == latch.Door:GetFullName() and pitch == rotation.Pitch
                 and yaw == rotation.Yaw and roll == rotation.Roll, "native latch sample did not match stock")
             latch_samples = latch_samples + 1
             first_latch = first_latch or {world, address, path, door, dial}
@@ -314,7 +316,9 @@ local function compare_switch_reads()
     SilverfishReadNativeSwitchPower, SilverfishReadNativeDoorLatch = native, read_latch
     if running then collectgarbage("restart") end
     if not ok then error(result, 0) end
-    return result
+    local compare_latch = SilverfishProfileStockLatchRows
+    local cached_latch = compare_latch and compare_latch(state, seat, status_row)
+    return cached_latch and result .. ";" .. cached_latch or result
 end
 
 local function compare_acid_reads(dynamic)
@@ -851,6 +855,16 @@ LoopInGameThreadWithDelay(50, function()
             return SilverfishProfileCrossroadsWallSources(state.world, state.map)
         end)
         if ok then message = value else message = "zone wall comparison failed: " .. tostring(value) end
+    elseif action == "hoststash" and not capture then
+        if type(SilverfishProfileCrossroadsHostStash) == "function" then
+            local ok, value = pcall(function()
+                local state = inspect()
+                return SilverfishProfileCrossroadsHostStash(state, phase(state))
+            end)
+            if ok then message = value else message = "host stash comparison failed: " .. tostring(value) end
+        else
+            message = "unavailable"
+        end
     elseif action == "gameclock" and not capture then
         local ok, value = pcall(compare_save_game_clock)
         if ok then message = value else message = "stock save clock comparison failed: " .. tostring(value) end
