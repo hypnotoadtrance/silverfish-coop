@@ -8872,7 +8872,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 instrument_crate_pickup_inventory_timing, instrument_crate_pickup_timing, instrument_crate_probe_timing,
                 instrument_crate_status_timing, instrument_death_poll,
                 instrument_flashlight_scope,
-                instrument_guest_status_binding, instrument_host_drop_context, instrument_host_stash_status,
+                instrument_guest_clock_dispatch, instrument_guest_status_binding, instrument_host_drop_context,
+                instrument_host_stash_status,
                 instrument_inline_crate_scan,
                 instrument_input_mappings, instrument_journal_context,
                 instrument_loose_discovery, instrument_npc_class_discovery, instrument_profile,
@@ -8962,6 +8963,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 for game in games
                 for name, instrument in (
                     ("native_world_view.lua", instrument_weather_status),
+                    ("native_guest_clock.lua", instrument_guest_clock_dispatch),
                     ("native_stock_switch.lua", instrument_switch_reads),
                     ("native_flashlight.lua", instrument_flashlight_scope),
                     ("native_death.lua", instrument_death_poll),

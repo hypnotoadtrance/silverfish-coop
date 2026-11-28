@@ -1593,6 +1593,7 @@ namespace
 
         ~SilverfishNativeMod() override
         {
+            silverfish::local_bridge::uninstall_native_dispatch();
             if (jump_shake) Unreal::UObjectGlobals::UnregisterHook(jump_shake, jump_shake_hook);
             silverfish::local_bridge::stop();
             silverfish::native_guest_item::shutdown();
@@ -1676,6 +1677,7 @@ namespace
             silverfish::native_flood_jammer::install_hooks();
             silverfish::native_lenny_quest::install_hooks();
             silverfish::native_guest_clock::install_hooks();
+            silverfish::local_bridge::install_native_dispatch();
             silverfish::native_guest_primary_input::install_hooks();
             silverfish::native_host_dig::install_hooks();
             silverfish::native_guest_sickness::install_hooks();

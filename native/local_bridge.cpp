@@ -1,10 +1,12 @@
 #include "local_bridge.hpp"
+#include "guest_clock.hpp"
 #include "local_catalog_ticket.hpp"
 #include "session_observation.hpp"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cctype>
 #include <clocale>
@@ -43,6 +45,7 @@
 namespace
 {
     using Lua = RC::LuaMadeSimple::Lua;
+    namespace Hooks = RC::Unreal::Hook;
     constexpr std::uint32_t command_limit = 32 * 1024;
     constexpr std::uint32_t reply_limit = 2 * 1024 * 1024;
     // Match the ctypes reader buffer in tools/silverfish/local_bridge.py.
@@ -63,6 +66,8 @@ namespace
     constexpr std::uint32_t guest_interaction_features = 0x0f;
     constexpr std::uint32_t guest_interaction_area_limit = 160;
     constexpr std::uint32_t guest_interaction_pawn_limit = 512;
+    constexpr std::size_t guest_clock_command_limit = 1024;
+    constexpr std::string_view guest_clock_action = "native-guest-clock-apply";
 
     enum class State { idle, queued, taken, running, replied, too_large };
     std::mutex mutex;
@@ -82,12 +87,21 @@ namespace
     FastHeader fast_header;
     std::vector<std::string> fast_actions;
     std::atomic<bool> fast_queued{};
+    std::atomic<bool> native_clock_queued{};
+    std::atomic<bool> native_dispatch_installed{};
+    Hooks::GlobalCallbackId native_dispatch_hook = Hooks::ERROR_ID;
     struct FastBridgeProfile
     {
         std::int64_t skips{}, invocations{}, takes{}, claims{};
         std::int64_t taken_ticket{}, claimed_ticket{};
     };
     thread_local FastBridgeProfile fast_profile;
+    struct ClockDispatchProfile
+    {
+        std::int64_t accepted{}, refused{}, clock_sequence{}, status_sequence{};
+        std::string id, map, pawn, epoch;
+    };
+    thread_local ClockDispatchProfile clock_profile;
     std::shared_ptr<const std::string> reply;
     bool status_enabled{};
     std::shared_ptr<const std::string> status_frame;
@@ -137,6 +151,17 @@ namespace
             return (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') ||
                 (byte >= '0' && byte <= '9') || byte == '_' || byte == '.' || byte == '-';
         });
+    }
+
+    bool native_clock_command(std::string_view payload)
+    {
+        if (payload.size() > guest_clock_command_limit ||
+            !native_dispatch_installed.load(std::memory_order_acquire)) return false;
+        const auto id_end = payload.find('\t');
+        if (id_end == payload.npos) return false;
+        const auto fields = payload.substr(id_end + 1);
+        return fields.size() > guest_clock_action.size() && fields.starts_with(guest_clock_action) &&
+            fields[guest_clock_action.size()] == '\t';
     }
 
     FastHeader classify_fast_header(std::string_view payload)
@@ -431,6 +456,7 @@ namespace
         state = State::idle;
         fast_header = {};
         fast_queued.store(false, std::memory_order_release);
+        native_clock_queued.store(false, std::memory_order_release);
         command.clear();
         reply.reset();
         changed.notify_all();
@@ -445,7 +471,9 @@ namespace
             std::lock_guard lock(mutex);
             ready = true;
             active = attached;
-            if (state == State::queued)
+            // The C++ engine hook gets one admission attempt for a reserved
+            // clock ticket before the Lua dispatcher can take it.
+            if (state == State::queued && !native_clock_queued.load(std::memory_order_relaxed))
             {
                 state = State::taken;
                 fast_queued.store(false, std::memory_order_release);
@@ -469,7 +497,8 @@ namespace
         std::int64_t ticket{};
         {
             std::lock_guard lock(mutex);
-            if (state != State::queued || !fast_header.fields) return 0;
+            if (state != State::queued || !fast_header.fields || native_clock_queued.load(std::memory_order_relaxed))
+                return 0;
             state = State::taken;
             fast_queued.store(false, std::memory_order_release);
             pending = std::move(command);
@@ -663,7 +692,6 @@ namespace
         return 2;
     }
 
-    namespace Hooks = RC::Unreal::Hook;
 
     struct TickMark
     {
@@ -905,10 +933,10 @@ namespace
         return 1;
     }
 
-    void publish_reply_frame(std::int64_t ticket, const std::shared_ptr<const std::string>& snapshot)
+    bool publish_reply_frame(std::int64_t ticket, const std::shared_ptr<const std::string>& snapshot)
     {
         std::lock_guard lock(mutex);
-        if (state != State::running || ticket != active_ticket) return;
+        if (state != State::running || ticket != active_ticket) return false;
         if (!snapshot)
         {
             state = State::too_large;
@@ -919,6 +947,147 @@ namespace
             state = State::replied;
         }
         changed.notify_all();
+        return snapshot != nullptr;
+    }
+
+    std::optional<std::int64_t> unsigned_field(std::string_view field)
+    {
+        if (field.empty() || field.size() > 16 || field.front() < '0' || field.front() > '9') return {};
+        std::int64_t value{};
+        const auto end = field.data() + field.size();
+        const auto result = std::from_chars(field.data(), end, value);
+        if (result.ec != std::errc{} || result.ptr != end) return {};
+        return value;
+    }
+
+    struct ClockCommand
+    {
+        std::string_view id, epoch, map;
+        std::int64_t sequence, milliseconds;
+    };
+
+    std::optional<ClockCommand> parse_clock_command(std::string_view payload)
+    {
+        const auto last = payload.find_last_not_of("\r\n");
+        if (last == payload.npos) return {};
+        payload = payload.substr(0, last + 1);
+        if (payload.find_first_of(std::string_view{"\r\n\0", 3}) != payload.npos) return {};
+        std::array<std::string_view, 6> fields{};
+        for (std::size_t index = 0; index < fields.size(); ++index)
+        {
+            const auto separator = payload.find('\t');
+            const bool final = index + 1 == fields.size();
+            if (final != (separator == payload.npos)) return {};
+            fields[index] = payload.substr(0, separator);
+            if (!final) payload.remove_prefix(separator + 1);
+        }
+        if (!plain_bridge_token(fields[0]) || fields[1] != guest_clock_action || fields[2].empty() ||
+            fields[2].size() > 128 || fields[4].empty()) return {};
+        const auto sequence = unsigned_field(fields[3]);
+        const auto milliseconds = unsigned_field(fields[5]);
+        if (!sequence || !milliseconds) return {};
+        return ClockCommand{fields[0], fields[2], fields[4], *sequence, *milliseconds};
+    }
+
+    std::int64_t clock_status_sequence(std::string_view frame, std::string_view map)
+    {
+        constexpr std::string_view prefix = "schema\t1\nseq\t";
+        if (!frame.starts_with(prefix)) return 0;
+        frame.remove_prefix(prefix.size());
+        const auto end = frame.find('\n');
+        if (end == frame.npos) return 0;
+        const auto sequence = unsigned_field(frame.substr(0, end));
+        if (!sequence || *sequence == 0) return 0;
+        frame.remove_prefix(end + 1);
+        if (!frame.starts_with("ack\t")) return 0;
+        const auto next = frame.find('\n');
+        if (next == frame.npos) return 0;
+        frame.remove_prefix(next + 1);
+        constexpr std::string_view connected = "session\tclient\tconnected\t";
+        if (!frame.starts_with(connected)) return 0;
+        frame.remove_prefix(connected.size());
+        return frame.substr(0, frame.find('\t')) == map ? *sequence : 0;
+    }
+
+    void dispatch_native_clock()
+    {
+        if (!native_clock_queued.load(std::memory_order_acquire) || !RC::Unreal::IsInGameThreadRaw()) return;
+        std::array<char, guest_clock_command_limit> buffer;
+        std::size_t length{};
+        std::int64_t ticket{};
+        {
+            std::unique_lock lock(mutex, std::try_to_lock);
+            if (!lock || !attached || state != State::queued ||
+                !native_clock_queued.load(std::memory_order_relaxed) || command.size() > buffer.size()) return;
+            length = command.size();
+            std::memcpy(buffer.data(), command.data(), length);
+            ticket = active_ticket;
+        }
+
+        const auto request = parse_clock_command({buffer.data(), length});
+        std::shared_ptr<const std::string> snapshot;
+        {
+            std::unique_lock lock(status_mutex, std::try_to_lock);
+            if (!lock) return;
+            snapshot = status_frame;
+        }
+        const auto sequence = request && snapshot ? clock_status_sequence(*snapshot, request->map) : 0;
+        namespace clock = silverfish::native_guest_clock;
+        const auto prepared = sequence ? clock::prepare_refresh(request->epoch, request->map, request->sequence,
+            request->milliseconds) : std::nullopt;
+        {
+            // WaitV1 and CloseV1 can retire an unclaimed ticket while we qualify
+            // the seat. Claim only the exact ticket still waiting to run.
+            std::unique_lock lock(mutex, std::try_to_lock);
+            if (!lock || !attached || state != State::queued || active_ticket != ticket ||
+                !native_clock_queued.load(std::memory_order_relaxed)) return;
+            native_clock_queued.store(false, std::memory_order_release);
+            if (!prepared) return;
+            state = State::running;
+            fast_queued.store(false, std::memory_order_release);
+        }
+
+        auto refusal = prepared->refusal;
+        if (refusal.empty() && !clock::apply_refresh(*prepared))
+            refusal = "guest_clock_lease_readback_unavailable";
+        std::string output{"native-guest-clock-reply\t1\t"};
+        output.append(request->id).append("\t").append(std::to_string(sequence));
+        if (refusal.empty())
+        {
+            output.append("\taccepted\tauthenticated guest clock projection armed\nnative-guest-clock\t");
+            output.append(prepared->map).append("\t").append(prepared->pawn).append("\t");
+            output.append(prepared->epoch).append("\t").append(std::to_string(prepared->sequence)).append("\t");
+            output.append(std::to_string(prepared->milliseconds)).append("\tarmed\t0\t-\n");
+        }
+        else output.append("\terror\t").append(refusal).append("\n");
+        const bool published = publish_reply_frame(ticket, std::make_shared<const std::string>(std::move(output)));
+        if (!published || !fast_profile_enabled()) return;
+        if (!refusal.empty())
+        {
+            ++clock_profile.refused;
+            return;
+        }
+        ++clock_profile.accepted;
+        clock_profile.id = request->id;
+        clock_profile.map = prepared->map;
+        clock_profile.pawn = prepared->pawn;
+        clock_profile.epoch = prepared->epoch;
+        clock_profile.clock_sequence = prepared->sequence;
+        clock_profile.status_sequence = sequence;
+    }
+
+    int read_clock_dispatch_profile(const Lua& lua)
+    {
+        if (lua.get_stack_size() != 0 || !RC::Unreal::IsInGameThreadRaw()) return 0;
+        lua.set_integer(clock_profile.accepted);
+        lua.set_integer(clock_profile.refused);
+        lua.set_string(clock_profile.id);
+        lua.set_string(clock_profile.map);
+        lua.set_string(clock_profile.pawn);
+        lua.set_string(clock_profile.epoch);
+        lua.set_integer(clock_profile.clock_sequence);
+        lua.set_integer(clock_profile.status_sequence);
+        return 8;
     }
 
     int publish(const Lua& lua)
@@ -1566,6 +1735,7 @@ extern "C" __declspec(dllexport) std::int64_t SilverfishBridgeSubmitV1(const cha
     state = State::queued;
     fast_header = classify_fast_header(command);
     fast_queued.store(fast_header.fields != 0, std::memory_order_release);
+    native_clock_queued.store(native_clock_command(command), std::memory_order_release);
     return active_ticket;
 }
 
@@ -1608,6 +1778,32 @@ extern "C" __declspec(dllexport) void SilverfishBridgeCancelV1(std::int64_t tick
 
 namespace silverfish::local_bridge
 {
+    void install_native_dispatch()
+    {
+        const auto enabled = [](const wchar_t* name) {
+            wchar_t value[2]{};
+            return GetEnvironmentVariableW(name, value, 2) == 1 && value[0] == L'1';
+        };
+        if (native_dispatch_hook != Hooks::ERROR_ID ||
+            !enabled(L"SILVERFISH_COOP_RESIDENT_TITLE") || !enabled(L"SILVERFISH_COOP_INSTALLED_TITLE") ||
+            !enabled(L"SILVERFISH_COOP_NATIVE_GUEST_CLOCK") || !enabled(L"SILVERFISH_COOP_NATIVE_ZONE")) return;
+        native_dispatch_hook = Hooks::RegisterEngineTickPreCallback(
+            [](auto&, RC::Unreal::UEngine*, float, bool) { dispatch_native_clock(); },
+            {false, false, STR("SilverfishCoopNative"), STR("Dispatch qualified local clock commands")});
+        native_dispatch_installed.store(native_dispatch_hook != Hooks::ERROR_ID, std::memory_order_release);
+    }
+
+    void uninstall_native_dispatch()
+    {
+        native_dispatch_installed.store(false, std::memory_order_release);
+        {
+            std::lock_guard lock(mutex);
+            native_clock_queued.store(false, std::memory_order_release);
+        }
+        if (native_dispatch_hook != Hooks::ERROR_ID) Hooks::UnregisterCallback(native_dispatch_hook);
+        native_dispatch_hook = Hooks::ERROR_ID;
+    }
+
     bool queue_input(std::string record)
     {
         std::lock_guard lock(mutex);
@@ -1651,6 +1847,7 @@ namespace silverfish::local_bridge
         if (timing_fixture_enabled())
         {
             lua.register_function("SilverfishReadFastLocalBridgeProfile", read_fast_profile);
+            lua.register_function("SilverfishReadNativeClockDispatchProfile", read_clock_dispatch_profile);
             lua.register_function("SilverfishFormatNativeSessionStatusRows", format_native_session_status_rows);
             lua.register_function("SilverfishBridgeProfileStamp", profile_stamp);
             register_early_engine_tick_profile();

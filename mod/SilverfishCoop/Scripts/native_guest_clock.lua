@@ -57,10 +57,16 @@ end
 
 local function read(current)
     if type(SilverfishReadNativeGuestClock) ~= "function" then return end
-    local sequence, ms, hits, original = SilverfishReadNativeGuestClock(current.pawn:GetAddress())
-    if sequence ~= lease.sequence or ms ~= lease.ms or math.type(hits) ~= "integer" or hits < 0 or hits > 100000
+    local sequence, ms, hits, original, epoch = SilverfishReadNativeGuestClock(current.pawn:GetAddress())
+    if current.native then
+        if epoch ~= current.epoch or math.type(sequence) ~= "integer" or sequence < 1 or sequence > max_sequence
+            or math.type(ms) ~= "integer" or ms < 0 or ms > max_ms then return end
+    elseif sequence ~= current.sequence or ms ~= current.ms then
+        return
+    end
+    if math.type(hits) ~= "integer" or hits < 0 or hits > 100000
         or (hits > 0 and math.type(original) ~= "integer") then return end
-    return {hits = hits, original = original}
+    return {sequence = sequence, ms = ms, hits = hits, original = original}
 end
 
 function clock.clear()
@@ -80,7 +86,8 @@ function clock.sync(state, phase)
     if not lease then return end
     if type(SilverfishVerifyNativeGuestClockSeat) == "function" and observed_seat(state, phase, lease)
         and SilverfishVerifyNativeGuestClockSeat(lease.world:GetAddress(), lease.pawn:GetAddress(),
-            lease.controller:GetAddress(), lease.instance:GetAddress(), lease.connection:GetAddress(), lease.sequence) == true then
+            lease.controller:GetAddress(), lease.instance:GetAddress(), lease.connection:GetAddress(),
+            lease.native and lease.epoch or lease.sequence) == true then
         return
     end
     if not same_context(context(state, phase), lease) then clock.clear() end
@@ -111,12 +118,12 @@ local function probe(current)
     if ok ~= true or status ~= "stock_widget_tick_verified" then error(tostring(status), 0) end
     local report = read(current)
     local text = widget.TextBlock_Name:GetText():ToString()
-    local minutes = lease.ms // 60000
+    local minutes = report and report.ms // 60000 or 0
     local time = ("%02d:%02d"):format((minutes // 60) % 24, minutes % 60)
     if not report or report.hits < 1 or type(text) ~= "string" or #text > 512 or not text:find(time, 1, true) then
         error("guest_clock_fixture_stock_text_unverified", 0)
     end
-    fixture = { epoch = lease.epoch, sequence = lease.sequence, ms = lease.ms, hits = report.hits, text = text:gsub("%c", " ") }
+    fixture = { epoch = lease.epoch, sequence = report.sequence, ms = report.ms, hits = report.hits, text = text:gsub("%c", " ") }
     return "stock guest time widget verified"
 end
 
@@ -142,25 +149,27 @@ function clock.command(fields, state, phase)
         error("guest_clock_exact_frame_required", 0)
     end
     if lease and not same_context(current, lease) then clock.clear() end
-    if lease and (lease.epoch ~= epoch or sequence <= lease.sequence) then error("guest_clock_frame_stale_or_wrong_epoch", 0) end
+    if lease and (lease.epoch ~= epoch or sequence <= lease.sequence) then
+        error("guest_clock_frame_stale_or_wrong_epoch", 0)
+    end
     if not valid(load_widget()) then error("guest_clock_widget_class_unavailable", 0) end
-    local ok, status = SilverfishSetNativeGuestClock(current.pawn:GetAddress(), current.controller:GetAddress(),
-        current.world:GetAddress(), sequence, ms)
+    local ok, status, native = SilverfishSetNativeGuestClock(current.pawn:GetAddress(), current.controller:GetAddress(),
+        current.world:GetAddress(), sequence, ms, epoch, map, current.name)
     if ok ~= true or status ~= "armed" then error(tostring(status), 0) end
-    current.epoch, current.sequence, current.ms = epoch, sequence, ms
+    current.epoch, current.sequence, current.ms, current.native = epoch, sequence, ms, native == true
     lease = current
     return "authenticated guest clock projection armed", current
 end
 
 local function lease_row(current, report, status_row)
-    return status_row("native-guest-clock", current.map, current.name, lease.epoch, lease.sequence, lease.ms,
+    return status_row("native-guest-clock", current.map, current.name, current.epoch, report.sequence, report.ms,
         report.hits > 0 and "projected" or "armed", report.hits, report.original or "-")
 end
 
 function clock.command_reply(fields, state, phase, sequence, status_row)
     local accepted, message, current = pcall(clock.command, fields, state, phase)
     local report = accepted and current and read(current)
-    if accepted and not report then
+    if accepted and (not report or report.sequence ~= current.sequence or report.ms ~= current.ms) then
         return status_row("native-guest-clock-reply", 1, fields[1], sequence, "error",
             "guest_clock_lease_readback_unavailable") .. "\n"
     end

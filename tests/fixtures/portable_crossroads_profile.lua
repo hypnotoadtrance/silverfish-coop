@@ -14,6 +14,7 @@ local cached_format = SilverfishFormatLocalStatusRow
 local uncached_format = SilverfishFormatLocalStatusRowUncached
 local last_status_sample
 local last_census_map, watched_title_scope, session_publication
+local clock_lua_requests, clock_lua_count = {}, 0
 
 local function record(active, tag, wall_ms, cycles)
     local rows = active.rows[tag]
@@ -582,6 +583,31 @@ local function compare_kill_volume_visit()
         native_ms, lua_ms, native_kib, lua_kib)
 end
 
+function SilverfishProfileCrossroadsClockLuaFallback(nonce)
+    clock_lua_count = clock_lua_count + 1
+    clock_lua_requests[(clock_lua_count - 1) % 64 + 1] = nonce
+end
+
+local function read_clock_dispatch()
+    local read = SilverfishReadNativeClockDispatchProfile
+    if type(read) ~= "function" then return "unavailable" end
+    local accepted, refused, nonce, map, pawn, epoch, clock_sequence, status_sequence = read()
+    assert(math.type(accepted) == "integer" and accepted >= 0 and math.type(refused) == "integer" and refused >= 0,
+        "invalid native clock dispatch counters")
+    local lua_ids = table.concat(clock_lua_requests, ",")
+    if accepted == 0 then return table.concat({accepted, refused, clock_lua_count, lua_ids}, "\t") end
+    assert(type(nonce) == "string" and #nonce == 32 and nonce:match("^%x+$") and type(map) == "string"
+        and type(pawn) == "string" and type(epoch) == "string"
+        and math.type(clock_sequence) == "integer" and math.type(status_sequence) == "integer",
+        "incomplete native clock dispatch receipt")
+    local seen_by_lua = false
+    for _, observed in ipairs(clock_lua_requests) do
+        if observed == nonce then seen_by_lua = true; break end
+    end
+    return table.concat({accepted, refused, clock_lua_count, lua_ids, nonce, map, pawn, epoch, clock_sequence,
+        status_sequence, seen_by_lua and 1 or 0}, "\t")
+end
+
 local function compare_save_game_clock()
     local read, stock = SilverfishReadNativeSavedGameSeconds, native_world_view.read_game_seconds_lua
     if type(read) ~= "function" then return "unavailable" end
@@ -1074,6 +1100,9 @@ LoopInGameThreadWithDelay(50, function()
         else
             message = "unavailable"
         end
+    elseif action == "clockdispatch" and not capture then
+        local ok, value = pcall(read_clock_dispatch)
+        if ok then message = value else message = "clock dispatch profile failed: " .. tostring(value) end
     elseif action == "gameclock" and not capture then
         local ok, value = pcall(compare_save_game_clock)
         if ok then message = value else message = "stock save clock comparison failed: " .. tostring(value) end

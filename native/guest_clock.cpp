@@ -4,11 +4,13 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -148,6 +150,13 @@ namespace
             return locals.Num() == 1 && entry->GetObjectPropertyValue(locals.GetRawPtr()) == l;
         }
 
+        bool visible_world() const
+        {
+            auto* view = object_field(local.Get(), STR("ViewportClient"));
+            return live(view) && object_field(view, STR("World")) == world.Get() &&
+                object_field(view, STR("GameInstance")) == instance.Get();
+        }
+
         bool bind(Address pawn_address, Address controller_address, Address world_address)
         {
             U::UObject* p{};
@@ -248,6 +257,7 @@ namespace
         std::int64_t sequence{}, milliseconds{}, original{};
         int hits{};
         U::FWeakObjectPtr last_widget{};
+        std::string epoch, map, pawn;
     } scope;
 
     std::atomic<std::uint64_t> generation{1};
@@ -300,7 +310,12 @@ namespace
         const auto& seat = scope.seat;
         for (auto* object : {seat.world.Get(), seat.pawn.Get(), seat.controller.Get(), seat.instance.Get(), seat.connection.Get()})
             if (!object || !lua.is_integer() || static_cast<Address>(lua.get_integer()) != address(object)) return 0;
-        if (!lua.is_integer() || lua.get_integer() != scope.sequence || !seat.current()) return 0;
+        if (lua.is_integer())
+        {
+            if (lua.get_integer() != scope.sequence) return 0;
+        }
+        else if (scope.epoch.empty() || !lua.is_string() || lua.get_string() != scope.epoch) return 0;
+        if (!seat.current()) return 0;
         lua.set_bool(true);
         return 1;
     }
@@ -347,38 +362,93 @@ namespace
         return 2;
     }
 
+    bool valid_epoch(std::string_view epoch)
+    {
+        if (epoch.empty() || epoch.size() > 128) return false;
+        for (const auto byte : epoch)
+            if (!((byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') ||
+                (byte >= '0' && byte <= '9') || byte == '_' || byte == '-')) return false;
+        return true;
+    }
+
+    bool matches_identity(const Seat& seat, std::string_view map, std::string_view name)
+    {
+        auto* world = seat.world.Get();
+        auto* pawn = seat.pawn.Get();
+        if (!world || !pawn || name.empty() || name.size() > 512 ||
+            !silverfish::world_path::package(map)) return false;
+        for (const unsigned char byte : name)
+            if (std::iscntrl(byte)) return false;
+        const auto path = RC::to_string(world->GetPathName());
+        return std::string_view(path).substr(0, path.find('.')) == map && RC::to_string(pawn->GetFullName()) == name;
+    }
+
+    void arm(std::int64_t sequence, std::int64_t milliseconds)
+    {
+        scope.sequence = sequence;
+        scope.milliseconds = milliseconds;
+        scope.expires = Clock::now() + lease;
+        scope.hits = 0;
+        scope.last_widget.Reset();
+    }
+
     int set_scope(const Lua& lua)
     {
-        if (!available() || lua.get_stack_size() != 5 || !lua.is_integer(1) || !lua.is_integer(2) ||
-            !lua.is_integer(3) || !lua.is_integer(4) || !lua.is_integer(5)) return result(lua, false, "guest_clock_scope_unavailable");
-        const auto pawn = lua.get_integer();
-        const auto controller = lua.get_integer();
-        const auto world = lua.get_integer();
-        const auto sequence = lua.get_integer();
-        const auto milliseconds = lua.get_integer();
+        const auto count = lua.get_stack_size();
+        const bool qualified = count == 8;
+        if (!available() || (count != 5 && !qualified) || !lua.is_integer(1) || !lua.is_integer(2) ||
+            !lua.is_integer(3) || !lua.is_integer(4) || !lua.is_integer(5) ||
+            (qualified && (!lua.is_string(6) || !lua.is_string(7) || !lua.is_string(8))))
+            return result(lua, false, "guest_clock_scope_unavailable");
+        auto* stack = lua.get_lua_state();
+        const auto pawn = lua_tointeger(stack, 1);
+        const auto controller = lua_tointeger(stack, 2);
+        const auto world = lua_tointeger(stack, 3);
+        const auto sequence = lua_tointeger(stack, 4);
+        const auto milliseconds = lua_tointeger(stack, 5);
         if (pawn <= 0 || controller <= 0 || world <= 0 || sequence <= 0 || sequence > max_sequence ||
             milliseconds < 0 || milliseconds > max_ms) return result(lua, false, "guest_clock_frame_out_of_range");
-        const auto epoch = generation.load(std::memory_order_acquire);
-        if (scope.generation == epoch && address(scope.seat.pawn.Get()) == static_cast<Address>(pawn) &&
+        const auto text = [stack](int index) -> std::string_view {
+            std::size_t size{};
+            const auto* bytes = lua_tolstring(stack, index, &size);
+            return {bytes, size};
+        };
+        const auto epoch = qualified ? text(6) : std::string_view{};
+        const auto map = qualified ? text(7) : std::string_view{};
+        const auto name = qualified ? text(8) : std::string_view{};
+        if (qualified && !valid_epoch(epoch)) return result(lua, false, "guest_clock_exact_frame_required");
+        const auto current_generation = generation.load(std::memory_order_acquire);
+        if (scope.generation == current_generation && address(scope.seat.pawn.Get()) == static_cast<Address>(pawn) &&
             address(scope.seat.controller.Get()) == static_cast<Address>(controller) &&
             address(scope.seat.world.Get()) == static_cast<Address>(world) && scope.seat.current())
         {
-            if (sequence <= scope.sequence) return result(lua, false, "guest_clock_frame_stale");
+            if (qualified && !matches_identity(scope.seat, map, name))
+                return result(lua, false, "guest_clock_exact_frame_required");
+            if (!qualified && !scope.epoch.empty()) return result(lua, false, "guest_clock_exact_frame_required");
+            if (sequence <= scope.sequence || (qualified && !scope.epoch.empty() && scope.epoch != epoch))
+                return result(lua, false, qualified ? "guest_clock_frame_stale_or_wrong_epoch" : "guest_clock_frame_stale");
         }
         else
         {
             Scope next;
             if (!next.seat.bind(pawn, controller, world) || !next.schema.bind(next.seat))
                 return result(lua, false, "guest_clock_exact_seat_or_widget_schema_unavailable");
-            next.generation = epoch;
+            if (qualified && !matches_identity(next.seat, map, name))
+                return result(lua, false, "guest_clock_exact_frame_required");
+            next.generation = current_generation;
             scope = std::move(next);
         }
-        scope.sequence = sequence;
-        scope.milliseconds = milliseconds;
-        scope.expires = Clock::now() + lease;
-        scope.hits = 0;
-        scope.last_widget = U::FWeakObjectPtr{};
-        return result(lua, true, "armed");
+        if (qualified)
+        {
+            scope.epoch = epoch;
+            scope.map = map;
+            scope.pawn = name;
+        }
+        arm(sequence, milliseconds);
+        result(lua, true, "armed");
+        if (!qualified) return 2;
+        lua.set_bool(true);
+        return 3;
     }
 
     int read(const Lua& lua)
@@ -388,6 +458,13 @@ namespace
         lua.set_integer(scope.sequence);
         lua.set_integer(scope.milliseconds);
         lua.set_integer(scope.hits);
+        if (!scope.epoch.empty())
+        {
+            if (scope.hits) lua.set_integer(scope.original);
+            else lua_pushnil(lua.get_lua_state());
+            lua.set_string(scope.epoch);
+            return 5;
+        }
         if (scope.hits) lua.set_integer(scope.original);
         return scope.hits ? 4 : 3;
     }
@@ -431,6 +508,33 @@ namespace
         const bool verified = scope.hits == before + 1 && scope.last_widget.Get() == widget && ticks(saved) == original;
         return result(lua, verified, verified ? "stock_widget_tick_verified" : "guest_clock_fixture_tick_unverified");
     }
+}
+
+std::optional<silverfish::native_guest_clock::PreparedRefresh> silverfish::native_guest_clock::prepare_refresh(
+    std::string_view epoch, std::string_view map, std::int64_t sequence, std::int64_t milliseconds)
+{
+    // Only an unexpired lease negotiated by the fully qualified Lua path can
+    // be renewed here. A handoff or cold seat keeps the ordinary command path.
+    if (!available() || scope.epoch.empty() || !active() || !scope.seat.visible_world()) return {};
+    std::string_view refusal;
+    if (map != scope.map || !valid_epoch(epoch) || sequence < 1 || sequence > max_sequence ||
+        milliseconds < 0 || milliseconds > max_ms)
+        refusal = "guest_clock_exact_frame_required";
+    else if (epoch != scope.epoch || sequence <= scope.sequence)
+        refusal = "guest_clock_frame_stale_or_wrong_epoch";
+    return PreparedRefresh{scope.epoch, scope.map, scope.pawn, refusal, sequence, milliseconds,
+        scope.sequence, scope.generation};
+}
+
+bool silverfish::native_guest_clock::apply_refresh(const PreparedRefresh& refresh)
+{
+    // The bridge claims the ticket between prepare and apply, without
+    // executing Lua or Unreal callbacks between the two calls.
+    if (!refresh.refusal.empty() || !available() || refresh.generation != generation.load(std::memory_order_acquire) ||
+        refresh.generation != scope.generation || scope.sequence != refresh.previous_sequence ||
+        Clock::now() >= scope.expires) return false;
+    arm(refresh.sequence, refresh.milliseconds);
+    return refresh.generation == generation.load(std::memory_order_acquire);
 }
 
 void silverfish::native_guest_clock::install_hooks()

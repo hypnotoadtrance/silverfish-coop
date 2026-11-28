@@ -42,8 +42,12 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_t
     performance = {}
     if profile:
         from live_stock_creator_smoke import verify_personal_time_shift
-        from portable_crossroads_profile import capture_rendered_frame, profile_world
+        from portable_crossroads_profile import capture_rendered_frame, profile_world, verify_native_clock_dispatch
 
+        observatory_clock = await verify_native_clock_dispatch(
+            guest, guest_run, OBSERVATORY, initial["zone_epoch"], initial["game"]["pawns"]["local"]["name"], probe)
+        if observatory_clock:
+            performance["observatory_native_clock_dispatch"] = observatory_clock
         performance["observatory"] = await profile_world(host, guest, OBSERVATORY, probe)
         performance["personal_time_shift"] = await verify_personal_time_shift(host, guest)
     before_travel = campaign_save_hashes(host.campaign)
@@ -142,7 +146,13 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_t
             assert loading["covered"] and loading["cue"], loading
             performance["crossroads_loading"] = loading
             pawn_name = settled["game"]["pawns"]["local"]["name"]
-            performance["crossroads_clock"] = await verify_stock_clock(guest_run, CROSSROADS, settled["zone_epoch"], pawn_name)
+            crossroads_clock = await verify_native_clock_dispatch(
+                guest, guest_run, CROSSROADS, settled["zone_epoch"], pawn_name, probe)
+            if crossroads_clock:
+                performance["crossroads_native_clock_dispatch"] = crossroads_clock
+                performance["crossroads_clock"] = crossroads_clock["widget"]
+            else:
+                performance["crossroads_clock"] = await verify_stock_clock(guest_run, CROSSROADS, settled["zone_epoch"], pawn_name)
             performance["crossroads"] = await profile_world(host, guest, CROSSROADS, probe, gc_trial=gc_trial,
                                                               host_maintenance_trial=host_maintenance_trial)
             if rendered:

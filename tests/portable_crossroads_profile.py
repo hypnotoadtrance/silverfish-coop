@@ -7,7 +7,7 @@ import re
 import struct
 import time
 
-from portable_guest_world_start import wait_resident_status
+from portable_guest_world_start import verify_stock_clock, wait_resident_status
 from tools.silverfish import native_downed_markers, native_kill_volume, native_loot, native_package_handoff_journal
 from tools.silverfish import native_loose_pickup, native_stash
 from tools.silverfish.authored_loot import full_name
@@ -260,6 +260,79 @@ async def read_session_census(host, guest, probe, area):
                           "invalidated_status_token_refused": True, "prior_travel_map_refused": traveled == "1"}
     assert not evidence or set(evidence) == set(seats), evidence
     return evidence
+
+
+async def verify_native_clock_dispatch(guest, run, area, epoch, pawn, probe):
+    async def sample():
+        reply = await session_profile_request(guest, probe, "clockdispatch")
+        if reply == "unavailable":
+            return None
+        assert not reply.startswith("clock dispatch profile failed"), reply
+        accepted, refused, fallbacks, lua_ids, *receipt = reply.split("\t")
+        counts = {"native_accepted": int(accepted), "native_refused": int(refused), "lua_apply_calls": int(fallbacks)}
+        assert min(counts.values()) >= 0 and bool(counts["native_accepted"]) == bool(receipt), reply
+        result = {"counts": counts, "lua_ids": set(filter(None, lua_ids.split(",")))}
+        if receipt:
+            nonce, map_name, name, visit, sequence, status_sequence, entered_lua = receipt
+            assert re.fullmatch(r"[0-9a-f]{32}", nonce) and int(sequence) > 0 and int(status_sequence) > 0, reply
+            assert entered_lua in ("0", "1"), reply
+            result["receipt"] = {"command_id": nonce, "map": map_name, "pawn": name, "epoch": visit,
+                                 "sequence": int(sequence), "status_sequence": int(status_sequence),
+                                 "entered_lua": entered_lua == "1"}
+        return result
+
+    first = await sample()
+    if first is None:
+        return None
+    renewals = {}
+
+    def record(report):
+        receipt = report.get("receipt")
+        if not receipt or (receipt["map"], receipt["epoch"], receipt["pawn"]) != (area, epoch, pawn):
+            return
+        assert not receipt["entered_lua"], receipt
+        sequence = receipt["sequence"]
+        if previous := renewals.get(sequence):
+            assert previous == receipt, (previous, receipt)
+        else:
+            assert not renewals or sequence > max(renewals), (renewals, receipt)
+            renewals[sequence] = receipt
+
+    latest = first
+    record(first)
+    try:
+        async with asyncio.timeout(10):
+            while len(renewals) < 2:
+                await asyncio.sleep(.12)
+                latest = await sample()
+                assert latest is not None
+                record(latest)
+            while True:
+                widget = await verify_stock_clock(run, area, epoch, pawn)
+                latest = await sample()
+                assert latest is not None
+                record(latest)
+                if matched := renewals.get(widget["sequence"]):
+                    accepted_ids = {receipt["command_id"] for receipt in renewals.values()}
+                    assert len(accepted_ids) == len(renewals) and accepted_ids.isdisjoint(latest["lua_ids"]), renewals
+                    return {"native_renewals": list(renewals.values()), "widget": widget,
+                            "widget_command_id": matched["command_id"], "first_counters": first["counts"],
+                            "last_counters": latest["counts"]}
+                await asyncio.sleep(.12)
+    except TimeoutError as error:
+        raise AssertionError(f"No stock widget matched two native clock renewals in {area} visit {epoch}; "
+                             f"observed {list(renewals)}, counters {latest['counts']}") from error
+
+
+def instrument_guest_clock_dispatch(source):
+    anchor = 'function clock.command(fields, state, phase)\n    local action = fields[2]\n'
+    if source.count(anchor) != 1:
+        raise ValueError("The stock guest clock fallback anchor changed")
+    return source.replace(anchor, anchor + """
+    if action == "native-guest-clock-apply" then
+        SilverfishProfileCrossroadsClockLuaFallback(fields[1])
+    end
+""", 1)
 
 
 def instrument_kill_volume(source, *, measure=False, recovery_fixture=False):
