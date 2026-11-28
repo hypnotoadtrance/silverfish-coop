@@ -941,7 +941,30 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
                 assert sample["timings"]["observer_world_lookup"]["count"] <= sample["timings"]["delayed_observers"]["count"]
             coarse["uncached_world_walking"] = dict(zip(seats, raw_samples, strict=True))
             coarse["uncached_world_displacement_cm"] = raw_displacement
-        if gc_trial == "generational":
+        if gc_trial == "minor":
+            assert {entry["active"] for entry in collector_modes.values()} == {"generational"}, collector_modes
+            results = {}
+            active = None
+            try:
+                for label, minor in (("before", 20), ("smaller_first", 8), ("smaller_second", 8), ("after", 20)):
+                    if minor != active:
+                        action = "gcminorsmall" if minor == 8 else "gcminordefault"
+                        applied = await asyncio.gather(*(command(seat, action) for seat in seats.values()))
+                        assert applied == [f"generational,{minor},100"] * len(seats), applied
+                        active = minor
+                        await walk(2)
+                    before_mode = await transport()
+                    await arm("gcmode")
+                    travelled = await walk(5)
+                    samples = await asyncio.gather(*(read(seat) for seat in seats.values()))
+                    assert all(sample["seconds"] >= 12 for sample in samples), samples
+                    results[label] = {"minor": minor, "major": 100, "displacement_cm": travelled,
+                                      **dict(zip(seats, samples, strict=True)),
+                                      "transport": traffic(before_mode, await transport())}
+            finally:
+                await asyncio.gather(*(command(seat, "gcminordefault") for seat in seats.values()))
+            coarse["gc_minor_comparison"] = results
+        elif gc_trial == "generational":
             results, switches = {}, {}
             original, = {entry["active"] for entry in collector_modes.values()}
             mode = original

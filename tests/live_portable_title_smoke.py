@@ -9706,7 +9706,7 @@ if __name__ == "__main__":
                         help="measure co-op frame and subsystem times around the stock weather travel check")
     parser.add_argument("--rendered", action="store_true",
                         help="run with offscreen graphics and capture world frames when profiling Crossroads")
-    parser.add_argument("--crossroads-gc-trial", choices=("tuned", "generational"), nargs="?", const="tuned",
+    parser.add_argument("--crossroads-gc-trial", choices=("tuned", "generational", "minor"), nargs="?", const="tuned",
                         help="compare the current and earlier Lua collection schedules while walking")
     parser.add_argument("--stock-lightning", action="store_true",
                         help="verify one stock lightning strike and thunder across a private Crossroads pair")

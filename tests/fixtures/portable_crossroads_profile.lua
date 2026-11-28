@@ -482,6 +482,10 @@ LoopInGameThreadWithDelay(50, function()
                 message = "matched world and package, returned an invalid object for the missing path"
             end
         end
+    elseif (action == "gcminordefault" or action == "gcminorsmall") and not capture then
+        local minor = action == "gcminorsmall" and 8 or 20
+        local old = collectgarbage("generational", minor, 100)
+        message = ("%s,%d,100"):format(old, minor)
     elseif (action == "incremental" or action == "generational") and not capture then
         local started, before = stamp(), collectgarbage("count")
         local old = collectgarbage(action)
