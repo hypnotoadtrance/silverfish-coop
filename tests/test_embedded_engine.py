@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from test_title_handoff import ready
 from tools.silverfish import embedded_engine as embedded
@@ -84,6 +84,21 @@ class EmbeddedEngineTests(unittest.IsolatedAsyncioTestCase):
     async def host(self, port=28016):
         return await embedded.EmbeddedEngine.acquire(self.work, self.campaign, role="host", internal_port=port,
                                                      required_env={"SILVERFISH_COOP_NATIVE_ZONE": "1"})
+
+    async def test_native_startup_waits_for_two_samples_and_keeps_command_sequence(self):
+        saved = self.campaign / "game-user" / "Saved"
+        engine = embedded.EmbeddedEngine(os.getpid(), self.bridge_path(self.campaign), saved, 28016,
+                                         session_directory=self.campaign)
+        engine._native_title = Mock(read=Mock(side_effect=[(100, ""), None, (101, ""), (102, "")]))
+        ordinary = self.frame(7)
+        del ordinary[embedded.STARTUP_KEY]
+        engine.bridge.snapshot = Mock(return_value=ordinary)
+        with patch.object(embedded.native_title_entry, "parse_native_startup", side_effect=lambda seq, _: self.frame(seq)):
+            await engine.observe_title()
+        self.assertEqual(engine._native_title.read.call_count, 4)
+        engine.bridge.acknowledgement = 8
+        engine.bridge.frames = [self.frame(9, self.campaign) | {"save_scope": None}]
+        self.assertEqual((await engine.release())["sequence"], 9)
 
     async def test_host_acquires_current_process_once_and_releases_through_stock_leave(self):
         engine = await self.host()

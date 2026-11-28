@@ -142,7 +142,21 @@ assert(#bridge.rows(state, "ready", row) == 0)
 assert(requests_pause(menu), "A title or solo session must keep stock pause")
 local allowed, error_text = pcall(bridge.command, {"1", "native-coop-pause-fixture", "open"}, state, "hosting")
 assert(not allowed and error_text == "native_coop_pause_fixture_unavailable")
+local world_name = world.GetFullName
+local native_reads = 0
+env.SilverfishReadNativePauseDriver = function(world_id, controller_id, pawn_id, world_map, guest)
+    assert(world_id == 10 and controller_id == 20 and pawn_id == 30 and world_map == map and guest == false)
+    native_reads = native_reads + 1
+    return world.NetDriver
+end
+world.GetFullName = function() error("A qualified native context should skip the repeated stock lookup") end
 bridge.sync(state, "hosting")
+assert(native_reads == 1)
+world.GetFullName = world_name
+env.SilverfishReadNativePauseDriver = function() native_reads = native_reads + 1 end
+bridge.sync(state, "hosting")
+assert(native_reads == 2, "A native refusal should fall back to stock context")
+env.SilverfishReadNativePauseDriver = nil
 assert(bridge.rows(state, "hosting", row)[1] == row("native-coop-pause", "host", first, "armed", 0))
 assert(not requests_pause(menu), "The host's exact stock pause menu keeps the world running")
 already_paused = true

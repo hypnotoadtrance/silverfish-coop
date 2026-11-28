@@ -30,7 +30,7 @@ local function pointer(object)
     return valid(object) and math.tointeger(object:GetAddress()) or nil
 end
 
-local function context(state, phase)
+local function context_lua(state, phase)
     local role = phase == "hosting" and "host" or phase == "connected" and "guest" or nil
     if not role or state.listening ~= true or state.server ~= (role == "guest") then return end
     local world, controller = state.world, state.controller
@@ -50,6 +50,24 @@ local function context(state, phase)
     if not world_id or not controller_id or not pawn_id then return end
     return {world = world, driver = driver, controller = controller, pawn = pawn, role = role,
         world_id = world_id, controller_id = controller_id, pawn_id = pawn_id}
+end
+
+local function context(state, phase)
+    local role = phase == "hosting" and "host" or phase == "connected" and "guest" or nil
+    if not role or state.listening ~= true or state.server ~= (role == "guest") then return end
+    if embedded and type(SilverfishReadNativePauseDriver) == "function" then
+        local world, controller = state.world, state.controller
+        local pawn = state.local_pawn and state.local_pawn.pawn
+        local world_id, controller_id, pawn_id = pointer(world), pointer(controller), pointer(pawn)
+        if world_id and controller_id and pawn_id then
+            local driver = SilverfishReadNativePauseDriver(world_id, controller_id, pawn_id, state.map, role == "guest")
+            if driver then
+                return {world = world, driver = driver, controller = controller, pawn = pawn, role = role,
+                    world_id = world_id, controller_id = controller_id, pawn_id = pawn_id}
+            end
+        end
+    end
+    return context_lua(state, phase)
 end
 
 local function keep_world_running(_, world_context, paused)

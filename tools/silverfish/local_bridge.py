@@ -73,6 +73,34 @@ def _loaded_bridge_library(image: Path):
     return None
 
 
+class NativeTitleStartup:
+    """Read the stock title proof published on Unreal's native tick."""
+
+    def __init__(self, copy):
+        self._copy = copy
+        self._copy.argtypes = [ctypes.c_uint64, ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint64)]
+        self._copy.restype = ctypes.c_uint32
+        self._buffer = ctypes.create_string_buffer(8192)
+
+    @classmethod
+    def connect(cls, image: Path):
+        try:
+            library = _loaded_bridge_library(image)
+            return cls(library.SilverfishCopyNativeTitleStartupV1) if library is not None else None
+        except (AttributeError, OSError):
+            return None
+
+    def read(self) -> tuple[int, str] | None:
+        revision = ctypes.c_uint64()
+        # Read again even at the same revision, so expiry is visible to the caller.
+        size = self._copy(0, self._buffer, ctypes.sizeof(self._buffer), ctypes.byref(revision))
+        if not size:
+            return None
+        if not revision.value or size > ctypes.sizeof(self._buffer):
+            raise ValueError("The native title emitted an invalid startup snapshot")
+        return revision.value, self._buffer[:size].decode("utf-8")
+
+
 class LocalStatus:
     """Read the native status frame without owning its command queue."""
 

@@ -1,4 +1,5 @@
 #include "session_exit_input.hpp"
+#include "interaction_input.hpp"
 #include "world_path.hpp"
 
 #include <array>
@@ -12,6 +13,7 @@
 #include <utility>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
+#include <LuaType/LuaUObject.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
@@ -288,6 +290,47 @@ namespace
         }
     };
 
+    int read_pause_driver(const Lua& lua)
+    {
+        auto* stack = lua.get_lua_state();
+        if (!U::IsInGameThreadRaw() || lua_gettop(stack) != 5 || !lua_isinteger(stack, 1) ||
+            !lua_isinteger(stack, 2) || !lua_isinteger(stack, 3) || lua_type(stack, 4) != LUA_TSTRING ||
+            !lua_isboolean(stack, 5)) return 0;
+        const auto world_address = lua_tointeger(stack, 1);
+        const auto controller_address = lua_tointeger(stack, 2);
+        const auto pawn_address = lua_tointeger(stack, 3);
+        if (world_address <= 0 || controller_address <= 0 || pawn_address <= 0) return 0;
+        std::size_t size{};
+        const auto* text = lua_tolstring(stack, 4, &size);
+        const std::string_view map{text, size};
+        if (!silverfish::world_path::package(map)) return 0;
+
+        // The current interaction seat has checked the stock classes, reciprocal possession,
+        // sole local player, transport and both live actor roles on this thread.
+        auto* world = silverfish::native_interaction_input::current_listen_world();
+        if (address(world) != static_cast<Address>(world_address)) return 0;
+        constexpr std::wstring_view prefix = STR("World ");
+        const auto name = world->GetFullName();
+        const std::wstring_view full_name{name};
+        if (!full_name.starts_with(prefix)) return 0;
+        const auto path = full_name.substr(prefix.size());
+        if (!silverfish::world_path::object(path) || path.substr(0, path.find('.')) != RC::to_wstring(map)) return 0;
+
+        ObjectArray players(object_field(world, STR("OwningGameInstance")), STR("LocalPlayers"));
+        auto* controller = players.size() == 1 ? object_field(players.at(0), STR("PlayerController")) : nullptr;
+        auto* pawn = object_field(controller, STR("Pawn"));
+        auto* driver = object_field(world, STR("NetDriver"));
+        auto* connection = object_field(driver, STR("ServerConnection"));
+        const bool guest = lua_toboolean(stack, 5);
+        if (address(controller) != static_cast<Address>(controller_address) ||
+            address(pawn) != static_cast<Address>(pawn_address) ||
+            !bool_field(controller, STR("Loading"), false) || !live(driver) ||
+            (guest ? !live(connection) : connection != nullptr)) return 0;
+
+        RC::LuaType::auto_construct_object(lua, driver);
+        return 1;
+    }
+
     U::UFunction* script(const U::TCHAR* class_path, const U::TCHAR* name)
     {
         const auto path = RC::StringType{class_path} + STR(":") + name;
@@ -525,6 +568,7 @@ namespace silverfish::native_session_exit_input
     void register_lua(Lua& lua)
     {
         lua.register_function("SilverfishBindStockPauseExit", bind_scene);
+        lua.register_function("SilverfishReadNativePauseDriver", read_pause_driver);
     }
 
     void install_hooks()

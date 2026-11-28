@@ -62,3 +62,15 @@ def parse_startup(fields: list[str], snapshot: dict) -> dict:
     if not directory.isprintable() or len(directory) > 4096 or not PureWindowsPath(directory).is_absolute():
         raise ValueError("Invalid effective Unreal save directory")
     return dict(map=MAP, sequence=snapshot["sequence"], saved_directory=directory)
+
+
+def parse_native_startup(revision: int, text: str) -> dict:
+    rows = [line.split("\t") for line in text.splitlines()]
+    if (len(rows) != 5 or rows[0] != ["schema", "1"] or rows[1] != ["seq", str(revision)]
+            or rows[2] != ["session", "idle", "ready", MAP, "0", "0"]):
+        raise ValueError("Malformed native startup snapshot")
+    snapshot = dict(schema=1, sequence=revision, mode="idle", state="ready", map=MAP,
+                    remote_clients=0, server_connection=False)
+    snapshot[KEY] = parse(rows[3], "ready", MAP)
+    snapshot[STARTUP_KEY] = parse_startup(rows[4], snapshot)
+    return snapshot

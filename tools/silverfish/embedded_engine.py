@@ -13,11 +13,12 @@ import threading
 
 from . import native_host_save, native_title_entry, runtime
 from .control import NAME
-from .local_bridge import LocalBridge, LocalStatus
-from .title_handoff import _isolated_stock_title
+from .local_bridge import LocalBridge, LocalStatus, NativeTitleStartup
+from .title_handoff import _isolated_stock_title, _stock_title
 
 
 STARTUP_KEY = native_title_entry.STARTUP_KEY
+TITLE_STARTUP_FIXTURE = "native-title-startup-fixture.json"
 BRIDGE_ENV = "SILVERFISH_COOP_BRIDGE"
 OPT_IN_ENV = "SILVERFISH_COOP_EMBEDDED_ENGINE"
 _ROLE_ROOTS = {"host": "campaigns", "client": "clients"}
@@ -237,8 +238,11 @@ class EmbeddedEngine:
         self.internal_port = internal_port
         self.returncode = None
         self.bridge = runtime.Bridge(mailbox, self)
+        self._native_title = None
         if os.environ.get(INSTALLED_ENV) == "1" and os.environ.get("SILVERFISH_COOP_RESIDENT_TITLE") == "1":
-            self.bridge.resident_status = LocalStatus.connect_readonly(_current_startup(()).image)
+            image = _current_startup(()).image
+            self.bridge.resident_status = LocalStatus.connect_readonly(image)
+            self._native_title = NativeTitleStartup.connect(image)
         self.session_directory = session_directory
         self._saved_directory = saved_directory
         self._save_scope = None
@@ -278,9 +282,42 @@ class EmbeddedEngine:
         await engine.observe_title(timeout=timeout)
         return engine
 
+    async def observe_native_startup(self, *, timeout: float = 12, command_baseline: bool = False) -> int | None:
+        if self._native_title is None:
+            return None
+        if not 0 < timeout <= _MAX_TIMEOUT:
+            raise ValueError("Expected a bounded native title timeout")
+        first = None
+        async with asyncio.timeout(timeout):
+            while True:
+                raw = self._native_title.read()
+                snapshot = native_title_entry.parse_native_startup(*raw) if raw else None
+                current = _isolated_stock_title(snapshot, self._saved_directory)
+                # The native sample sequence is independent of command receipts.
+                bridge_title = _stock_title(self.bridge.snapshot()) if current and command_baseline else None
+                if not current or command_baseline and (not bridge_title or bridge_title[1] != current[1]):
+                    first = None
+                elif first is None or first[1] != current[1]:
+                    first = current
+                elif current[0] > first[0]:
+                    sequence = bridge_title[0] if bridge_title else None
+                    if (os.environ.get("SILVERFISH_COOP_HEADLESS") == "1"
+                            and os.environ.get("SILVERFISH_COOP_TITLE_FIXTURES") == "1"):
+                        runtime.write_json(self.bridge.directory / TITLE_STARTUP_FIXTURE, {
+                            "pid": self.pid, "first_sequence": first[0], "sequence": current[0],
+                            "bridge_sequence": sequence,
+                        })
+                    return sequence
+                await asyncio.sleep(.1)
+
     async def observe_title(self, *, timeout: float = 12) -> None:
         if self._state != "acquiring":
             raise RuntimeError("The engine lease already observed a title")
+        if self._native_title is not None:
+            sequence = await self.observe_native_startup(timeout=timeout, command_baseline=True)
+            self._sequence = sequence
+            self._state = "active"
+            return
         first = None
 
         def advancing(snapshot):

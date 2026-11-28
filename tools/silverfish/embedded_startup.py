@@ -685,6 +685,8 @@ async def _resident_title(mailbox, saved, directory, plans, *, join_settings=Non
     from .title_session import TitleSession
 
     title = EmbeddedEngine(os.getpid(), mailbox, saved, None, session_directory=directory)
+    await title.observe_native_startup()
+
     def scan_campaigns():
         if cloud_backups is not None:
             cloud_backups.restore()

@@ -83,6 +83,7 @@
 #include "shared_loot.hpp"
 #include "stock_rest.hpp"
 #include "title_entry.hpp"
+#include "title_startup.hpp"
 #include "zone_exit.hpp"
 
 namespace
@@ -1596,6 +1597,7 @@ namespace
 
         ~SilverfishNativeMod() override
         {
+            silverfish::native_title_startup::uninstall_hooks();
             silverfish::local_bridge::stop();
             silverfish::local_bridge::uninstall_native_dispatch();
             if (jump_shake) Unreal::UObjectGlobals::UnregisterHook(jump_shake, jump_shake_hook);
@@ -1696,6 +1698,7 @@ namespace
             silverfish::shared_loot::install_hooks();
             silverfish::native_black_stone::install_hooks();
             silverfish::local_bridge::initialize();
+            silverfish::native_title_startup::install_hooks();
             if (!enabled)
             {
                 return;

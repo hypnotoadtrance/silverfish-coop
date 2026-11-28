@@ -28,3 +28,19 @@ class StockTitleReportTests(unittest.TestCase):
                 title.parse_startup(fields, snapshot | changed)
         with self.assertRaises(ValueError):
             title.parse_startup([*fields[:3], "Saved/"], snapshot)
+
+    def test_native_copy_revision_must_match_the_ready_startup_row(self):
+        directory = r"C:\Silverfish Co-op\game-user\Saved"
+        text = "\n".join((
+            "schema\t1",
+            "seq\t19",
+            f"session\tidle\tready\t{title.MAP}\t0\t0",
+            f"{title.TAG}\t{title.MAP}\tready\tPlayerControler_FP_C /Game/Title.Controller"
+            "\tMainMenu_Widget_C /Game/Title.Menu\tGameViewportClient /Engine/Transient.Viewport\t1\t1\t1\t1\t-",
+            f"{title.STARTUP_TAG}\t{title.MAP}\t19\t{directory}",
+        )) + "\n"
+        self.assertEqual(title.parse_native_startup(19, text)[title.STARTUP_KEY]["saved_directory"], directory)
+        with self.assertRaises(ValueError):
+            title.parse_native_startup(20, text)
+        with self.assertRaises(ValueError):
+            title.parse_native_startup(19, text + "native-save-scope\t-\n")
