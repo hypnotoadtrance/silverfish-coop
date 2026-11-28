@@ -1297,6 +1297,68 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         await receive_cues()
         self.assertTrue(self.client_inbox.messages.empty())
 
+    async def test_host_loot_motion_packs_with_game_udp_in_the_existing_next_turn_flush(self):
+        self.assertTrue((await self.connect_guest())["accepted"])
+        await self.exchange(1200)
+        protocol = self.host._protocols[self.request["guest_id"]]
+        udp = [bytes([index]) * 48 for index in range(4)]
+        motion = [bytes([index + 4]) * 128 for index in range(4)]
+
+        async def receive():
+            self.assertEqual([(await self.client_inbox.next())[0] for _ in udp], udp)
+            self.assertEqual([frame for _, frame in self.client.take_loot_motion()], motion)
+
+        before = self.host.statistics()
+        for packet, pose in zip(udp, motion):
+            protocol.forward_game_packet(packet)
+            self.assertTrue(protocol._queue_presentation(link._LOOT_MOTION_HEADER, pose))
+            protocol.transmit()
+        legacy = self.host.statistics()
+        await receive()
+
+        before_batch = self.host.statistics()
+        for packet, pose in zip(udp, motion):
+            protocol.forward_game_packet(packet)
+            already_scheduled = protocol._transmit_task
+            self.host.send_loot_motion((pose,), lambda _: True)
+            self.assertIs(protocol._transmit_task, already_scheduled)
+        self.assertEqual(self.host.statistics()["quic_datagrams_sent"], before_batch["quic_datagrams_sent"])
+        await asyncio.sleep(0)
+        self.assertIsNone(protocol._transmit_task)
+        batched = self.host.statistics()
+        for key in ("quic_datagrams_sent", "quic_payload_bytes_sent"):
+            self.assertLess(batched[key] - before_batch[key], legacy[key] - before[key])
+        await receive()
+
+    async def test_deferred_loot_motion_respects_route_changes_and_keeps_cues_immediate(self):
+        self.assertTrue((await self.connect_guest())["accepted"])
+        guest_id = self.request["guest_id"]
+        protocol = self.host._protocols[guest_id]
+        self.host.send_loot_motion((b"before a travel hold",), lambda _: True)
+        with self.host.hold_game_routes():
+            self.host.send_loot_motion((b"during a travel hold",), lambda _: True)
+        self.host.send_loot_motion((b"before a route change",), lambda _: True)
+        self.host.restrict_game_routes(set())
+        self.host.restrict_game_routes(None)
+        allowed = True
+        self.host.send_loot_motion((b"owner eligibility lost",), lambda _: allowed)
+        allowed = False
+        self.host.send_loot_motion((b"live motion",), lambda _: True)
+        before = self.host.statistics()
+        self.host.send_weapon_shots((b"immediate cue",), lambda _: True)
+        self.assertGreater(self.host.statistics()["quic_datagrams_sent"], before["quic_datagrams_sent"])
+        self.assertEqual(self.host.statistics()["loot_motion_datagrams_queued"], before["loot_motion_datagrams_queued"] + 1)
+        await asyncio.wait_for(self.client.wait_weapon_shots(), 1)
+        self.assertEqual(self.client.take_weapon_shots(), [b"immediate cue"])
+        self.assertEqual([frame for _, frame in self.client.take_loot_motion()], [b"live motion"])
+
+        before = self.host.statistics()
+        self.host.send_loot_motion((b"expired motion",) * (link._MAX_QUEUED_FRAMES + 1), lambda _: True)
+        self.assertEqual(len(protocol._deferred_loot_motion), link._MAX_QUEUED_FRAMES)
+        with patch.object(protocol._loop, "time", return_value=protocol._loop.time() + link._GAME_QUEUE_AGE + .001):
+            protocol.transmit()
+        self.assertEqual(self.host.statistics()["loot_motion_datagrams_queued"], before["loot_motion_datagrams_queued"])
+
     async def test_application_invalid_body_and_handler_error_keep_link_usable(self):
         async def on_request(_, payload):
             if payload.get("fail"):

@@ -828,7 +828,7 @@ def read_comparison(raw):
         slow_calls[name], call_cycles[name] = float(wall), int(cycles)
     frame_size, *stages = status.split(";")
     (max_rows, max_bytes, heap_start, heap_peak, max_drop, large_drops,
-     old_pause, old_step, pause, step, skipped_observers, skipped_status) = frame_size.split(",")
+     old_pause, old_step, pause, step, skipped_observers, skipped_status, *collector) = frame_size.split(",")
     skipped_observers, skipped_status = int(skipped_observers), int(skipped_status)
     assert ("delayed_observers" not in totals) is (skipped_observers > 0)
     if not skipped_status:
@@ -838,6 +838,13 @@ def read_comparison(raw):
     if int(old_pause):
         heap["gc_settings"] = {"previous_pause": int(old_pause), "previous_step_multiplier": int(old_step),
                                "sampled_pause": int(pause), "sampled_step_multiplier": int(step)}
+    if collector:
+        started, running, stopped, restored, limit = map(int, collector)
+        assert all(value in (0, 1) for value in (started, restored, limit))
+        assert running >= 0 and stopped >= 0 and running + stopped == totals["frame"]["count"] + 1
+        heap["automatic_collection"] = {"running_at_start": bool(started), "running_samples": running,
+                                        "stopped_samples": stopped, "running_after_restore": bool(restored),
+                                        "heap_growth_limit_reached": bool(limit)}
     status_peaks = {}
     for entry in stages:
         name, wall, cycles, heap_delta = entry.split(",")
@@ -1020,13 +1027,15 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
         if reply == "unavailable":
             return None
         assert not reply.startswith("switch comparison failed"), reply
-        switches, streamed, native_ms, lua_ms, native_kib, lua_kib, candle_reads, candle_ms, candle_kib = map(
-            float, reply.split(","))
+        (switches, streamed, native_ms, lua_ms, native_kib, lua_kib, candle_reads, candle_ms, candle_kib,
+         latch_reads, latch_ms, latch_kib) = map(float, reply.split(","))
         return {"fast_reads_per_pass": int(switches), "streamed_fast_reads_per_pass": int(streamed),
                 "passes_per_reader": 32, "all_rows_matched": True,
                 "native_ms": native_ms, "lua_ms": lua_ms, "native_heap_growth_kib": native_kib,
                 "lua_heap_growth_kib": lua_kib, "native_candle_reads_per_pass": int(candle_reads),
-                "without_native_candle_ms": candle_ms, "without_native_candle_heap_growth_kib": candle_kib}
+                "without_native_candle_ms": candle_ms, "without_native_candle_heap_growth_kib": candle_kib,
+                "native_latch_reads_per_pass": int(latch_reads), "without_native_latch_ms": latch_ms,
+                "without_native_latch_heap_growth_kib": latch_kib}
 
     def position(status):
         return status.get("game", {}).get("pawns", {}).get("local", {}).get("location")
@@ -1146,7 +1155,39 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
                     trials[f"{label}_{repetition}"] = {"displacement_cm": travelled,
                                                       **dict(zip(seats, samples, strict=True))}
             coarse["host_maintenance_comparison"] = trials
-        if gc_trial == "minor":
+        if gc_trial == "stopped":
+            results = {}
+            try:
+                for label, stop_host in (("before", False), ("stopped_first", True),
+                                         ("stopped_second", True), ("after", False)):
+                    # Let resumed collection settle outside the timed native bracket.
+                    await walk(2)
+                    before_mode = await transport()
+                    host_action = "gcstopped" if stop_host else "gcrunning"
+                    armed = await asyncio.gather(command(host, host_action), command(guest, "gcrunning"))
+                    assert armed == ["armed", "armed"], armed
+                    travelled = await walk(5)
+                    samples = await asyncio.gather(*(read(seat) for seat in seats.values()))
+                    for seat, sample in zip(seats, samples, strict=True):
+                        collection = sample["lua_heap"]["automatic_collection"]
+                        assert not collection["heap_growth_limit_reached"], (seat, label, collection)
+                        assert sample["seconds"] >= 12 and collection["running_at_start"], (seat, label, sample)
+                        assert collection["running_after_restore"], (seat, label, collection)
+                        stopped = stop_host and seat == "host"
+                        assert (collection["stopped_samples"] > 0) is stopped, (seat, label, collection)
+                        assert (collection["running_samples"] > 0) is not stopped, (seat, label, collection)
+                        ticks = sample["native_engine_tick"]
+                        inside = ticks.get("lua_scheduler_inside_pre_bracket", 0)
+                        outside = ticks.get("lua_scheduler_outside_pre_bracket", 0)
+                        assert inside > 10 and outside <= inside * .05 + 2, (seat, label, ticks)
+                    results[label] = {"host_automatic_collection": not stop_host, "displacement_cm": travelled,
+                                      **dict(zip(seats, samples, strict=True)),
+                                      "transport": traffic(before_mode, await transport())}
+            finally:
+                restored = await command(host, "gcrestore")
+                assert restored == "running", restored
+            coarse["gc_stopped_comparison"] = results
+        elif gc_trial == "minor":
             assert {entry["active"] for entry in collector_modes.values()} == {"generational"}, collector_modes
             results = {}
             active = None

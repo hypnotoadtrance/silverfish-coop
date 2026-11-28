@@ -229,24 +229,12 @@ async def verify_oil_lamps(host, guest, pawn, *, playtest_batch=False, lamps_onl
         assert check[native_loose_pickup.CHECK_KEY] == {unloaded: False}, check.get("ack")
     print("Crossroads host repeatedly refused an unloaded loot source", flush=True)
     adjacent = None if playtest_batch else await verify_crossroads_lamp()
-    latch = f"DoorLatch_BP_C {CROSSROADS}.CrossRoads_P:PersistentLevel.DoorLatch_BP_C_2"
-    position = tuple(map(float, (await probe(host, "stage", latch)).split(",")))
-    await suite.wait_resident_status(guest_run, lambda frame:
-        (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
-        and dist(point, position) < 60, timeout=5)
-    before = await probe(host, "latch-state", latch)
-    assert before in ("true;false", "false;false"), before
-    after = "false;false" if before == "true;false" else "true;false"
-    for expected in (after, before):
-        assert await probe(guest, "guest-toggle", latch) == "pressed"
-        async with asyncio.timeout(5):
-            while await asyncio.gather(*(probe(seat, "latch-state", latch) for seat in (host, guest))) != [expected] * 2:
-                await asyncio.sleep(.05)
+    latch = await suite.verify_stock_crossroads_latch(host, guest, suite.portable_probe_command)
     dumpster = await verify_observer_open(CROSSROADS, "Loot_Dumpster_BP_C_1")
     return {"debt": debt_evidence, "gear": gear, "shared_reputation": {"baseline": baseline, "host_cap": host_cap},
             "guest_disguise": [0, 4, 0],
             "simmi": simmi, "unloaded_source_refused": unloaded, "cabinet": cabinet, "dumpster": dumpster, "gas_lamps": gas_evidence, "lamps": evidence,
-            "other_lamp_stayed_unlit": adjacent, "latch": {"actor": latch, "initial": before, "toggled": after}}
+            "other_lamp_stayed_unlit": adjacent, "latch": latch}
 
 
 async def verify_streamed_switch(host, guest, pawn):

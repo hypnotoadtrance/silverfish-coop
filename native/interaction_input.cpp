@@ -74,6 +74,7 @@ namespace
     constexpr auto stash_class = STR("/Game/Classes/Actors/Stash_Master_BP.Stash_Master_BP_C");
     constexpr auto lantern_class = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Lantern_01.Prop_Lantern_01_C");
     constexpr auto door_latch_class = STR("/Game/Assets/StaticMeshes/Doors/DoorLatch_BP.DoorLatch_BP_C");
+    constexpr auto linked_door_class = STR("/Game/Assets/StaticMeshes/Doors/BasicDoor_Master.BasicDoor_Master_C");
     constexpr auto gas_lamp_class = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_GassLight_01.Prop_GassLight_01_C");
     constexpr auto lantern_interaction = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Candle_01.Prop_Candle_01_C:SendInteractionToActor");
     constexpr auto lantern_ignite = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Candle_01.Prop_Candle_01_C:SetOnFire");
@@ -1888,29 +1889,12 @@ namespace
         return 0;
     }
 
-    int read_switch_power(const Lua& lua)
+    Unreal::UObject* scoped_switch_actor(Address world_address, Address expected, std::string_view path)
     {
-        auto* stack = lua.get_lua_state();
-        const auto count = lua_gettop(stack);
-        if (!available() || (count != 5 && count != 6) || !lua_isinteger(stack, 1) || !lua_isinteger(stack, 2) ||
-            lua_type(stack, 3) != LUA_TSTRING || lua_type(stack, 4) != LUA_TSTRING || !lua_isboolean(stack, 5) ||
-            (count == 6 && !lua_isboolean(stack, 6))) return 0;
-        const auto world_address = lua_tointeger(stack, 1);
-        const auto expected = lua_tointeger(stack, 2);
-        std::size_t path_size{}, power_size{};
-        const auto* path_text = lua_tolstring(stack, 3, &path_size);
-        const auto* power_text = lua_tolstring(stack, 4, &power_size);
-        const std::string_view path{path_text, path_size};
-        const std::string_view power{power_text, power_size};
-        const bool lantern = lua_toboolean(stack, 5);
-        const bool candle_overlap = count == 6 && lua_toboolean(stack, 6);
         auto* world = scope.world.Get();
-        if (!live(world) || address(world) != world_address ||
+        if (expected <= 0 || !live(world) || address(world) != world_address ||
             scope.generation != generation.load(std::memory_order_acquire) || Clock::now() >= scope.expires)
-            return 0;
-        const auto* property_name = power == "Lit" ? STR("Lit") :
-            power == "Powered" ? STR("Powered") : power == "Power" ? STR("Power") : nullptr;
-        if (!property_name || expected <= 0 || (candle_overlap && (scope.host || power != "Lit"))) return 0;
+            return nullptr;
 
         struct SwitchReader
         {
@@ -1929,45 +1913,58 @@ namespace
         }
         auto entry = switches.find(expected);
         auto* actor = entry != switches.end() ? entry->second.actor.Get() : nullptr;
-        if (actor && entry->second.path != path) return 0;
+        if (actor && entry->second.path != path) return nullptr;
         if (!actor)
         {
-            if (path.empty() || path.size() > 384 || path.find('\0') != std::string_view::npos) return 0;
+            if (path.empty() || path.size() > 384 || path.find('\0') != std::string_view::npos) return nullptr;
             actor = find<Unreal::AActor>(RC::to_wstring(path).c_str());
-            if (address(actor) != expected || !live(actor)) return 0;
+            if (address(actor) != expected || !live(actor)) return nullptr;
             auto* actor_class = find<Unreal::UClass>(STR("/Script/Engine.Actor"));
             auto* level = actor->GetOuterPrivate();
-            if (!actor_class || !actor->IsA(actor_class) || !live(level)) return 0;
+            if (!actor_class || !actor->IsA(actor_class) || !live(level)) return nullptr;
             const bool streamed = level != object_field(world, STR("PersistentLevel"));
             if (streamed && !silverfish::native_zone::visible_actor_level(static_cast<Unreal::AActor*>(actor),
                                                                         static_cast<Unreal::UWorld*>(world)))
-                return 0;
+                return nullptr;
             entry = switches.insert_or_assign(expected, SwitchReader{actor, level, std::string{path}, streamed}).first;
         }
-        if (!live(actor)) return 0;
+        auto* level = entry->second.level.Get();
+        if (!live(actor) || !live(level) || actor->GetOuterPrivate() != level) return nullptr;
         if (entry->second.streamed)
         {
             // Enrollment resolves the exact loaded streaming level. On steady reads check that
             // it is still owned by this world and visible, and requalify it after a hide.
-            auto* level = entry->second.level.Get();
             auto* visible = field<Unreal::FBoolProperty>(level, STR("bIsVisible"));
-            if (!live(level) || actor->GetOuterPrivate() != level || object_field(level, STR("OwningWorld")) != world ||
+            if (object_field(level, STR("OwningWorld")) != world ||
                 !visible || !visible->GetPropertyValueInContainer(level))
             {
                 switches.erase(entry);
-                return 0;
+                return nullptr;
             }
         }
-        if (scope.host)
-        {
-            if (!live_actor_role(actor, 3)) return 0;
-        }
-        else
-        {
-            auto* destroyed = field<Unreal::FBoolProperty>(actor, STR("bActorIsBeingDestroyed"));
-            if (!destroyed || destroyed->GetPropertyValueInContainer(actor)) return 0;
-        }
+        if (scope.host) return live_actor_role(actor, 3) ? actor : nullptr;
+        auto* destroyed = field<Unreal::FBoolProperty>(actor, STR("bActorIsBeingDestroyed"));
+        return destroyed && !destroyed->GetPropertyValueInContainer(actor) ? actor : nullptr;
+    }
 
+    int read_switch_power(const Lua& lua)
+    {
+        auto* stack = lua.get_lua_state();
+        const auto count = lua_gettop(stack);
+        if (!available() || (count != 5 && count != 6) || !lua_isinteger(stack, 1) || !lua_isinteger(stack, 2) ||
+            lua_type(stack, 3) != LUA_TSTRING || lua_type(stack, 4) != LUA_TSTRING || !lua_isboolean(stack, 5) ||
+            (count == 6 && !lua_isboolean(stack, 6))) return 0;
+        std::size_t path_size{}, power_size{};
+        const auto* path_text = lua_tolstring(stack, 3, &path_size);
+        const auto* power_text = lua_tolstring(stack, 4, &power_size);
+        const std::string_view power{power_text, power_size};
+        const bool lantern = lua_toboolean(stack, 5);
+        const bool candle_overlap = count == 6 && lua_toboolean(stack, 6);
+        const auto* property_name = power == "Lit" ? STR("Lit") :
+            power == "Powered" ? STR("Powered") : power == "Power" ? STR("Power") : nullptr;
+        if (!property_name || (candle_overlap && (scope.host || power != "Lit"))) return 0;
+        auto* actor = scoped_switch_actor(lua_tointeger(stack, 1), lua_tointeger(stack, 2), {path_text, path_size});
+        if (!actor) return 0;
         auto* power_field = field<Unreal::FBoolProperty>(actor, property_name);
         auto* broken = lantern ? field<Unreal::FBoolProperty>(actor, STR("Broken_0")) : nullptr;
         if (!power_field || (lantern && !broken)) return 0;
@@ -1991,6 +1988,53 @@ namespace
             return 2;
         }
         return 1;
+    }
+
+    int read_door_latch(const Lua& lua)
+    {
+        auto* stack = lua.get_lua_state();
+        if (!available() || lua_gettop(stack) != 5 || !lua_isinteger(stack, 1) || !lua_isinteger(stack, 2) ||
+            lua_type(stack, 3) != LUA_TSTRING || !lua_isinteger(stack, 4) || !lua_isinteger(stack, 5)) return 0;
+        std::size_t path_size{};
+        const auto* path_text = lua_tolstring(stack, 3, &path_size);
+        auto* actor = scoped_switch_actor(lua_tointeger(stack, 1), lua_tointeger(stack, 2), {path_text, path_size});
+        if (!actor) return 0;
+
+        static Unreal::FWeakObjectPtr latch_class, door_class, rotator_type;
+        if (!latch_class.Get()) latch_class = find<Unreal::UClass>(door_latch_class);
+        if (!door_class.Get()) door_class = find<Unreal::UClass>(linked_door_class);
+        if (!rotator_type.Get()) rotator_type = find<Unreal::UScriptStruct>(STR("/Script/CoreUObject.Rotator"));
+        auto* latch_type = static_cast<Unreal::UClass*>(latch_class.Get());
+        auto* door_type = static_cast<Unreal::UClass*>(door_class.Get());
+        if (!latch_type || !door_type || !actor->IsA(latch_type)) return 0;
+        auto* door = object_field(actor, STR("Door"));
+        auto* dial = object_field(actor, STR("SM_Prop_Kitchen_Grill_01_Dial_01"));
+        if (!live(door) || address(door) != lua_tointeger(stack, 4) || !door->IsA(door_type) ||
+            !live(dial) || address(dial) != lua_tointeger(stack, 5) || dial->GetOuterPrivate() != actor) return 0;
+        auto* destroying = field<Unreal::FBoolProperty>(door, STR("bActorIsBeingDestroyed"));
+        auto* locked = field<Unreal::FBoolProperty>(door, STR("Locked"));
+        auto* world = static_cast<Unreal::UWorld*>(scope.world.Get());
+        if (!destroying || destroying->GetPropertyValueInContainer(door) || !locked ||
+            !silverfish::native_zone::visible_actor_level(static_cast<Unreal::AActor*>(door), world)) return 0;
+
+        auto* rotation = field<Unreal::FStructProperty>(dial, STR("RelativeRotation"));
+        auto* type = rotation ? rotation->GetStruct().Get() : nullptr;
+        if (!type || type != rotator_type.Get()) return 0;
+        auto* data = rotation->ContainerPtrToValuePtr<void>(dial);
+        std::array<double, 3> values{};
+        constexpr std::array axes{STR("Pitch"), STR("Yaw"), STR("Roll")};
+        for (std::size_t index = 0; index < axes.size(); ++index)
+        {
+            auto* axis = field<Unreal::FDoubleProperty>(type, axes[index]);
+            if (!axis || axis->GetOffset_Internal() < 0 ||
+                axis->GetOffset_Internal() + static_cast<int>(sizeof(double)) > rotation->GetSize()) return 0;
+            values[index] = axis->GetPropertyValueInContainer(data);
+            if (!std::isfinite(values[index])) return 0;
+        }
+        lua_pushboolean(stack, locked->GetPropertyValueInContainer(door));
+        for (auto axis : values) lua_pushnumber(stack, axis);
+        lua.set_string(RC::to_string(door->GetFullName()));
+        return 5;
     }
 
     int take_stash_press(const Lua& lua)
@@ -2844,6 +2888,7 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishWriteNativeRemoteHeadRotation", write_remote_head_rotation);
         lua.register_function("SilverfishReadNativeReadyRoster", read_ready_roster);
         lua.register_function("SilverfishReadNativeSwitchPower", read_switch_power);
+        lua.register_function("SilverfishReadNativeDoorLatch", read_door_latch);
         lua.register_function("SilverfishTakeNativeLanternPress", take_lantern_press);
         lua.register_function("SilverfishDispatchNativeSubwayValve", dispatch_valve);
         mosby_station_input::register_lua(lua);

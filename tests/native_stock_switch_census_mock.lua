@@ -341,6 +341,24 @@ end
 state.server = false
 assert(switches.command({"nonce", "native-stock-switch-interact", latch_name, "qualified guest"}, state, "hosting")
     == "stock switch interaction dispatched" and linked_door.Locked)
+local native_latch_calls = 0
+SilverfishReadNativeDoorLatch = function(scope, actor, path, door, dial)
+    assert(scope == state.world and actor == latch and path == placed_latch and door == linked_door and dial == latch.Switch_Mesh)
+    native_latch_calls = native_latch_calls + 1
+    return linked_door.Locked, 12, -4, 45, linked_door:GetFullName()
+end
+local function latch_row(phase)
+    for _, reading in ipairs(switches.rows(state, phase, row)) do
+        if reading[3] == latch_name then return reading end
+    end
+end
+local sampled = assert(latch_row("hosting"))
+assert(sampled[4] == "1" and sampled[5] == 12 and sampled[6] == -4 and sampled[7] == 45
+    and sampled[10] == "door=" .. linked_door:GetFullName() and native_latch_calls == 1)
+SilverfishReadNativeDoorLatch = function() end
+sampled = assert(latch_row("hosting"))
+assert(sampled[4] == "1" and sampled[5] == 0 and sampled[7] == 0, "A declined native read uses stock dial rotation")
+SilverfishReadNativeDoorLatch = nil
 state.server = true
 local projection = {"nonce", "native-stock-switch-project", latch_name, state.map, "0", "0", "0", "45", "door=wrong"}
 assert(not pcall(switches.command, projection, state, "connected"))

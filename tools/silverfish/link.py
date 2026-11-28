@@ -877,6 +877,36 @@ class _HostProtocol(_LinkProtocol):
         self._actions: dict[int, _IncomingAction] = {}
         self._end_ack: asyncio.Event | None = None
         self._end_ack_bytes = bytearray()
+        self._deferred_loot_motion: list[tuple[bytes, _GameRoute, int, float, Callable[[str], bool]]] = []
+
+    def defer_loot_motion(self, frames: Sequence[bytes], allowed: Callable[[str], bool]) -> None:
+        guest_id = self.guest_id
+        route = self.host._guest_routes.get(guest_id) if guest_id is not None else None
+        if route is None:
+            return
+        pending = self._deferred_loot_motion
+        before = len(pending)
+        generation = self.host._game_route_generation
+        expires = self._loop.time() + _GAME_QUEUE_AGE
+        for frame in frames[:_MAX_QUEUED_FRAMES - before]:
+            if 0 < len(frame) <= _FRAGMENT_SIZE:
+                pending.append((frame, route, generation, expires, allowed))
+        if len(pending) > before:
+            self._transmit_soon()
+
+    def transmit(self) -> None:
+        if self._deferred_loot_motion:
+            pending, self._deferred_loot_motion = self._deferred_loot_motion, []
+            guest_id = self.guest_id
+            if (guest_id is not None and not self.host._closed and self.host._protocols.get(guest_id) is self
+                    and self.host._native_route_permitted(guest_id)):
+                route = self.host._guest_routes.get(guest_id)
+                now = self._loop.time()
+                for frame, original, generation, expires, allowed in pending:
+                    if (now < expires and original is route and generation == self.host._game_route_generation
+                            and allowed(guest_id)):
+                        self._queue_presentation(_LOOT_MOTION_HEADER, frame)
+        super().transmit()
 
     def datagram_received(self, data: bytes, addr: Any) -> None:
         self.peer = (addr[0], addr[1])
@@ -1041,6 +1071,7 @@ class HostLink:
         self._protocols: dict[str, _HostProtocol] = {}
         self._native_admission: frozenset[str] | None = None
         self._game_route_holds = 0
+        self._game_route_generation = 0
         self._lock = asyncio.Lock()
         self._tasks: set[asyncio.Task[None]] = set()
         self._closed = False
@@ -1075,12 +1106,16 @@ class HostLink:
 
     def restrict_game_routes(self, allowed: set[str] | None) -> None:
         """Gate Unreal packets independently of authenticated control traffic."""
-        self._native_admission = None if allowed is None else frozenset(allowed)
+        current = None if allowed is None else frozenset(allowed)
+        if current != self._native_admission:
+            self._native_admission = current
+            self._game_route_generation += 1
 
     @contextmanager
     def hold_game_routes(self) -> Iterator[None]:
         """Pause gameplay UDP without altering the current admissions or control streams."""
         self._game_route_holds += 1
+        self._game_route_generation += 1
         try:
             yield
         finally:
@@ -1402,7 +1437,9 @@ class HostLink:
         self._send_presentation(_WEAPON_SHOT_HEADER, cues, allowed)
 
     def send_loot_motion(self, frames: Sequence[bytes], allowed: Callable[[str], bool]) -> None:
-        self._send_presentation(_LOOT_MOTION_HEADER, frames, allowed)
+        for guest_id, protocol in self._protocols.items():
+            if self.connected(guest_id) and self._native_route_permitted(guest_id) and allowed(guest_id):
+                protocol.defer_loot_motion(frames, allowed)
 
     def send_gameplay_change(self, epoch: str, *, allowed: Callable[[str], bool] | None = None) -> None:
         """Hint that the current visit has newer authoritative snapshot state."""

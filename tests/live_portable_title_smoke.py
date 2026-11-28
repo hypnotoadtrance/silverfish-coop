@@ -71,7 +71,7 @@ from portable_quarry_photo import verify_quarry_photo
 from portable_weather_travel import verify_weather_travel
 from portable_lightning import verify_stock_lightning
 from portable_storm import StockStormTrial
-from portable_stock_door import verify_stock_crossroads_door, verify_stock_dock_gate
+from portable_stock_door import verify_stock_crossroads_door, verify_stock_crossroads_latch, verify_stock_dock_gate
 from portable_stock_shovel import verify_stock_buried_placements, verify_stock_shovel, verify_stock_shovel_reconnect
 from portable_mushrooms import instrument_mushroom_sampler, verify_stock_mushrooms
 from portable_placed_item import placed_item_overlay, verify_stock_placed_food, verify_stock_placed_item
@@ -97,7 +97,7 @@ INDEPENDENT_RESIDENT_MAPS = {
     "stock_footsteps": {OBSERVATORY}, "stock_impact_cues": {OBSERVATORY},
     "stock_lockpicks": {OBSERVATORY}, "stock_observatory_tv": {OBSERVATORY},
     "stock_critters": {CROSSROADS}, "stock_lingering_teleport": {CROSSROADS}, "stock_mushrooms": {CROSSROADS},
-    "stock_crossroads_recovery": {CROSSROADS}, "stock_crossroads_door": {CROSSROADS},
+    "stock_crossroads_recovery": {CROSSROADS}, "stock_crossroads_door": {CROSSROADS}, "stock_crossroads_latch": {CROSSROADS},
     "stock_placed_item": {CROSSROADS}, "stock_placed_food": {CROSSROADS},
     "stock_cash_popup": {CROSSROADS}, "guest_reported_wallet": {CROSSROADS}, "stock_weather_travel": {OBSERVATORY},
     "stock_canister": {CROSSROADS},
@@ -8662,6 +8662,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_crossroads_door, "crossroads", "stock_crossroads_door",
          lambda host, guest, pawn: verify_stock_crossroads_door(
              host, guest, pawn, lockpick=verify_stock_lockpicks if stock_interaction_feedback else None)),
+        (stock_crossroads_door, "crossroads", "stock_crossroads_latch",
+         lambda host, guest, _pawn: verify_stock_crossroads_latch(host, guest, portable_probe_command)),
         (stock_critters, "crossroads", "stock_critters", verify_stock_critters),
         (stock_shovel, "shovel_loot" if stock_shovel_loot and stock_shovel_quest else "crossroads",
          "stock_shovel", lambda host, guest, pawn: verify_stock_shovel(
@@ -8959,6 +8961,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["stock_door_overlays"] = [
                 probes.enter_context(stock_door_overlay(game)) for game in games
             ]
+        if stock_crossroads_door:
+            for game in games:
+                probes.enter_context(installed_probe(game, mod="SilverfishPortableOilLampProbe",
+                                                     fixture="portable_oil_lamp_probe.lua"))
         if stock_warehouse_switch or stock_interaction_feedback or streamed_switch_check:
             proof["warehouse_switch_overlays"] = [probes.enter_context(warehouse_switch_overlay(game)) for game in games]
         if stock_interaction_feedback:
@@ -9729,8 +9735,9 @@ if __name__ == "__main__":
                         help="measure co-op frame and subsystem times around the stock weather travel check")
     parser.add_argument("--rendered", action="store_true",
                         help="run with offscreen graphics and capture world frames when profiling Crossroads")
-    parser.add_argument("--crossroads-gc-trial", choices=("tuned", "generational", "minor"), nargs="?", const="tuned",
-                        help="compare the current and earlier Lua collection schedules while walking")
+    parser.add_argument("--crossroads-gc-trial", choices=("tuned", "generational", "minor", "stopped"),
+                        nargs="?", const="tuned",
+                        help="compare Lua collection schedules or briefly stop host collection while walking")
     parser.add_argument("--crossroads-host-maintenance-trial", action="store_true",
                         help="compare Crossroads walks with host Lua maintenance running and briefly suspended")
     parser.add_argument("--stock-lightning", action="store_true",
@@ -9882,6 +9889,8 @@ if __name__ == "__main__":
                                    "stock_guest_title_recovery", "rendered"))
     if args.crossroads_gc_trial and not args.crossroads_profile:
         parser.error("--crossroads-gc-trial requires --crossroads-profile")
+    if args.crossroads_gc_trial == "stopped" and not args.rendered:
+        parser.error("--crossroads-gc-trial stopped requires --rendered")
     if args.crossroads_host_maintenance_trial and not (args.crossroads_profile and args.rendered):
         parser.error("--crossroads-host-maintenance-trial requires --crossroads-profile and --rendered")
     resident_check_options.update(("guest_stash_memory", "guest_stash_large_memory"))

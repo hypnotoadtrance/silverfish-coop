@@ -7,7 +7,7 @@ import time
 from live_multi_smoke import campaign_save_hashes
 from portable_guest_world_start import resident_events, wait_resident_status
 from portable_weather_travel import enter_crossroads
-from tools.silverfish import native_loot, native_stock_door as door
+from tools.silverfish import native_loot, native_stock_door as door, native_stock_switch
 from tools.silverfish.authored_loot import full_name
 from tools.silverfish.control import submit
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
@@ -16,6 +16,32 @@ from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 DOCK = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
 DOCK_GATE = f"Door_Bars_01_BP_C {DOCK}.Tut_Dock_P:PersistentLevel.Door_Bars_01_BP_C_1"
 WOOD_DOOR = f"Door_Wood_04_BP_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Door_Wood_04_BP_C_1719"
+LATCH_ID = "DoorLatch_BP_C_2"
+LATCH = full_name(CROSSROADS, LATCH_ID)
+
+
+async def verify_stock_crossroads_latch(host, guest, probe):
+    async def action(seat, request):
+        return await probe(seat.bridge, "portable-oil-lamps", f"{request}\t{LATCH_ID}")
+
+    guest_run = guest.client / "run"
+    position = tuple(map(float, (await action(host, "stage")).split(",")))
+    await wait_resident_status(guest_run, lambda frame:
+        (point := frame["game"].get("pawns", {}).get("local", {}).get("location"))
+        and math.dist(point, position) < 60, timeout=5)
+    before = await action(host, "latch-state")
+    assert before in ("true;false", "false;false"), before
+    after = "false;false" if before == "true;false" else "true;false"
+    for expected in (after, before):
+        assert await action(guest, "guest-toggle") == "pressed"
+        async with asyncio.timeout(5):
+            while await asyncio.gather(*(action(seat, "latch-state") for seat in (host, guest))) != [expected] * 2:
+                await asyncio.sleep(.05)
+        locked = expected.startswith("true")
+        await asyncio.gather(*(wait_resident_status(run, lambda frame:
+            frame["game"].get(native_stock_switch.KEY, {}).get(LATCH, {}).get("powered") is locked)
+            for run in (host.campaign / "run", guest_run)))
+    return {"actor": LATCH, "initial": before, "toggled": after}
 
 
 async def toggle_door(host, guest, actor, pawn, expected_open, *, inspect_during_motion=None):

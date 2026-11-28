@@ -186,8 +186,10 @@ local function cache_entry(name, path, entry)
             path = path, candle = entry.candle, lantern = entry.lantern, gas_lamp = entry.gas_lamp,
             light = entry.light, mesh = entry.mesh}
     else
-        if not entry.latch then
-            entry.address, entry.path = actor:GetAddress(), path
+        entry.address, entry.path = actor:GetAddress(), path
+        if entry.latch then
+            entry.door_address, entry.lever_address = entry.door:GetAddress(), entry.lever:GetAddress()
+        else
             refresh_lights(entry, world, actor.Powered)
         end
         entries[name] = entry
@@ -322,6 +324,13 @@ end
 
 local function read_switch(entry, name, state, phase, row, native_world_address)
     if entry.latch then
+        if native_world_address and entry.address and type(SilverfishReadNativeDoorLatch) == "function" then
+            local locked, pitch, yaw, roll, door = SilverfishReadNativeDoorLatch(native_world_address, entry.address,
+                entry.path, entry.door_address, entry.lever_address)
+            if locked ~= nil then
+                return row("native-stock-switch", state.map, name, bit(locked), pitch, yaw, roll, "-", "-", "door=" .. door)
+            end
+        end
         if qualified(entry.actor, state.world, entry.level) and qualified(entry.door, state.world)
             and valid(entry.lever) then
             local angles = entry.lever.RelativeRotation
@@ -331,7 +340,7 @@ local function read_switch(entry, name, state, phase, row, native_world_address)
     elseif entry.power then
         local actor = entry.actor
         local powered, broken, overlap
-        if native_world_address then
+        if native_world_address and type(SilverfishReadNativeSwitchPower) == "function" then
             powered, broken, overlap = SilverfishReadNativeSwitchPower(native_world_address, entry.address, entry.path,
                 entry.power, entry.lantern == true, phase == "connected" and entry.candle == true)
         end
@@ -390,7 +399,7 @@ local function read_switch(entry, name, state, phase, row, native_world_address)
         end
     elseif valid(entry.lever) then
         local powered
-        if native_world_address then
+        if native_world_address and type(SilverfishReadNativeSwitchPower) == "function" then
             powered = SilverfishReadNativeSwitchPower(native_world_address, entry.address, entry.path,
                 "Powered", false)
         end
@@ -434,7 +443,8 @@ end
 function switches.rows(state, phase, row)
     local rows, visible = {}, phase == "hosting" and {}
     local discovered = census(state, phase)
-    local native_world_address = next(discovered) and type(SilverfishReadNativeSwitchPower) == "function"
+    local native_world_address = next(discovered) and (type(SilverfishReadNativeSwitchPower) == "function"
+        or type(SilverfishReadNativeDoorLatch) == "function")
         and state.world:GetAddress()
     for name, entry in pairs(discovered) do
         local reading = switches.read_row(entry, name, state, phase, row, native_world_address)

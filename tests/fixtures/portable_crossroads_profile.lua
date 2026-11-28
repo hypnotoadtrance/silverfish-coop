@@ -5,6 +5,7 @@ local stamp = SilverfishBridgeProfileStamp
 local window_us = 3000000
 local coarse_window_us = 5000000
 local gc_window_us = 12000000
+local gc_suspended_growth_limit_kib = 96 * 1024
 local gc_pause, gc_step_multiplier = 120, 160
 local stock_receipts = {}
 local long_interval_limit = 5
@@ -179,6 +180,12 @@ local function result()
         complete.heap_max_drop, complete.heap_large_drops, complete.previous_pause or 0,
         complete.previous_step_multiplier or 0, complete.restored_pause or 0, complete.restored_step_multiplier or 0,
         complete.skipped_observers, complete.skipped_status)}
+    if complete.measure_gc then
+        status[1] = status[1] .. (",%d,%d,%d,%d,%d"):format(
+            complete.gc_started_running and 1 or 0, complete.gc_running_samples,
+            complete.gc_stopped_samples, complete.gc_restored_running and 1 or 0,
+            complete.gc_heap_limit_reached and 1 or 0)
+    end
     for tag, sample in pairs(complete.status_peaks) do
         status[#status + 1] = (";%s,%.4f,%d,%.3f"):format(tag, sample.wall, sample.cycles, sample.heap_delta)
     end
@@ -207,12 +214,25 @@ local function result()
 end
 
 local function compare_switch_reads()
-    local native = SilverfishReadNativeSwitchPower
+    local native, read_latch = SilverfishReadNativeSwitchPower, SilverfishReadNativeDoorLatch
     if type(native) ~= "function" then return "unavailable" end
     local state = inspect()
     local seat = phase(state)
     assert(seat == "hosting" or seat == "connected")
     local switched, streamed, candle_samples, candle_requests, first = 0, 0, 0, 0, nil
+    local latch_samples, first_latch = 0, nil
+    if type(read_latch) == "function" then
+        SilverfishReadNativeDoorLatch = function(world, address, path, door, dial)
+            local locked, pitch, yaw, roll, name = read_latch(world, address, path, door, dial)
+            local latch = StaticFindObject(path)
+            local rotation = latch.SM_Prop_Kitchen_Grill_01_Dial_01.RelativeRotation
+            assert(locked == latch.Door.Locked and name == latch.Door:GetFullName() and pitch == rotation.Pitch
+                and yaw == rotation.Yaw and roll == rotation.Roll, "native latch sample did not match stock")
+            latch_samples = latch_samples + 1
+            first_latch = first_latch or {world, address, path, door, dial}
+            return locked, pitch, yaw, roll, name
+        end
+    end
     SilverfishReadNativeSwitchPower = function(world_address, actor, path, field, lantern, candle_overlap)
         local powered, broken, overlap = native(world_address, actor, path, field, lantern, candle_overlap == true)
         if powered ~= nil then
@@ -237,8 +257,9 @@ local function compare_switch_reads()
         table.sort(rows)
         return table.concat(rows, "\n")
     end
-    local function trial(reader)
+    local function trial(reader, latch)
         SilverfishReadNativeSwitchPower = reader
+        SilverfishReadNativeDoorLatch = latch
         local heap, start = collectgarbage("count"), stamp()
         for _ = 1, 32 do read(state, seat, status_row) end
         return (stamp() - start) / 1000, collectgarbage("count") - heap
@@ -251,23 +272,37 @@ local function compare_switch_reads()
     local running = collectgarbage("isrunning")
     local ok, result = pcall(function()
         local fast = sorted_rows()
-        SilverfishReadNativeSwitchPower = nil
+        SilverfishReadNativeSwitchPower, SilverfishReadNativeDoorLatch = nil, nil
         assert(switched > 0 and fast == sorted_rows(), "native switch status did not match Lua")
         assert(candle_requests == 0 or candle_samples > 0, "no guest candle overlap was read natively")
         assert(native(0, first[2], first[3], first[4], first[5]) == nil, "native switch accepted a different world")
         assert(native(first[1], 1, first[3], first[4], first[5]) == nil, "native switch accepted a different actor")
         assert(native(first[1], first[2], first[3], true, first[5]) == nil, "native switch accepted a non-string field")
+        if type(read_latch) == "function" and state.map:match("/CrossRoads_P$") then
+            assert(latch_samples > 0, "no Crossroads latch was read natively")
+        end
+        if first_latch then
+            local a = first_latch
+            assert(read_latch(a[1] + 1, a[2], a[3], a[4], a[5]) == nil
+                and read_latch(a[1], a[2], a[3] .. "_missing", a[4], a[5]) == nil
+                and read_latch(a[1], a[2], a[3], a[4] + 1, a[5]) == nil
+                and read_latch(a[1], a[2], a[3], a[4], a[5] + 1) == nil, "native latch accepted another scope")
+        end
         collectgarbage("stop")
-        local native_ms, native_kib = trial(candle_samples > 0 and with_candle_overlap(true) or native)
+        local enabled = candle_samples > 0 and with_candle_overlap(true) or native
+        local native_ms, native_kib = trial(enabled, read_latch)
         local lua_ms, lua_kib = trial(nil)
         local candle_control_ms, candle_control_kib = 0, 0
         if candle_samples > 0 then
-            candle_control_ms, candle_control_kib = trial(with_candle_overlap(false))
+            candle_control_ms, candle_control_kib = trial(with_candle_overlap(false), read_latch)
         end
-        return ("%d,%d,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f"):format(switched, streamed, native_ms, lua_ms,
-            native_kib, lua_kib, candle_samples, candle_control_ms, candle_control_kib)
+        local latch_control_ms, latch_control_kib = 0, 0
+        if latch_samples > 0 then latch_control_ms, latch_control_kib = trial(enabled) end
+        return ("%d,%d,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%d,%.3f,%.3f"):format(switched, streamed, native_ms,
+            lua_ms, native_kib, lua_kib, candle_samples, candle_control_ms, candle_control_kib,
+            latch_samples, latch_control_ms, latch_control_kib)
     end)
-    SilverfishReadNativeSwitchPower = native
+    SilverfishReadNativeSwitchPower, SilverfishReadNativeDoorLatch = native, read_latch
     if running then collectgarbage("restart") end
     if not ok then error(result, 0) end
     return result
@@ -464,6 +499,14 @@ local function retain_long_interval(active, elapsed, cycles, heap_delta)
     entries[long_interval_limit + 1] = nil
 end
 
+local function restore_automatic_collection(active)
+    if active and active.gc_suspended then
+        collectgarbage("restart")
+        active.gc_suspended = false
+    end
+    return collectgarbage("isrunning")
+end
+
 LoopInGameThreadWithDelay(1, function()
     local active = capture
     if not active then return end
@@ -472,6 +515,14 @@ LoopInGameThreadWithDelay(1, function()
     end
     local now, cycles = stamp()
     local heap = collectgarbage("count")
+    if active.measure_gc then
+        if collectgarbage("isrunning") then
+            active.gc_running_samples = active.gc_running_samples + 1
+        else
+            active.gc_stopped_samples = active.gc_stopped_samples + 1
+        end
+        active.gc_heap_limit_reached = active.gc_suspended and heap - active.heap_start >= gc_suspended_growth_limit_kib
+    end
     active.heap_peak = math.max(active.heap_peak, heap)
     local collected = active.heap_previous - heap
     active.heap_max_drop = math.max(active.heap_max_drop, collected)
@@ -496,7 +547,8 @@ LoopInGameThreadWithDelay(1, function()
         end
     end
     previous, previous_cycles = now, cycles
-    if now >= active.deadline then
+    if now >= active.deadline or active.gc_heap_limit_reached then
+        if active.measure_gc then active.gc_restored_running = restore_automatic_collection(active) end
         if active.native_tick_started then
             active.engine_tick = table.concat({SilverfishFinishEngineTickProfile()}, ",")
         end
@@ -520,16 +572,21 @@ LoopInGameThreadWithDelay(50, function()
     local ticket, action = text:match("^(%x+)\t([a-z]+)$")
     if not ticket or #ticket ~= 32 then return end
     local message
-    if action == "coarseraw" and type(status_publication.get_observer_world) ~= "function" then
+    local measure_gc = action == "gcrunning" or action == "gcstopped"
+    if action == "gcrestore" then
+        message = restore_automatic_collection(capture) and "running" or "stopped"
+    elseif measure_gc and not collectgarbage("isrunning") then
+        message = "collector was already stopped"
+    elseif action == "coarseraw" and type(status_publication.get_observer_world) ~= "function" then
         message = "unavailable"
     elseif (action == "arm" or action == "coarse" or action == "coarseraw" or action == "coarsequiet"
         or action == "quietobservers" or action == "quietstatus"
-        or action == "gcbaseline" or action == "gctuned" or action == "gcmode") and not capture then
+        or action == "gcbaseline" or action == "gctuned" or action == "gcmode" or measure_gc) and not capture then
         local now, cycles
         if type(stamp) == "function" then now, cycles = stamp() end
         if type(now) == "number" and type(cycles) == "number" then
             local coarse = action ~= "arm"
-            local gc_trial = action == "gcbaseline" or action == "gctuned" or action == "gcmode"
+            local gc_trial = action == "gcbaseline" or action == "gctuned" or action == "gcmode" or measure_gc
             local heap = collectgarbage("count")
             capture, previous, previous_cycles, complete = {
                 rows = {}, calls = {}, peak = 0, peak_calls = {}, started = now,
@@ -542,6 +599,8 @@ LoopInGameThreadWithDelay(50, function()
                 status_peaks = {}, heap_calls = {}, tick_sources = {}, snapshot_sources = {},
                 max_status_rows = 0, max_status_bytes = 0,
                 heap_start = heap, heap_previous = heap, heap_peak = heap, heap_max_drop = 0, heap_large_drops = 0,
+                measure_gc = measure_gc, gc_started_running = measure_gc,
+                gc_running_samples = 0, gc_stopped_samples = 0,
                 original_mirror = status_publication.mirror,
             }, nil, nil, nil
             if action == "gctuned" then
@@ -552,6 +611,10 @@ LoopInGameThreadWithDelay(50, function()
                 and SilverfishBeginEngineTickProfile()
             -- Keep the private launch flags, and time the installed memory-only gameplay path.
             status_publication.mirror = false
+            if action == "gcstopped" and role == "host" then
+                capture.gc_suspended = true
+                collectgarbage("stop")
+            end
             message = "armed"
         else
             message = "native game-thread clock unavailable"
