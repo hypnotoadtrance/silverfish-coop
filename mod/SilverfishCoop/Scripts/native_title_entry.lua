@@ -23,8 +23,12 @@ local function exact(object, class)
     return valid(object) and same(object:GetClass(), StaticFindObject(class))
 end
 
-local function observe(state, phase)
-    if state.map ~= map or (phase ~= "opening" and phase ~= "ready") then return end
+local function on_title(state, phase)
+    return state.map == map and (phase == "opening" or phase == "ready")
+end
+
+local function observe_lua(state, phase)
+    if not on_title(state, phase) then return end
     local report = {map = map, state = "waiting", world = state.world}
     local function wait_for(reason)
         report.reason = reason
@@ -93,7 +97,23 @@ local function observe(state, phase)
     return report
 end
 
+local function observe(state, phase)
+    if not on_title(state, phase) then return end
+    if type(SilverfishObserveNativeTitle) == "function" then
+        local status, reason, menu, viewport, count, top, mounted, visible = SilverfishObserveNativeTitle(
+            state.world, state.controller, phase, not not state.listening, state.server, state.clients,
+            not not state.local_pawn)
+        if status then
+            return {map = map, state = status, reason = reason, world = state.world,
+                controller = state.controller, menu = menu, viewport = viewport, count = count,
+                top = top, mounted = mounted, visible = visible}
+        end
+    end
+    return observe_lua(state, phase)
+end
+
 function title.probe(state, phase)
+    if phase ~= "ready" then return end
     local report = observe(state, phase)
     if report and report.state == "ready" then return report end
 end
@@ -147,8 +167,8 @@ local function saved_directory()
         and (path:match("^%a:[/\\]") or path:match("^[/\\][/\\]")) then return path end
 end
 
-function title.rows(state, phase, status_row, idle_sequence)
-    local report = observe(state, phase)
+local function lua_rows(state, phase, status_row, idle_sequence)
+    local report = observe_lua(state, phase)
     if not report then return {} end
     local rows = {status_row("native-title-entry", report.map, report.state, name(report.controller), name(report.menu),
         name(report.viewport), report.count or "-", bit(report.top), bit(report.mounted), bit(report.visible),
@@ -158,6 +178,17 @@ function title.rows(state, phase, status_row, idle_sequence)
         if ok and path then rows[#rows + 1] = status_row("embedded-engine-startup", map, idle_sequence, path) end
     end
     return rows
+end
+
+function title.rows(state, phase, status_row, idle_sequence)
+    if not on_title(state, phase) then return {} end
+    if type(SilverfishNativeTitleRows) == "function" then
+        local report, startup = SilverfishNativeTitleRows(
+            state.world, state.controller, phase, not not state.listening, state.server, state.clients,
+            not not state.local_pawn, inspect_save_directory and idle_sequence or nil)
+        if report then return {report, startup} end
+    end
+    return lua_rows(state, phase, status_row, idle_sequence)
 end
 
 return title

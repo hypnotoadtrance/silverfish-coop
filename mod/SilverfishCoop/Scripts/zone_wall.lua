@@ -22,6 +22,7 @@ local primary_key
 local retry_at = {}
 local scanned_world
 local scanned_actors = {}
+local authored_overlap_storage = {}
 local scan_after = 0
 local discovered_world, discovered_sources, discover_after = nil, {}, 0
 local approach_scope, open_exit
@@ -88,6 +89,7 @@ function wall.clear()
     observation = nil
     primary_key, approach_scope, open_exit = nil, nil, nil
     scanned_world, scanned_actors, scan_after = nil, {}, 0
+    authored_overlap_storage = {}
     discovered_world, discovered_sources, discover_after = nil, {}, 0
     verified_walls = nil
     status, failure = "inactive", ""
@@ -336,9 +338,6 @@ local function qualified_source(fixture, world, plan, native_world_address)
 end
 
 local function scan_authored(world, plans, certified, now)
-    if not same(scanned_world, world) then
-        scanned_world, scanned_actors, scan_after = world, {}, 0
-    end
     if now < scan_after then return end
     for _, plan in ipairs(plans) do
         local actor = certified and certified[plan.actor]
@@ -394,13 +393,17 @@ local function wall_sources(world, map, route, fixture, secondary)
             approach = route.secondary }
     end
     local plans = authored_routes[map]
+    if not same(scanned_world, world) then
+        scanned_world, scanned_actors, scan_after = world, {}, 0
+        authored_overlap_storage = {}
+    end
     local now = os.time()
     local refresh_discovered = expanded and (now >= discover_after or not same(discovered_world, world))
     local certified, discovered
     local world_address
     if type(SilverfishSnapshotNativeWallOverlapSources) == "function" and (plans or refresh_discovered) then
         world_address = world:GetAddress()
-        certified, discovered = SilverfishSnapshotNativeWallOverlapSources(world_address, refresh_discovered)
+        certified, discovered = SilverfishSnapshotNativeWallOverlapSources(world_address, refresh_discovered, authored_overlap_storage)
     end
     if plans then
         scan_authored(world, plans, certified, now)

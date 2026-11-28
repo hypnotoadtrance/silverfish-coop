@@ -241,10 +241,14 @@ SilverfishSnapshotDiscoveredOverlaps = function(address)
     legacy_calls = legacy_calls + 1
     return stream_path .. "\tStreamed\n"
 end
-SilverfishSnapshotNativeWallOverlapSources = function(address, discover)
-    assert(address == world)
+local authored_storage
+SilverfishSnapshotNativeWallOverlapSources = function(address, discover, reusable)
+    assert(address == world and type(reusable) == "table")
+    assert(not authored_storage or rawequal(authored_storage, reusable))
+    authored_storage = reusable
+    reusable[first] = exits[1]
     batch_calls = batch_calls + 1
-    return {[first] = exits[1]}, discover and {
+    return reusable, discover and {
         [placed_path] = {fixture = exits[1], tag = "One", name = first, persistent = true, kind = "overlap", discovered = true},
         [stream_path] = {fixture = streamed, tag = "Streamed", name = first, kind = "overlap", discovered = true},
     } or nil
@@ -258,8 +262,17 @@ wall.sync(state, "connected", nil, true)
 assert(original_stream_wall.destroyed and legacy_calls == 0,
     "The wall revokes as soon as its streamed source hides, even inside the discovery cache window")
 sublevel.bIsVisible, seconds = true, 301
-SilverfishSnapshotNativeWallOverlapSources = function() return {[first] = exits[1]} end
+SilverfishSnapshotNativeWallOverlapSources = function(_, _, reusable)
+    assert(rawequal(reusable, authored_storage), "Stable scene must retain its authored wrapper table")
+    return reusable
+end
 wall.sync(state, "connected", nil, true)
 assert(legacy_calls == 1 and walls[4000] ~= original_stream_wall and not walls[4000].destroyed,
     "A declined native discovery uses the stock Lua route for the streamed source")
+wall.clear()
+SilverfishSnapshotNativeWallOverlapSources = function(_, _, reusable)
+    assert(not rawequal(reusable, authored_storage) and next(reusable) == nil,
+        "Clearing the wall scope retires its authored wrapper table")
+end
+wall.sync(state, "connected", nil, true)
 wall.clear()

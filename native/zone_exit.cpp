@@ -20,6 +20,7 @@
 
 #include <Helpers/String.hpp>
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
+#include <LuaType/LuaAActor.hpp>
 #include <LuaType/LuaUObject.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
@@ -1257,26 +1258,108 @@ namespace
         });
     }
 
-    int lua_snapshot_wall_overlap_sources(const Lua& lua)
+    struct WallActorWrapper
     {
-        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_bool(2)) return 0;
-        auto* world = qualified_wall_world(static_cast<Address>(lua.get_integer()));
-        if (!world || !scope.exit_class) return 0;
-        const bool discover = lua.get_bool();
-        auto* stack = lua.get_lua_state();
-        if (!lua_checkstack(stack, 8)) return 0;
-        const auto routes = Authored::for_world(scope.authored_world);
-        lua_createtable(stack, 0, static_cast<int>(routes.size()));
-        const auto authored_index = lua_gettop(stack);
-        for (const auto& route : routes)
+        std::string key;
+        Unreal::FWeakObjectPtr actor;
+        const void* userdata{};
+    };
+
+    struct AuthoredWallStorage
+    {
+        Unreal::FWeakObjectPtr world, driver;
+        std::uint64_t generation{};
+        const void* table{};
+        std::vector<WallActorWrapper> values;
+    };
+
+    thread_local AuthoredWallStorage authored_wall_storage;
+
+    void clear_wall_storage_table(lua_State* stack, int table)
+    {
+        lua_pushnil(stack);
+        while (lua_next(stack, table))
         {
-            if (auto* actor = qualified_authored_wall(world, route))
+            lua_pop(stack, 1);
+            lua_pushvalue(stack, -1);
+            lua_pushnil(stack);
+            lua_rawset(stack, table);
+        }
+    }
+
+    void append_authored_wall_sources(const Lua& lua, Unreal::UWorld* world, bool reuse)
+    {
+        auto* stack = lua.get_lua_state();
+        const auto routes = Authored::for_world(scope.authored_world);
+        if (reuse) lua_pushvalue(stack, 3);
+        else lua_createtable(stack, 0, static_cast<int>(routes.size()));
+        const auto result = lua_gettop(stack);
+        auto& storage = authored_wall_storage;
+        const auto table = lua_topointer(stack, result);
+        auto* driver = scope.roster.driver.Get();
+        if (reuse && (storage.table != table || storage.world.Get() != world || storage.driver.Get() != driver ||
+            storage.generation != scope.generation || storage.values.size() != routes.size()))
+        {
+            clear_wall_storage_table(stack, result);
+            storage = {world, driver, scope.generation, table, {}};
+            storage.values.reserve(routes.size());
+            for (const auto& route : routes) storage.values.push_back({RC::to_utf8_string(route.source_actor)});
+        }
+
+        for (std::size_t index = 0; index < routes.size(); ++index)
+        {
+            const auto& route = routes[index];
+            auto* actor = qualified_authored_wall(world, route);
+            if (!reuse)
             {
+                if (!actor) continue;
                 lua.set_string(RC::to_utf8_string(route.source_actor));
                 RC::LuaType::auto_construct_object(lua, actor);
-                lua_rawset(stack, authored_index);
+                lua_rawset(stack, result);
+                continue;
             }
+
+            auto& value = storage.values[index];
+            lua.set_string(value.key);
+            lua_pushvalue(stack, -1);
+            lua_rawget(stack, result);
+            if (!actor && lua_isnil(stack, -1))
+            {
+                value.actor = Unreal::FWeakObjectPtr{};
+                value.userdata = nullptr;
+                lua_pop(stack, 2);
+                continue;
+            }
+            // The weak identity rejects an actor replaced at the same address. A
+            // table entry is reusable only if it still contains that actor's wrapper.
+            if (actor && value.actor.Get() == actor && value.userdata == lua_topointer(stack, -1) &&
+                luaL_testudata(stack, -1, "AActor") &&
+                lua.get_userdata<RC::LuaType::AActor>(-1, true).get_remote_cpp_object() == actor)
+            {
+                lua_pop(stack, 2);
+                continue;
+            }
+            lua_pop(stack, 1);
+            if (actor) RC::LuaType::auto_construct_object(lua, actor);
+            else lua_pushnil(stack);
+            value.actor = actor;
+            value.userdata = actor ? lua_topointer(stack, -1) : nullptr;
+            lua_rawset(stack, result);
         }
+    }
+
+    int lua_snapshot_wall_overlap_sources(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw()) return 0;
+        auto* stack = lua.get_lua_state();
+        const auto arguments = lua_gettop(stack);
+        if ((arguments != 2 && arguments != 3) || !lua_isinteger(stack, 1) || !lua_isboolean(stack, 2) ||
+            (arguments == 3 && !lua_isnil(stack, 3) && !lua_istable(stack, 3))) return 0;
+        auto* world = qualified_wall_world(static_cast<Address>(lua_tointeger(stack, 1)));
+        if (!world || !scope.exit_class) return 0;
+        const bool discover = lua_toboolean(stack, 2);
+        if (!lua_checkstack(stack, 8)) return 0;
+        append_authored_wall_sources(lua, world, lua_istable(stack, 3));
         if (!discover) return 1;
         lua_newtable(stack);
         const auto discovered_index = lua_gettop(stack);
@@ -1970,6 +2053,10 @@ namespace silverfish::native_zone
     void clear_scope()
     {
         generation.fetch_add(1, std::memory_order_release);
-        if (Unreal::IsInGameThreadRaw()) scope = {};
+        if (Unreal::IsInGameThreadRaw())
+        {
+            scope = {};
+            authored_wall_storage = {};
+        }
     }
 }

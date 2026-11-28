@@ -81,6 +81,7 @@
 #include "save_copy.hpp"
 #include "shared_loot.hpp"
 #include "stock_rest.hpp"
+#include "title_entry.hpp"
 #include "zone_exit.hpp"
 
 namespace
@@ -1782,6 +1783,7 @@ namespace
             silverfish::native_bag_projection::register_lua(lua);
             silverfish::native_interaction_input::register_lua(lua);
             silverfish::local_bridge::register_lua(lua);
+            silverfish::native_title_entry::register_lua(lua);
             silverfish::native_authored_pickup::register_lua(lua);
             silverfish::native_mindcore::register_lua(lua);
             silverfish::native_mindcore_carry::register_lua(lua);

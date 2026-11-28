@@ -1182,7 +1182,7 @@ function panel.sync(state, phase)
     end
     local context = title.probe(state, phase)
     local starting = installed and resident and (not startup_seen or session and not session.offer)
-        and (context or title.starting(state, phase))
+        and (context or phase == "opening" and title.starting(state, phase))
     if settings_fixture and not same_title(settings_fixture.context, context) then remove_settings_fixture() end
     local offer = current_offer(context)
     if steam_handoff and offer and offer.generation ~= steam_handoff.generation then

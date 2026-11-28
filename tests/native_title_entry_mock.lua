@@ -48,10 +48,11 @@ menu.IsVisible = function() return visible end
 local stack = {}
 stack.GetArrayNum = function() return #stack end
 controller.MenuStack = stack
-local title = assert(loadfile("mod/SilverfishCoop/Scripts/native_title_entry.lua", "t", setmetatable({
+local environment = setmetatable({
     StaticFindObject = function(key) return classes[key] end,
     FindFirstOf = function(kind) assert(kind == "GameViewportClient"); return viewport end,
-}, {__index = _G})))()
+}, {__index = _G})
+local title = assert(loadfile("mod/SilverfishCoop/Scripts/native_title_entry.lua", "t", environment))()
 local state = {map = map, world = world, controller = controller, server = false, clients = 0}
 
 local function status(phase)
@@ -84,3 +85,19 @@ state.listening, viewport.World = nil, object("another map")
 assert(status()[11] == "stock_viewport_unavailable")
 state.map = "/Game/Classes/Maps/Other"
 assert(#title.rows(state, "ready", table.pack) == 0 and not title.probe(state, "ready"))
+
+state.map, viewport.World = map, world
+-- A qualified native refusal must stay authoritative even if the Lua fallback sees a ready title.
+environment.SilverfishObserveNativeTitle = function(current_world, current_controller, phase)
+    assert(current_world == world and current_controller == controller and phase == "ready")
+    return "waiting", "stock_menu_below_dialog", menu, viewport, 2, false, true, false
+end
+local covered_row = "native-title-entry\t" .. map .. "\twaiting"
+environment.SilverfishNativeTitleRows = function() return covered_row end
+assert(not title.probe(state, "ready") and not title.starting(state, "ready"))
+local native = title.rows(state, "ready", table.pack)
+assert(#native == 1 and native[1] == covered_row)
+
+environment.SilverfishObserveNativeTitle = function() end
+environment.SilverfishNativeTitleRows = function() end
+assert(title.probe(state, "ready").menu == menu and status()[3] == "ready")
