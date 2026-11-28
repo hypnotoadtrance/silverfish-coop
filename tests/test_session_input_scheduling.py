@@ -207,7 +207,7 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(client.gameplay.get(native_loot.VEHICLE_LOCKS), expected)
                 self.assertFalse(client.pending_lockpick_unlocks)
 
-    async def test_lockpick_reports_hold_only_their_own_crates_and_cancel_on_travel(self):
+    async def test_lockpick_feedback_and_reports_hold_only_their_own_crates_and_cancel_on_travel(self):
         for travel in (False, True):
             with self.subTest(travel=travel):
                 client = self.guest(AsyncMock())
@@ -223,7 +223,20 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
                 client.last_game = {"state": "connected", "map": area, "pawns": {"local": {"name": pawn}}}
                 client.invite["native_loot_input"] = True
                 client.bridge.input_namespace = uuid.NAMESPACE_OID
-                client.bridge.command = AsyncMock(return_value={"ack": {"message": "stock alert"}})
+                feedback_started, release_feedback, feedback_cancelled = (asyncio.Event() for _ in range(3))
+
+                async def feedback(action, crate, outcome, **kwargs):
+                    self.assertEqual((action, outcome), ("native-loot-lockpick-feedback", "picked"))
+                    if crate == second:
+                        feedback_started.set()
+                        try:
+                            await release_feedback.wait()
+                        except asyncio.CancelledError:
+                            feedback_cancelled.set()
+                            raise
+                    return {"ack": {"message": "stock alert"}}
+
+                client.bridge.command = AsyncMock(side_effect=feedback)
                 client.prop_carry.poll_local_edges = Mock()
 
                 def input_row(*fields):
@@ -275,6 +288,7 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
                                          input_row("loot-crate-open", area, second, pawn, "4"),
                                          input_row("loot-crate-open", area, other, pawn, "5")))
                     pickup_inputs.append(("pick-up", pickup))
+                    await asyncio.wait_for(feedback_started.wait(), .5)
                     self.assertEqual(await asyncio.wait_for(opened.get(), .5), (scope, other, 5))
                     await asyncio.wait_for(pickup_sent.wait(), .5)
                     self.assertTrue(reports.empty())
@@ -287,6 +301,7 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
                         client.stock_interaction_scope.return_value = next_scope
                         client.zone_epoch = next_scope[1]
                         await asyncio.wait_for(cancelled.wait(), .5)
+                        await asyncio.wait_for(feedback_cancelled.wait(), .5)
                         crate_inputs.append(input_row("loot-crate-open", area, first, pawn, "6"))
                         self.assertEqual(await asyncio.wait_for(opened.get(), .5), (next_scope, first, 6))
                         self.assertTrue(reports.empty())
@@ -294,9 +309,11 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(client.pending_lockpick_unlocks)
                     else:
                         release[first].set()
-                        self.assertEqual(await asyncio.wait_for(reports.get(), .5), second)
                         self.assertEqual(await asyncio.wait_for(opened.get(), .5), (scope, first, 2))
+                        self.assertTrue(reports.empty())
                         self.assertTrue(opened.empty())
+                        release_feedback.set()
+                        self.assertEqual(await asyncio.wait_for(reports.get(), .5), second)
                         release[second].set()
                         self.assertEqual(await asyncio.wait_for(opened.get(), .5), (scope, second, 4))
                         self.assertFalse(client.pending_lockpick_unlocks)

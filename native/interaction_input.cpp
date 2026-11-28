@@ -2268,6 +2268,44 @@ namespace
         return 2;
     }
 
+    int read_avatar_seconds(const Lua& lua)
+    {
+        auto* stack = lua.get_lua_state();
+        if (!available() || lua_gettop(stack) != 1 || !lua_isinteger(stack, 1)) return 0;
+        auto* world = scope.world.Get();
+        if (!live(world) || address(world) != lua_tointeger(stack, 1) || Clock::now() >= scope.expires ||
+            scope.generation != generation.load(std::memory_order_acquire)) return 0;
+
+        struct ClockParams
+        {
+            Unreal::UObject* context;
+            double seconds;
+        };
+        static Unreal::FWeakObjectPtr cached_function, cached_defaults;
+        auto* function = static_cast<Unreal::UFunction*>(cached_function.Get());
+        auto* defaults = cached_defaults.Get();
+        if (!function || !defaults)
+        {
+            function = find<Unreal::UFunction>(STR("/Script/Engine.GameplayStatics:GetRealTimeSeconds"));
+            defaults = find<Unreal::UObject>(STR("/Script/Engine.Default__GameplayStatics"));
+            auto* input = field<Unreal::FObjectProperty>(function, STR("WorldContextObject"));
+            auto* output = function ? Unreal::CastField<Unreal::FDoubleProperty>(function->GetReturnProperty()) : nullptr;
+            constexpr auto flags = static_cast<Unreal::EFunctionFlags>(Unreal::FUNC_Native | Unreal::FUNC_Static);
+            if (!defaults || !function || !input || !output || !function->HasAllFunctionFlags(flags) ||
+                function->GetOuterPrivate() != defaults->GetClassPrivate() || function->GetNumParms() != 2 ||
+                function->GetParmsSize() != sizeof(ClockParams) || output->GetArrayDim() != 1 ||
+                input->GetOffset_Internal() != offsetof(ClockParams, context) ||
+                output->GetOffset_Internal() != offsetof(ClockParams, seconds)) return 0;
+            cached_function = function;
+            cached_defaults = defaults;
+        }
+        ClockParams params{world, -1.0};
+        defaults->ProcessEvent(function, &params);
+        if (!std::isfinite(params.seconds) || params.seconds < 0) return 0;
+        lua_pushnumber(stack, params.seconds);
+        return 1;
+    }
+
     struct HeadRotationWriter
     {
         static constexpr int parameter_capacity = 512, parameter_alignment = 16;
@@ -2885,6 +2923,7 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishTakeNativeStashPress", take_stash_press);
         lua.register_function("SilverfishReadNativeLocalLean", read_local_lean);
         lua.register_function("SilverfishReadNativeRemoteAim", read_remote_aim);
+        lua.register_function("SilverfishReadNativeAvatarSeconds", read_avatar_seconds);
         lua.register_function("SilverfishWriteNativeRemoteHeadRotation", write_remote_head_rotation);
         lua.register_function("SilverfishReadNativeReadyRoster", read_ready_roster);
         lua.register_function("SilverfishReadNativeSwitchPower", read_switch_power);

@@ -6396,22 +6396,22 @@ class Client:
                 return
             self.last_lockpick_result = sequence
             crate = row["crate"]
-            if schedule is not None and not schedule(row):
+            hinged = native_loot.lockpick_door(crate, area)
+            if schedule is not None and not schedule(row, local_feedback=not hinged):
                 self.control.event("native_guest_lockpick_rejected", sequence=sequence, reason="stock_lockpick_backlog_full")
                 continue
-            hinged = native_loot.lockpick_door(crate, area)
             unlocked = row["unlocked"] == "1"
             if unlocked and not hinged:
                 self.pending_lockpick_unlocks[sequence] = crate
+            if schedule is not None:
+                continue
             try:
                 # Containers have a local stock result. Hinged doors apply the host's result.
                 if not hinged:
                     await self.show_lockpick_feedback(crate, unlocked, hinged=False)
-                if schedule is None:
-                    await self.finish_lockpick_result(scope, row)
+                await self.finish_lockpick_result(scope, row)
             finally:
-                if schedule is None:
-                    self.pending_lockpick_unlocks.pop(sequence, None)
+                self.pending_lockpick_unlocks.pop(sequence, None)
 
     async def finish_lockpick_result(self, scope, row) -> None:
         session, epoch, area, pawn = scope
@@ -7460,17 +7460,25 @@ class Client:
         deferred = {}
         lockpicks = deque()
         lockpick_task = None
+        feedback = {}
+        feedback_task = None
         slots = asyncio.Semaphore(4)
         visit = None
 
-        def queue_lockpick(row):
+        def queue_lockpick(row, *, local_feedback):
             if len(lockpicks) >= _LOCAL_STOCK_INPUT_BACKLOG:
                 return False
             lockpicks.append(row)
+            if local_feedback:
+                feedback[row["sequence"]] = row
             return True
 
         def waiting_for_lockpick(crate):
             return any(row["crate"] == crate for row in lockpicks)
+
+        async def play_feedback(scope, row):
+            if self.stock_interaction_scope() == scope:
+                await self.show_lockpick_feedback(row["crate"], row["unlocked"] == "1", hinged=False)
 
         async def settle_crate(scope, operation, crate, sequence, source, outcome):
             async with slots:
@@ -7490,18 +7498,19 @@ class Client:
                 pending[crate] = asyncio.create_task(settle_crate(*request))
 
         async def cancel_pending():
-            nonlocal lockpick_task
+            nonlocal lockpick_task, feedback_task
             tasks = list(pending.values())
-            if lockpick_task is not None:
-                tasks.append(lockpick_task)
+            tasks.extend(task for task in (lockpick_task, feedback_task) if task is not None)
             for request in tasks:
                 request.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             pending.clear()
             deferred.clear()
             lockpicks.clear()
+            feedback.clear()
             self.pending_lockpick_unlocks.clear()
             lockpick_task = None
+            feedback_task = None
 
         try:
             while not self.stopping:
@@ -7509,6 +7518,10 @@ class Client:
                 if scope != visit:
                     await cancel_pending()
                     visit = scope
+                if feedback_task is not None and feedback_task.done():
+                    await feedback_task
+                    del feedback[next(iter(feedback))]
+                    feedback_task = None
                 if lockpick_task is not None and lockpick_task.done():
                     await lockpick_task
                     self.pending_lockpick_unlocks.pop(lockpicks.popleft()["sequence"], None)
@@ -7524,7 +7537,11 @@ class Client:
                     if not waiting_for_lockpick(crate):
                         del deferred[crate]
                         pending[crate] = asyncio.create_task(settle_crate(*request))
-                if lockpick_task is None and lockpicks:
+                # Stock popups may wait for a game frame. Keep draining unrelated
+                # crate inputs and report each lockpick after its own popup.
+                if feedback_task is None and feedback:
+                    feedback_task = asyncio.create_task(play_feedback(scope, next(iter(feedback.values()))))
+                if lockpick_task is None and lockpicks and lockpicks[0]["sequence"] not in feedback:
                     lockpick_task = asyncio.create_task(self.finish_lockpick_result(scope, lockpicks[0]))
                 await asyncio.sleep(.012)
         finally:

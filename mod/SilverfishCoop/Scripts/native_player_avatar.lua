@@ -61,6 +61,15 @@ local function same(first, second)
     return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
 end
 
+local function stock_seconds(world, address)
+    if type(SilverfishReadNativeAvatarSeconds) == "function" then
+        local now = SilverfishReadNativeAvatarSeconds(address)
+        if now then return now end
+    end
+    if not valid(avatar_clock) then avatar_clock = StaticFindObject(gameplay_statics) end
+    if valid(avatar_clock) then return avatar_clock:GetRealTimeSeconds(world) end
+end
+
 local function valid_lean(roll)
     return type(roll) == "number" and roll >= -max_lean and roll <= max_lean
 end
@@ -92,10 +101,10 @@ function avatar.set_remote_lean(world, id, roll)
         target.lean_target, target.lean_until = nil, nil
         return true
     end
-    local clock = StaticFindObject(gameplay_statics)
-    if not valid(clock) then return false end
+    local now = stock_seconds(world, world:GetAddress())
+    if not now then return false end
     target.lean_target = roll
-    target.lean_until = clock:GetRealTimeSeconds(world) + lean_timeout
+    target.lean_until = now + lean_timeout
     return true
 end
 
@@ -181,10 +190,11 @@ local function observe(state, phase)
     if not same(observed_world, state.world) then
         observed_characters, observed_world = {}, state.world
     end
-    local known, weapons, characters = {}, {}, {}
+    local known, weapons, characters, player_ids = {}, {}, {}, {}
     for _, details in ipairs(state.pawns) do
         local ok, id = pcall(player_id, details)
         if ok and id ~= nil then
+            player_ids[details] = id
             if known[id] then
                 observations[id] = nil
             else
@@ -227,6 +237,7 @@ local function observe(state, phase)
         end
     end
     observed_weapons, observed_characters = weapons, characters
+    return player_ids
 end
 
 local function attach_component(entry, field, parent, socket_name, class)
@@ -490,9 +501,9 @@ function avatar.animate_melee(get_world)
     if not next(swings) then return end
     local world = get_world()
     if not valid(world) then return end
-    local clock = StaticFindObject("/Script/Engine.Default__GameplayStatics")
-    if not valid(clock) then return end
-    local now, scope = clock:GetRealTimeSeconds(world), world:GetAddress()
+    local scope = world:GetAddress()
+    local now = stock_seconds(world, scope)
+    if not now then return end
     for entry, swing in pairs(swings) do
         if swing.world ~= scope or not same(swing.body, entry.body) or not swing_body_ready(entry, world) then
             swings[entry] = nil
@@ -634,9 +645,10 @@ end
 function avatar.animate_use(get_world)
     if not next(uses) then return end
     local world = get_world()
-    local clock = StaticFindObject(gameplay_statics)
-    if not valid(world) or not valid(clock) then return end
-    local now, scope = clock:GetRealTimeSeconds(world), world:GetAddress()
+    if not valid(world) then return end
+    local scope = world:GetAddress()
+    local now = stock_seconds(world, scope)
+    if not now then return end
     for entry, use in pairs(uses) do
         local elapsed = math.max(0, now - use.start)
         if use.world ~= scope or not valid(entry.pawn) or not valid(entry.body) or not valid(entry.use_prop)
@@ -728,7 +740,7 @@ local function read_base_aim(entry, address)
     if type(SilverfishReadNativeRemoteAim) == "function" then
         pitch, yaw = SilverfishReadNativeRemoteAim(entry.world, address)
     end
-    if not pitch then
+    if not pitch and not entry.pawn:IsActorBeingDestroyed() then
         local rotation = entry.pawn:GetBaseAimRotation()
         pitch, yaw = rotation.Pitch, rotation.Yaw
     end
@@ -779,15 +791,14 @@ function avatar.animate_head(get_world)
     if not next(avatars) then return end
     local world = get_world()
     if not valid(world) then return end
-    if not valid(avatar_clock) then
-        avatar_clock = StaticFindObject(gameplay_statics)
-        if not valid(avatar_clock) then return end
-    end
-    local scope, now = world:GetAddress(), avatar_clock:GetRealTimeSeconds(world)
+    local scope = world:GetAddress()
+    local now = stock_seconds(world, scope)
+    if not now then return end
     local math_api
     for address, entry in pairs(avatars) do
-        if entry.world == scope and valid(entry.head_pivot) and valid(entry.pawn)
-            and not entry.pawn:IsActorBeingDestroyed() then
+        if entry.world == scope and valid(entry.head_pivot) and valid(entry.pawn) then
+            local aim_pitch, aim_yaw = read_base_aim(entry, address)
+            if not aim_pitch then goto next_avatar end
             local lean_changed = false
             if entry.lean_until or entry.lean_rotation then
                 math_api = math_api or aim_math()
@@ -795,7 +806,6 @@ function avatar.animate_head(get_world)
                     lean_changed = apply_lean(entry, now, math_api)
                 end
             end
-            local aim_pitch, aim_yaw = read_base_aim(entry, address)
             aim_head(entry, aim_pitch, aim_yaw, now, lean_changed, math_api)
             character_view.align_tail(entry)
             if not uses[entry] and not swings[entry] then gait.advance(entry, now) end
@@ -815,6 +825,7 @@ function avatar.animate_head(get_world)
                 end
             end
         end
+        ::next_avatar::
     end
 end
 
@@ -922,16 +933,17 @@ local function apply_outfit(entry, outfit, cosmetics)
 end
 
 function avatar.sync(state, phase)
-    local world = phase == "connected" and state.world:GetAddress() or nil
+    local world_address = (phase == "connected" or phase == "hosting") and state.world:GetAddress() or nil
+    local world = phase == "connected" and world_address or nil
     if client_world ~= world or client_map ~= state.map then
         client_world, client_map, client_outfits, client_receipt = world, state.map, {}, nil
         client_visors = {}
         visor.clear_guest()
     end
-    local authority = phase == "hosting" and state.world:GetAddress() or nil
+    local authority = phase == "hosting" and world_address or nil
     if authority ~= host_world then host_world, host_aim_receipt, host_aims, host_visors = authority, nil, {}, {} end
     sync_local_aim(state, phase)
-    observe(state, phase)
+    local player_ids = observe(state, phase)
     local outfits = phase == "hosting" and observations or client_outfits
     local visors = phase == "hosting" and host_visors or client_visors
     local seen = {}
@@ -943,9 +955,9 @@ function avatar.sync(state, phase)
                 local address = pawn:GetAddress()
                 seen[address] = true
                 local entry = avatars[address]
-                if not entry or not valid(entry.pawn) or entry.name ~= details.name or entry.world ~= state.world:GetAddress() then
+                if not entry or not valid(entry.pawn) or entry.name ~= details.name or entry.world ~= world_address then
                     entry = { pawn = pawn, pawn_address = address, name = details.name, map = state.map,
-                        world = state.world:GetAddress() }
+                        world = world_address }
                     avatars[address] = entry
                     local ok, failure = pcall(create, entry)
                     if not ok then
@@ -956,7 +968,7 @@ function avatar.sync(state, phase)
                 end
                 if entry.status == "default_body" or entry.status == "stock_body" then
                     local ok, failure = pcall(function()
-                        entry.id = player_id(details)
+                        entry.id = player_ids and player_ids[details] or player_id(details)
                         local outfit = outfits[entry.id]
                         if entry.status == "default_body" then
                             local appearance = outfit and outfit.appearance or "-"
@@ -974,8 +986,7 @@ function avatar.sync(state, phase)
                             weapon_view.apply(entry, equipment, outfit and outfit.firearm or "-")
                             if #entry.weapon_parts > 0 then
                                 if stock_time == nil then
-                                    local clock = StaticFindObject(gameplay_statics)
-                                    stock_time = valid(clock) and clock:GetRealTimeSeconds(state.world) or false
+                                    stock_time = stock_seconds(state.world, world_address) or false
                                 end
                                 if stock_time then weapon_view.suppress_stock(entry, stock_time) end
                             end

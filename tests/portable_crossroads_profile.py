@@ -544,13 +544,56 @@ def instrument_avatar_observer(source):
     observer, end, after = rest.partition("local function create(entry)")
     if not boundary or not end:
         raise ValueError("The remote avatar observer timing anchors changed")
-    for call in ("read_base_aim", "aim_head", "character_view.align_tail", "gait.advance", "weapon_view.rifle_idle"):
+    for call in ("stock_seconds", "read_base_aim", "aim_head", "character_view.align_tail", "gait.advance",
+                 "weapon_view.rifle_idle"):
         anchor = call + "("
         if observer.count(anchor) != 1:
             raise ValueError(f"The remote avatar observer call changed: {call}")
         observer = observer.replace(anchor, f'SilverfishProfileCrossroadsCall("avatar.{call}", {call}, ')
     source = start + boundary + observer + end + after
+    start, boundary, rest = source.partition("function avatar.sync(")
+    sync, end, after = rest.partition("local function read_visors(")
+    if not boundary or not end:
+        raise ValueError("The remote avatar sync timing anchors changed")
+    for call in ("observe", "apply_locomotion", "character_view.apply", "weapon_view.apply", "stock_seconds"):
+        anchor = call + "("
+        if sync.count(anchor) != 1:
+            raise ValueError(f"The remote avatar sync call changed: {call}")
+        sync = sync.replace(anchor, f'SilverfishProfileCrossroadsCall("avatar.{call}", {call}, ')
+    source = start + boundary + sync + end + after
     return source.replace("\nreturn avatar\n", """
+function SilverfishProfileAvatarClock()
+    local native, stamp = SilverfishReadNativeAvatarSeconds, SilverfishBridgeProfileStamp
+    if type(native) ~= "function" then return "unavailable" end
+    for _, entry in pairs(avatars) do
+        local world = valid(entry.pawn) and entry.pawn:GetWorld()
+        local clock = StaticFindObject(gameplay_statics)
+        if valid(world) and valid(clock) and entry.world == world:GetAddress() then
+            local address = entry.world
+            local function stock() return clock:GetRealTimeSeconds(world) end
+            local function sample() return native(address) end
+            local expected = stock()
+            assert(sample() == expected and native(address + 1) == nil, "avatar clock did not qualify the current world")
+            local function measure(reader)
+                local heap, started = collectgarbage("count"), stamp()
+                for _ = 1, 128 do reader() end
+                return (stamp() - started) / 1000, collectgarbage("count") - heap
+            end
+            local running = collectgarbage("isrunning")
+            collectgarbage("stop")
+            local ok, result = pcall(function()
+                local native_ms, native_kib = measure(sample)
+                local lua_ms, lua_kib = measure(stock)
+                return ("%.3f,%.3f,%.3f,%.3f"):format(native_ms, lua_ms, native_kib, lua_kib)
+            end)
+            if running then collectgarbage("restart") end
+            assert(ok, result)
+            return result
+        end
+    end
+    return "unavailable"
+end
+
 function SilverfishProfileRemoteHeadRotation()
     local native, stamp = SilverfishWriteNativeRemoteHeadRotation, SilverfishBridgeProfileStamp
     if type(native) ~= "function" then return "unavailable" end
@@ -1302,7 +1345,15 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     dynamic_acid_samples = {}
     controller_inspection = {}
     remote_head_rotation = {}
+    avatar_clock = {}
     if area == CROSSROADS:
+        clock_replies = await asyncio.gather(*(command(seat, "avatarclock") for seat in seats.values()))
+        for seat, reply in zip(seats, clock_replies, strict=True):
+            assert reply != "unavailable" and not reply.startswith("avatar clock comparison failed"), reply
+            native_ms, lua_ms, native_kib, lua_kib = map(float, reply.split(","))
+            avatar_clock[seat] = {"reads_per_path": 128, "native_ms": native_ms, "lua_ms": lua_ms,
+                                  "native_heap_growth_kib": native_kib, "lua_heap_growth_kib": lua_kib,
+                                  "game_clock_matched": True, "other_world_refused": True}
         rotations = await asyncio.gather(*(command(seat, "headrotation") for seat in seats.values()))
         for seat, reply in zip(seats, rotations, strict=True):
             if reply == "unavailable":
@@ -1363,4 +1414,5 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             "vitals_comparison": dict(zip(seats, comparison, strict=True)), **heartbeat, **guest_binding,
             **coarse, **journal, **anomaly_samples, **electrode_samples, **dynamic_acid_samples, **ready_roster,
             "controller_inspection_comparison": controller_inspection,
+            "avatar_clock_comparison": avatar_clock,
             "remote_head_rotation_comparison": remote_head_rotation}

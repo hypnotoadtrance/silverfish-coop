@@ -696,6 +696,9 @@ LoopInGameThreadWithDelay(50, function()
     elseif action == "headrotation" and not capture then
         local ok, value = pcall(SilverfishProfileRemoteHeadRotation)
         if ok then message = value else message = "head rotation comparison failed: " .. tostring(value) end
+    elseif action == "avatarclock" and not capture then
+        local ok, value = pcall(SilverfishProfileAvatarClock)
+        if ok then message = value else message = "avatar clock comparison failed: " .. tostring(value) end
     elseif action == "anomalysamples" and not capture then
         local ok, value = pcall(SilverfishProfileAnomalySamples)
         if ok then message = value else message = "anomaly sample comparison failed: " .. tostring(value) end
