@@ -518,15 +518,18 @@ namespace
             auto* type = find<U::UScriptStruct>(STR("/Script/Engine.HitResult"));
             if (!hit || !type || hit->GetStruct().Get() != type) return false;
             auto* vector = find<U::UScriptStruct>(STR("/Script/CoreUObject.Vector"));
-            const auto point = [type, vector](const U::TCHAR* name) -> U::FStructProperty* {
+            auto* quantized_point = find<U::UScriptStruct>(STR("/Script/Engine.Vector_NetQuantize"));
+            auto* quantized_normal = find<U::UScriptStruct>(STR("/Script/Engine.Vector_NetQuantizeNormal"));
+            const auto point = [type, vector](const U::TCHAR* name, U::UScriptStruct* quantized) -> U::FStructProperty* {
                 auto* member = field<U::FStructProperty>(type, name);
-                return member && vector && member->GetStruct().Get() == vector && member->GetSize() == sizeof(Point)
+                auto* layout = member ? member->GetStruct().Get() : nullptr;
+                return layout && (layout == vector || layout == quantized) && member->GetSize() == sizeof(Point)
                     ? member : nullptr;
             };
-            position = point(STR("Location"));
-            impact = point(STR("ImpactPoint"));
-            normal = point(STR("Normal"));
-            impact_normal = point(STR("ImpactNormal"));
+            position = point(STR("Location"), quantized_point);
+            impact = point(STR("ImpactPoint"), quantized_point);
+            normal = point(STR("Normal"), quantized_normal);
+            impact_normal = point(STR("ImpactNormal"), quantized_normal);
             blocking = field<U::FBoolProperty>(type, STR("bBlockingHit"));
             material = field<U::FWeakObjectProperty>(type, STR("PhysMaterial"));
             return position && impact && normal && impact_normal && blocking && material;

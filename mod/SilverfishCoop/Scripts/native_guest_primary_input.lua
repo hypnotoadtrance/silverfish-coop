@@ -428,6 +428,10 @@ function primary.command(fields, state, phase)
         primary.reset()
     end
     if mode then require("native_guest_weapon").project_fire_mode(state, phase, guid, mode) end
+    if kind == "spade" and not valid(current.pawn.EquipedItem) then
+        require("native_guest_weapon").project_stock_hold(
+            state, phase, "/Game/Classes/Equipment/MeleeWep_Spade.MeleeWep_Spade_C", guid)
+    end
     local accepted, status
     if camera then
         if not valid(StaticFindObject(camera_path)) then LoadAsset(camera_path) end

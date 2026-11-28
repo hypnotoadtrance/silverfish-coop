@@ -73,6 +73,30 @@ local function owned_hold(pawn, save, held)
         and same(held.User, pawn) and held.HeldByPlayer == true
 end
 
+function guest_weapon.project_stock_hold(state, phase, path, guid)
+    local save, pawn = save_scope.bind_guest(state, phase)
+    if not save or live_actor(pawn.EquipedItem) then return end
+    local slots = save.PlayerEquipment
+    local count = slots and math.tointeger(slots:GetArrayNum())
+    if not count or count < 1 or count > 4096 then return end
+
+    local index
+    for i = 1, count do
+        local row = slots[i]
+        if item_identity(row) == guid then
+            local class = row[class_field]
+            if index or not class or not class:IsValid() or class:GetFullName():match("^%S+ (%S+)$") ~= path then
+                return
+            end
+            index = i - 1
+        end
+    end
+    if not index or not pawn:Check_CanUseEquipment() then return end
+    -- The host's held actor reference is absent on an autonomous character.
+    -- The selected local inventory row is sufficient for the stock first-person equip graph.
+    pawn:Equip_NextItem(index, false)
+end
+
 function guest_weapon.local_projected_selection(pawn, save, projected)
     local held = pawn.EquipedItem
     if not owned_hold(pawn, save, held) then return end
