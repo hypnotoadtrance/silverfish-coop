@@ -71,6 +71,12 @@ function probe.observer_resolver(cached)
     return cached
 end
 
+function probe.host_maintenance_suspended()
+    if not capture or not capture.suspend_host_maintenance then return false end
+    capture.skipped_maintenance = capture.skipped_maintenance + 1
+    return true
+end
+
 function probe.observers_begin()
     if capture then return stamp() end
 end
@@ -167,10 +173,11 @@ local function result()
             peak[#peak + 1] = (";%s,%.4f,%d"):format(tag, call.wall, call.cycles)
         end
     end
-    local status = {("^%d,%d,%.3f,%.3f,%.3f,%d,%d,%d,%d,%d"):format(
+    local status = {("^%d,%d,%.3f,%.3f,%.3f,%d,%d,%d,%d,%d,%d"):format(
         complete.max_status_rows, complete.max_status_bytes, complete.heap_start, complete.heap_peak,
         complete.heap_max_drop, complete.heap_large_drops, complete.previous_pause or 0,
-        complete.previous_step_multiplier or 0, complete.restored_pause or 0, complete.restored_step_multiplier or 0)}
+        complete.previous_step_multiplier or 0, complete.restored_pause or 0, complete.restored_step_multiplier or 0,
+        complete.skipped_maintenance)}
     for tag, sample in pairs(complete.status_peaks) do
         status[#status + 1] = (";%s,%.4f,%d,%.3f"):format(tag, sample.wall, sample.cycles, sample.heap_delta)
     end
@@ -195,7 +202,7 @@ local function result()
     end
     return ("%.5f"):format(complete.elapsed) .. table.concat(rows) .. table.concat(peak) .. table.concat(status)
         .. "|" .. table.concat(memory) .. "|" .. table.concat(sizes) .. "|" .. table.concat(commands)
-        .. "|" .. table.concat(intervals)
+        .. "|" .. table.concat(intervals) .. "|" .. (complete.engine_tick or "")
 end
 
 local function compare_switch_reads()
@@ -466,6 +473,10 @@ LoopInGameThreadWithDelay(1, function()
     end
     previous, previous_cycles = now, cycles
     if now >= active.deadline then
+        if active.native_tick_started then
+            local count, longest, engine, cycles, engine_cycles = SilverfishFinishEngineTickProfile()
+            active.engine_tick = ("%d,%d,%d,%d,%d"):format(count, longest, engine, cycles, engine_cycles)
+        end
         active.elapsed = (now - active.started) / 1e6
         status_publication.mirror = active.original_mirror
         if active.previous_pause then
@@ -488,8 +499,8 @@ LoopInGameThreadWithDelay(50, function()
     local message
     if action == "coarseraw" and type(status_publication.get_observer_world) ~= "function" then
         message = "unavailable"
-    elseif (action == "arm" or action == "coarse" or action == "coarseraw" or action == "gcbaseline"
-        or action == "gctuned" or action == "gcmode") and not capture then
+    elseif (action == "arm" or action == "coarse" or action == "coarseraw" or action == "coarsequiet"
+        or action == "gcbaseline" or action == "gctuned" or action == "gcmode") and not capture then
         local now, cycles
         if type(stamp) == "function" then now, cycles = stamp() end
         if type(now) == "number" and type(cycles) == "number" then
@@ -500,6 +511,7 @@ LoopInGameThreadWithDelay(50, function()
                 rows = {}, calls = {}, peak = 0, peak_calls = {}, started = now,
                 coarse = coarse, deadline = now + (gc_trial and gc_window_us or coarse and coarse_window_us or window_us),
                 uncached_world = action == "coarseraw",
+                suspend_host_maintenance = action == "coarsequiet" and role == "host", skipped_maintenance = 0,
                 long_intervals = {},
                 status_peaks = {}, heap_calls = {}, tick_sources = {}, snapshot_sources = {},
                 max_status_rows = 0, max_status_bytes = 0,
@@ -510,6 +522,8 @@ LoopInGameThreadWithDelay(50, function()
                 capture.previous_pause = collectgarbage("setpause", gc_pause)
                 capture.previous_step_multiplier = collectgarbage("setstepmul", gc_step_multiplier)
             end
+            capture.native_tick_started = type(SilverfishBeginEngineTickProfile) == "function"
+                and SilverfishBeginEngineTickProfile()
             -- Keep the private launch flags, and time the installed memory-only gameplay path.
             status_publication.mirror = false
             message = "armed"

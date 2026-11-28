@@ -10,6 +10,7 @@ import re
 import secrets
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -5598,7 +5599,7 @@ class Client:
         self.provisional_crate_rolls = {}
         self.world_loot_wake = asyncio.Event()
         self.last_lockpick_result = 0
-        self.pending_lockpick_unlocks = set()
+        self.pending_lockpick_unlocks: dict[int, str] = {}
         self.stock_door_requests = {}
         self.stock_door_view = native_stock_door.GuestView()
         self.stock_switch_view = native_stock_switch.GuestView()
@@ -6271,13 +6272,13 @@ class Client:
             except (ValueError, OSError, RuntimeError) as error:
                 self.control.event(event + "_rejected", operation_id=operation, sequence=sequence, reason=str(error))
 
-    async def service_crate_interaction(self, scope, *, schedule=None) -> None:
+    async def service_crate_interaction(self, scope, *, schedule=None, schedule_lockpick=None) -> None:
         if not self.invite.get("native_loot_input"):
             return
         session, epoch = self.host_session, self.zone_epoch
         inputs = self.bridge.native_crate_inputs()
         inputs, local_outcomes = split_crate_input_outcomes(self.last_game, inputs)
-        await self.service_lockpick_results(scope, inputs)
+        await self.service_lockpick_results(scope, inputs, schedule=schedule_lockpick)
         intents = self.crate_intents.take(self.last_game, inputs)
         for sequence, crate, _, source in intents:
             if scope is None or self.stock_interaction_scope() != scope:
@@ -6361,10 +6362,10 @@ class Client:
             del self.provisional_crate_rolls[crate]
             self.world_loot_wake.set()
 
-    async def service_lockpick_results(self, scope, inputs) -> None:
+    async def service_lockpick_results(self, scope, inputs, *, schedule=None) -> None:
         if scope is None or self.stock_interaction_scope() != scope:
             return
-        session, epoch, area, pawn = scope
+        _, _, area, pawn = scope
         outcomes = {row["sequence"]: row for row in self.last_game.get(native_loot.LOCKPICK_INPUTS, ())}
         for record in inputs:
             if not record.startswith(b"loot-lockpick\t"):
@@ -6380,38 +6381,50 @@ class Client:
             if self.stock_interaction_scope() != scope:
                 return
             self.last_lockpick_result = sequence
-            operation = uuid.uuid5(self.bridge.input_namespace, f"{session}:{epoch}:{pawn}:lockpick:{sequence}").hex
-            target = "@".join((epoch, *(row[key] for key in ("crate", "guid", "unlocked", "quantity", "spent"))))
             crate = row["crate"]
+            if schedule is not None and not schedule(row):
+                self.control.event("native_guest_lockpick_rejected", sequence=sequence, reason="stock_lockpick_backlog_full")
+                continue
             hinged = native_loot.lockpick_door(crate, area)
             unlocked = row["unlocked"] == "1"
             if unlocked and not hinged:
-                self.pending_lockpick_unlocks.add(crate)
+                self.pending_lockpick_unlocks[sequence] = crate
             try:
-                # The stock container attempt already finished on this seat.
-                # Hinged doors apply their unlock through the host's result.
+                # Containers have a local stock result. Hinged doors apply the host's result.
                 if not hinged:
                     await self.show_lockpick_feedback(crate, unlocked, hinged=False)
-                    if self.stock_interaction_scope() != scope:
-                        return
-                started = time.monotonic()
-                result = await self.gameplay_action(native_loot.LOCKPICK, operation, target)
-                elapsed = round(1000 * (time.monotonic() - started))
-                proof = result.get(native_loot.LOCKPICK_RESULT, {})
-                if (proof.get("map"), proof.get("crate"), proof.get("guid")) == (area, crate, row["guid"]):
-                    if "reported_remaining" in proof and self.stock_interaction_scope() == scope:
-                        self.guest_ui.queue_stock_inventory(self)
-                    if not hinged and proof.get("locked") is False:
-                        await self.cancel_gameplay_snapshot()
-                        if self.stock_interaction_scope() == scope:
-                            self.gameplay.setdefault(native_loot.VEHICLE_LOCKS, {})[crate] = False
-                    if hinged and self.stock_interaction_scope() == scope:
-                        await self.show_lockpick_feedback(crate, unlocked, hinged=True)
-                self.control.event("native_guest_lockpick", sequence=sequence, milliseconds=elapsed, **result)
-            except (ValueError, OSError, RuntimeError) as error:
-                self.control.event("native_guest_lockpick_rejected", sequence=sequence, reason=str(error))
+                if schedule is None:
+                    await self.finish_lockpick_result(scope, row)
             finally:
-                self.pending_lockpick_unlocks.discard(crate)
+                if schedule is None:
+                    self.pending_lockpick_unlocks.pop(sequence, None)
+
+    async def finish_lockpick_result(self, scope, row) -> None:
+        session, epoch, area, pawn = scope
+        crate, sequence = row["crate"], row["sequence"]
+        hinged = native_loot.lockpick_door(crate, area)
+        unlocked = row["unlocked"] == "1"
+        operation = uuid.uuid5(self.bridge.input_namespace, f"{session}:{epoch}:{pawn}:lockpick:{sequence}").hex
+        target = "@".join((epoch, *(row[key] for key in ("crate", "guid", "unlocked", "quantity", "spent"))))
+        try:
+            if self.stock_interaction_scope() != scope:
+                return
+            started = time.monotonic()
+            result = await self.gameplay_action(native_loot.LOCKPICK, operation, target)
+            elapsed = round(1000 * (time.monotonic() - started))
+            proof = result.get(native_loot.LOCKPICK_RESULT, {})
+            if (proof.get("map"), proof.get("crate"), proof.get("guid")) == (area, crate, row["guid"]):
+                if "reported_remaining" in proof and self.stock_interaction_scope() == scope:
+                    self.guest_ui.queue_stock_inventory(self)
+                if not hinged and proof.get("locked") is False and self.stock_interaction_scope() == scope:
+                    await self.cancel_gameplay_snapshot()
+                    if self.stock_interaction_scope() == scope:
+                        self.gameplay.setdefault(native_loot.VEHICLE_LOCKS, {})[crate] = False
+                if hinged and self.stock_interaction_scope() == scope:
+                    await self.show_lockpick_feedback(crate, unlocked, hinged=True)
+            self.control.event("native_guest_lockpick", sequence=sequence, milliseconds=elapsed, **result)
+        except (ValueError, OSError, RuntimeError) as error:
+            self.control.event("native_guest_lockpick_rejected", sequence=sequence, reason=str(error))
 
     async def show_lockpick_feedback(self, crate: str, unlocked: bool, *, hinged: bool) -> None:
         action = "native-stock-door-lockpick-feedback" if hinged else "native-loot-lockpick-feedback"
@@ -6870,7 +6883,8 @@ class Client:
                     if self.invite.get("native_loot_input"):
                         locks = self.gameplay.get(native_loot.VEHICLE_LOCKS)
                         if self.pending_lockpick_unlocks and isinstance(locks, dict):
-                            locks = {crate: locked for crate, locked in locks.items() if crate not in self.pending_lockpick_unlocks}
+                            pending_unlocks = set(self.pending_lockpick_unlocks.values())
+                            locks = {crate: locked for crate, locked in locks.items() if crate not in pending_unlocks}
                         self.last_game = await native_loot.project_vehicle_locks(
                             self.bridge, self.last_game, locks)
                         self.last_game = await native_loot.project_stock_alarms(
@@ -7410,39 +7424,78 @@ class Client:
 
     async def run_stock_crates(self) -> None:
         pending = {}
+        deferred = {}
+        lockpicks = deque()
+        lockpick_task = None
         slots = asyncio.Semaphore(4)
         visit = None
 
+        def queue_lockpick(row):
+            if len(lockpicks) >= _LOCAL_STOCK_INPUT_BACKLOG:
+                return False
+            lockpicks.append(row)
+            return True
+
+        def waiting_for_lockpick(crate):
+            return any(row["crate"] == crate for row in lockpicks)
+
+        async def settle_crate(scope, operation, crate, sequence, source, outcome):
+            async with slots:
+                await self.finish_crate_interaction(scope, operation, crate, sequence, source, outcome)
+
         def schedule(scope, operation, crate, sequence, source, outcome):
-            if crate in pending:
+            if crate in pending or crate in deferred:
                 return
+            if len(pending) + len(deferred) >= _LOCAL_STOCK_INPUT_BACKLOG:
+                self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, operation_id=operation,
+                                   crate=crate, input_source=source, reason="stock_crate_backlog_full")
+                return
+            request = scope, operation, crate, sequence, source, outcome
+            if waiting_for_lockpick(crate):
+                deferred[crate] = request
+            else:
+                pending[crate] = asyncio.create_task(settle_crate(*request))
 
-            async def settle():
-                async with slots:
-                    await self.finish_crate_interaction(scope, operation, crate, sequence, source, outcome)
-
-            pending[crate] = asyncio.create_task(settle())
+        async def cancel_pending():
+            nonlocal lockpick_task
+            tasks = list(pending.values())
+            if lockpick_task is not None:
+                tasks.append(lockpick_task)
+            for request in tasks:
+                request.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            pending.clear()
+            deferred.clear()
+            lockpicks.clear()
+            self.pending_lockpick_unlocks.clear()
+            lockpick_task = None
 
         try:
             while not self.stopping:
                 scope = self.stock_interaction_scope()
                 if scope != visit:
-                    for request in pending.values():
-                        request.cancel()
-                    await asyncio.gather(*pending.values(), return_exceptions=True)
-                    pending.clear()
+                    await cancel_pending()
                     visit = scope
+                if lockpick_task is not None and lockpick_task.done():
+                    await lockpick_task
+                    self.pending_lockpick_unlocks.pop(lockpicks.popleft()["sequence"], None)
+                    lockpick_task = None
                 for crate, request in tuple(pending.items()):
                     if request.done():
                         del pending[crate]
                         await request
+                # Read new results before releasing any delayed open for that locker.
                 if self.bridge.stock_interaction_ready(crates=True):
-                    await self.service_crate_interaction(scope, schedule=schedule)
+                    await self.service_crate_interaction(scope, schedule=schedule, schedule_lockpick=queue_lockpick)
+                for crate, request in tuple(deferred.items()):
+                    if not waiting_for_lockpick(crate):
+                        del deferred[crate]
+                        pending[crate] = asyncio.create_task(settle_crate(*request))
+                if lockpick_task is None and lockpicks:
+                    lockpick_task = asyncio.create_task(self.finish_lockpick_result(scope, lockpicks[0]))
                 await asyncio.sleep(.012)
         finally:
-            for request in pending.values():
-                request.cancel()
-            await asyncio.gather(*pending.values(), return_exceptions=True)
+            await cancel_pending()
 
     async def dispatch_stock_interaction(self, scope, operation, target) -> None:
         if self.stock_interaction_scope() != scope:

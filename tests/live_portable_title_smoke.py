@@ -8413,7 +8413,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_board_offers: bool = False, stock_streamed_board: bool = False, stock_quarry_photo: bool = False,
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
                  stock_weather_travel: bool = False, stock_lightning: bool = False, stock_storm_ambience: bool = False,
-                 crossroads_profile: bool = False, crossroads_gc_trial: bool | str = False, rendered: bool = False,
+                 crossroads_profile: bool = False, crossroads_gc_trial: bool | str = False,
+                 crossroads_host_maintenance_trial: bool = False, rendered: bool = False,
                  stock_crossroads_door: bool = False, stock_dock_gate: bool = False,
                  stock_crossroads_recovery: bool = False, stock_discovered_overlap: bool = False,
                  stock_authored_quest_placement: bool = False,
@@ -8632,6 +8633,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_weather_travel, "crossroads", "stock_weather_travel",
          lambda host, guest, pawn: verify_weather_travel(host, guest, pawn, portable_probe_command,
                                                         profile=crossroads_profile, gc_trial=crossroads_gc_trial,
+                                                        host_maintenance_trial=crossroads_host_maintenance_trial,
                                                         rendered=rendered)),
         (stock_crate_ring and crossroads_profile and stock_weather_travel, "crossroads", "stock_original_crossroads_crate",
          verify_original_crossroads_crate),
@@ -9718,6 +9720,8 @@ if __name__ == "__main__":
                         help="run with offscreen graphics and capture world frames when profiling Crossroads")
     parser.add_argument("--crossroads-gc-trial", choices=("tuned", "generational", "minor"), nargs="?", const="tuned",
                         help="compare the current and earlier Lua collection schedules while walking")
+    parser.add_argument("--crossroads-host-maintenance-trial", action="store_true",
+                        help="compare Crossroads walks with host Lua maintenance running and briefly suspended")
     parser.add_argument("--stock-lightning", action="store_true",
                         help="verify one stock lightning strike and thunder across a private Crossroads pair")
     parser.add_argument("--stock-storm-ambience", action="store_true",
@@ -9862,11 +9866,13 @@ if __name__ == "__main__":
     if args.stock_shovel_host_quest and not args.stock_shovel_quest:
         parser.error("Use --stock-shovel-host-quest with --stock-shovel-quest")
     resident_check_options.add("stock_cooked_meal")
-    resident_check_options.update(("crossroads_profile", "crossroads_gc_trial", "stock_crossroads_recovery",
-                                   "stock_discovered_overlap", "stock_authored_quest_placement",
+    resident_check_options.update(("crossroads_profile", "crossroads_gc_trial", "crossroads_host_maintenance_trial",
+                                   "stock_crossroads_recovery", "stock_discovered_overlap", "stock_authored_quest_placement",
                                    "stock_guest_title_recovery", "rendered"))
     if args.crossroads_gc_trial and not args.crossroads_profile:
         parser.error("--crossroads-gc-trial requires --crossroads-profile")
+    if args.crossroads_host_maintenance_trial and not (args.crossroads_profile and args.rendered):
+        parser.error("--crossroads-host-maintenance-trial requires --crossroads-profile and --rendered")
     resident_check_options.update(("guest_stash_memory", "guest_stash_large_memory"))
     if args.crossroads_profile:
         resident_check_options.add("stock_crate_ring")
@@ -9945,7 +9951,7 @@ if __name__ == "__main__":
                        stock_simmi_jammers=args.stock_simmi_jammers,
                        stock_weather_travel=args.stock_weather_travel,
                        crossroads_profile=args.crossroads_profile, crossroads_gc_trial=args.crossroads_gc_trial,
-                       rendered=args.rendered,
+                       crossroads_host_maintenance_trial=args.crossroads_host_maintenance_trial, rendered=args.rendered,
                        stock_crossroads_door=args.stock_crossroads_door,
                        stock_crossroads_recovery=args.stock_crossroads_recovery,
                        stock_discovered_overlap=args.stock_discovered_overlap,

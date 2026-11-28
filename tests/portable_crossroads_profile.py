@@ -112,10 +112,18 @@ def instrument_profile(source, *, stock_receipts=False):
     last_observer = ('    if not leaving then pcall(' + wrapper + ', "native_player_avatar.animate_use", '
                      f'native_player_avatar.animate_use, {observer_world}) end\n')
     assert rest.count(first_observer) == rest.count(last_observer) == 1
-    rest = rest.replace(first_observer, '    local profile_at, profile_cycles = '
-                        'status_publication.profile.observers_begin()\n' + first_observer)
-    rest = rest.replace(last_observer, last_observer
-                        + '    status_publication.profile.observers_end(profile_at, profile_cycles)\n')
+    observer_start = rest.index(first_observer)
+    observer_end = rest.index(last_observer) + len(last_observer)
+    observers = "".join("    " + line for line in rest[observer_start:observer_end].splitlines(keepends=True))
+    rest = (rest[:observer_start] + '    local suspended = status_publication.profile.host_maintenance_suspended()\n'
+            '    if not suspended then\n'
+            '        local profile_at, profile_cycles = status_publication.profile.observers_begin()\n'
+            + observers + '        status_publication.profile.observers_end(profile_at, profile_cycles)\n'
+            '    end\n' + rest[observer_end:])
+    periodic = "    local periodic = now >= status_publication.next_snapshot or now >= status_publication.next_frame\n"
+    assert rest.count(periodic) == 1
+    rest = rest.replace(periodic, "    local periodic = not suspended and (now >= status_publication.next_snapshot"
+                        " or now >= status_publication.next_frame)\n")
     if cache in rest:
         lookup = 'status_publication.observer_world = ' + wrapper + '("current_world", current_world)'
         assert rest.count(cache) == rest.count(lookup) == 1
@@ -695,7 +703,7 @@ end
 
 
 def read_comparison(raw):
-    raw, memory, sizes, commands, intervals = raw.split("|")
+    raw, memory, sizes, commands, intervals, engine_tick = raw.split("|")
     raw, status = raw.split("^")
     summary, slow_frame = raw.split("!")
     duration, *sections = summary.split(";")
@@ -706,7 +714,7 @@ def read_comparison(raw):
         totals[name] = dict(count=int(count), p50_ms=float(p50), p95_ms=float(p95), p99_ms=float(p99),
                             max_ms=float(maximum), sum_ms=float(total), thread_cycles=cpu)
         assert all(value >= 0 for value in cpu.values()), (name, cpu)
-    assert float(duration) >= 3 and totals["frame"]["count"] > 10 and totals["write_status"]["count"] > 3
+    assert float(duration) >= 3 and totals["frame"]["count"] > 10
     peak, *calls = slow_frame.split(";")
     elapsed, peak_cycles, peak_heap_delta = peak.split(",")
     slow_calls, call_cycles = {}, {}
@@ -714,7 +722,13 @@ def read_comparison(raw):
         name, wall, cycles = entry.split(",")
         slow_calls[name], call_cycles[name] = float(wall), int(cycles)
     frame_size, *stages = status.split(";")
-    max_rows, max_bytes, heap_start, heap_peak, max_drop, large_drops, old_pause, old_step, pause, step = frame_size.split(",")
+    (max_rows, max_bytes, heap_start, heap_peak, max_drop, large_drops,
+     old_pause, old_step, pause, step, skipped_maintenance) = frame_size.split(",")
+    skipped_maintenance = int(skipped_maintenance)
+    if skipped_maintenance:
+        assert "delayed_observers" not in totals
+    else:
+        assert totals["write_status"]["count"] > 3
     heap = {"start_kib": float(heap_start), "peak_kib": float(heap_peak),
             "largest_drop_kib": float(max_drop), "drops_over_one_mib": int(large_drops)}
     if int(old_pause):
@@ -725,19 +739,24 @@ def read_comparison(raw):
         name, wall, cycles, heap_delta = entry.split(",")
         status_peaks[name] = {"elapsed_ms": float(wall), "thread_cycles": int(cycles),
                               "lua_heap_delta_kib": float(heap_delta)}
-    assert int(max_bytes) > 0 and int(max_rows) > 0 and "status_native_publish" in status_peaks, status
+    if not skipped_maintenance:
+        assert int(max_bytes) > 0 and int(max_rows) > 0 and "status_native_publish" in status_peaks, status
     heap_calls = {}
     for entry in memory.split(";")[1:]:
         name, count, drops, growth, peak_growth = entry.split(",")
         heap_calls[name] = {"nonnegative_samples": int(count), "heap_drops": int(drops),
                             "inclusive_growth_kib": float(growth), "peak_inclusive_growth_kib": float(peak_growth)}
     status_bytes_by_tag = {entry.split(",")[0]: int(entry.split(",")[1]) for entry in sizes.split(";")[1:]}
-    assert status_bytes_by_tag and sum(status_bytes_by_tag.values()) <= int(max_bytes)
+    if not skipped_maintenance:
+        assert status_bytes_by_tag and sum(status_bytes_by_tag.values()) <= int(max_bytes)
     tick_sources = {}
     for entry in commands.split(";")[1:]:
         name, ticks, snapshots = entry.split(",")
         tick_sources[name] = {"ticks": int(ticks), "snapshot_attempts": int(snapshots)}
-    assert tick_sources
+    if skipped_maintenance:
+        assert "due/scheduled" not in tick_sources
+    else:
+        assert tick_sources
     slow_intervals = []
     for entry in intervals.split(";")[1:]:
         elapsed_ms, cycles, heap_delta, tick, observers, status = entry.split(",")
@@ -746,8 +765,16 @@ def read_comparison(raw):
                                "delayed_observers_ms": float(observers), "status_in_tick_ms": float(status)})
     assert len(slow_intervals) == min(5, totals.get("frame_over_16ms", {}).get("count", 0))
     assert not slow_intervals or slow_intervals[0]["elapsed_ms"] == float(elapsed)
+    native_interval = {}
+    if engine_tick:
+        count, longest, engine, cycles, engine_cycles = map(int, engine_tick.split(","))
+        assert count > 10 and 0 <= engine <= longest and 0 <= engine_cycles <= cycles, engine_tick
+        native_interval = {"engine_tick_intervals": count, "max_interval_ms": longest / 1000,
+                           "engine_tick_ms_in_max_interval": engine / 1000,
+                           "interval_thread_cycles": cycles, "engine_tick_cycles_in_max_interval": engine_cycles}
     return {"seconds": float(duration), "timings": totals, "status_sections": status_peaks,
-            "longest_intervals_over_16ms": slow_intervals,
+            "native_engine_tick": native_interval,
+            "longest_intervals_over_16ms": slow_intervals, "skipped_maintenance_ticks": skipped_maintenance,
             "max_status_bytes": int(max_bytes), "max_status_rows": int(max_rows), "lua_heap": heap,
             "heap_calls": heap_calls, "sample_status_bytes_by_tag": status_bytes_by_tag, "tick_sources": tick_sources,
             "slowest_interval": {"elapsed_ms": float(elapsed), "inclusive_calls_ms": slow_calls,
@@ -772,7 +799,7 @@ async def capture_rendered_frame(seat, probe):
             await asyncio.sleep(.15)
 
 
-async def profile_world(host, guest, area, probe, *, gc_trial=False):
+async def profile_world(host, guest, area, probe, *, gc_trial=False, host_maintenance_trial=False):
     guest_run = guest.client / "run"
     seats = {"host": host, "guest": guest}
     runs = {"host": host.campaign / "run", "guest": guest_run}
@@ -974,6 +1001,20 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
                 assert sample["timings"]["observer_world_lookup"]["count"] <= sample["timings"]["delayed_observers"]["count"]
             coarse["uncached_world_walking"] = dict(zip(seats, raw_samples, strict=True))
             coarse["uncached_world_displacement_cm"] = raw_displacement
+        if host_maintenance_trial:
+            trials = {}
+            for label, action in (("before", "coarse"), ("suspended_first", "coarsequiet"),
+                                  ("suspended_second", "coarsequiet"), ("after", "coarse")):
+                await arm(action)
+                travelled = await walk(2)
+                samples = await asyncio.gather(*(read(seat) for seat in seats.values()))
+                assert all(sample["seconds"] >= 5 for sample in samples), samples
+                host_sample, guest_sample = samples
+                assert not guest_sample["skipped_maintenance_ticks"]
+                assert (host_sample["skipped_maintenance_ticks"] > 0) is (action == "coarsequiet")
+                await wait_resident_status(guest_run, pawns_here)
+                trials[label] = {"displacement_cm": travelled, **dict(zip(seats, samples, strict=True))}
+            coarse["host_maintenance_comparison"] = trials
         if gc_trial == "minor":
             assert {entry["active"] for entry in collector_modes.values()} == {"generational"}, collector_modes
             results = {}

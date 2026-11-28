@@ -74,12 +74,22 @@ end
 function query:CapsuleTraceSingle() return false end
 
 local authorized, exposed, expired, hits, dispatches, world_is_nothing = true, false, false, 0, 0, false
+local now, exact_reads, observed_reads, queue_during_sample = 0, 0, 0, false
 local modules = {
     native_transport = {scoped_host = function() return local_detail, true end},
-    guest_save = {exact_item_context = function(_, _, name)
-        assert(name == guest_detail.name)
-        if authorized then return guest, guest.Save end
-    end},
+    guest_save = {
+        exact_item_context = function(_, _, name)
+            assert(name == guest_detail.name)
+            exact_reads = exact_reads + 1
+            if authorized then return guest, guest.Save end
+        end,
+        observed_item_context = function(_, _, detail)
+            assert(detail == guest_detail)
+            observed_reads = observed_reads + 1
+            if queue_during_sample then exposed = true end
+            return guest, guest.Save
+        end,
+    },
     players = {is_downed = function() return false end,
         is_standing_guest = function() return not guest.HoldingCrouch end},
     native_death = {publish_kill_volume_down = function(_, _, pawn, save, projected_downed)
@@ -89,7 +99,8 @@ local modules = {
         return true, save.PlayerHealth
     end},
 }
-local env = setmetatable({require = function(name) return assert(modules[name]) end, os = {getenv = function() return "1" end, time = os.time},
+local env = setmetatable({require = function(name) return assert(modules[name]) end,
+    os = {getenv = function() return "1" end, time = os.time, clock = function() return now end},
     StaticFindObject = function(key) return registry[key] end,
     SilverfishReadNativeKillVolume = function() assert(not world_is_nothing); return true, hits, 0 end,
     SilverfishNextNativeKillVolumeCrossing = function(after)
@@ -105,8 +116,12 @@ local guard = assert(loadfile("mod/SilverfishCoop/Scripts/native_kill_volume.lua
 local state = {world = world, map = area, listening = true, server = false, pawns = {local_detail, guest_detail}}
 local function update() return guard.sync(state, "hosting") end
 local function rows() return guard.rows(state, "hosting", table.pack) end
-assert(not update() and rows()[1][4] == "armed")
+assert(not update() and rows()[1][4] == "armed" and observed_reads == 1 and exact_reads == 0)
+assert(not update() and observed_reads == 1 and exact_reads == 0)
+now = 0.75
+assert(not update() and observed_reads == 2 and exact_reads == 0)
 assert(guard.command({"nonce", "native-kill-volume-fall-fixture", guest_detail.name}, state, "hosting"))
+assert(exact_reads == 1)
 assert(not box:IsOverlappingActor(guest) and guest.CharacterMovement.falling and guest.Save.PlayerHealth == 250)
 guest.position = box:K2_GetComponentLocation()
 authorized, exposed, hits = false, true, 1
@@ -122,8 +137,16 @@ exposed, hits = true, 2
 assert(update() and dispatches == 1 and guest.teleports == 3 and guest.Save.PlayerHealth == 3.452 and rows()[2][8] == "-")
 
 guest.position = box:K2_GetComponentLocation()
-authorized, exposed, expired, hits = false, true, true, 3
-assert(not update() and dispatches == 1 and guest.teleports == 3)
+now, authorized, queue_during_sample, hits = 2, false, true, 3
+local prior_exact = exact_reads
+assert(not update() and observed_reads == 3 and exact_reads == prior_exact + 1 and guest.teleports == 3
+    and guard.capture_blocked(state, "hosting"))
+authorized, queue_during_sample = true, false
+assert(update() and dispatches == 1 and guest.teleports == 4 and observed_reads == 3)
+
+guest.position = box:K2_GetComponentLocation()
+authorized, exposed, expired, hits = false, true, true, 4
+assert(not update() and dispatches == 1 and guest.teleports == 4 and observed_reads == 3)
 assert(rows()[1][4] == "fault" and rows()[1][7] == "crossing_owner_unavailable")
 state.map, world_is_nothing = "/Game/Classes/Maps/Dreams/Nothing_P", true
 assert(not update() and #rows() == 0)

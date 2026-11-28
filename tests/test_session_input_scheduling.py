@@ -61,7 +61,7 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
                     else:
                         client.bridge.command.assert_awaited_once_with(
                             command, crate, feedback, timeout=1, update_status=False)
-                    self.assertEqual(client.pending_lockpick_unlocks, {crate} if unlocked and not hinged else set())
+                    self.assertEqual(client.pending_lockpick_unlocks, {1: crate} if unlocked and not hinged else {})
                 finally:
                     release.set()
                     await asyncio.wait_for(task, .5)
@@ -73,6 +73,104 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
                 expected = {crate: False} if unlocked and not hinged and error is None else None
                 self.assertEqual(client.gameplay.get(native_loot.VEHICLE_LOCKS), expected)
                 self.assertFalse(client.pending_lockpick_unlocks)
+
+    async def test_lockpick_reports_hold_only_their_own_crates_and_cancel_on_travel(self):
+        for travel in (False, True):
+            with self.subTest(travel=travel):
+                client = self.guest(AsyncMock())
+                area, pawn, guid = OBSERVATORY, "Player_FP_C guest", "A" * 32
+                first = full_name(area, "LootLocker_Small_BP_C_0")
+                second = next(crate for crate in native_loot.CRATES if crate != first
+                              and native_loot.lockable_container(crate, area))
+                other = native_loot.default_crate(area)
+                epoch = "b" * 32
+                scope = ("c" * 32, epoch, area, pawn)
+                client.host_session, client.zone_epoch = scope[:2]
+                client.stock_interaction_scope = Mock(return_value=scope)
+                client.last_game = {"state": "connected", "map": area, "pawns": {"local": {"name": pawn}}}
+                client.invite["native_loot_input"] = True
+                client.bridge.input_namespace = uuid.NAMESPACE_OID
+                client.bridge.command = AsyncMock(return_value={"ack": {"message": "stock alert"}})
+                client.prop_carry.poll_local_edges = Mock()
+
+                def input_row(*fields):
+                    return ("\t".join(fields) + "\n").encode("ascii")
+
+                crate_inputs = [input_row("loot-lockpick", area, first, pawn, "1", guid, "1", "2", "1")]
+                pickup_inputs = []
+                client.bridge.stock_interaction_ready.side_effect = lambda *, crates: bool(
+                    crate_inputs if crates else pickup_inputs)
+
+                def take(inputs):
+                    result = inputs.copy()
+                    inputs.clear()
+                    return result
+
+                client.bridge.native_crate_inputs.side_effect = lambda: take(crate_inputs)
+                client.bridge.interactions.side_effect = lambda: take(pickup_inputs)
+                reports, opened = asyncio.Queue(), asyncio.Queue()
+                release = {crate: asyncio.Event() for crate in (first, second)}
+                pickup_sent, cancelled = asyncio.Event(), asyncio.Event()
+                pickup = f"loose:{area}.Observitory_P:PersistentLevel.Item_Test_C_1"
+
+                async def handle(action, operation, target, **_kwargs):
+                    if action == service.native_loose_pickup.CLAIM:
+                        self.assertEqual((operation, target), ("pick-up", pickup))
+                        pickup_sent.set()
+                        return {}
+                    self.assertEqual(action, native_loot.LOCKPICK)
+                    crate = target.split("@")[1]
+                    reports.put_nowait(crate)
+                    try:
+                        await release[crate].wait()
+                    except asyncio.CancelledError:
+                        cancelled.set()
+                        raise
+                    return {native_loot.LOCKPICK_RESULT: {"map": area, "crate": crate, "guid": guid, "locked": False}}
+
+                async def open_crate(visit, operation, crate, sequence, outcome):
+                    opened.put_nowait((visit, crate, sequence))
+                    return {}
+
+                client.gameplay_action = AsyncMock(side_effect=handle)
+                client.open_stock_crate = AsyncMock(side_effect=open_crate)
+                workers = [asyncio.create_task(run()) for run in (client.run_stock_crates, client.run_stock_interactions)]
+                try:
+                    self.assertEqual(await asyncio.wait_for(reports.get(), .5), first)
+                    crate_inputs.extend((input_row("loot-crate-open", area, first, pawn, "2"),
+                                         input_row("loot-lockpick", area, second, pawn, "3", guid, "1", "1", "1"),
+                                         input_row("loot-crate-open", area, second, pawn, "4"),
+                                         input_row("loot-crate-open", area, other, pawn, "5")))
+                    pickup_inputs.append(("pick-up", pickup))
+                    self.assertEqual(await asyncio.wait_for(opened.get(), .5), (scope, other, 5))
+                    await asyncio.wait_for(pickup_sent.wait(), .5)
+                    self.assertTrue(reports.empty())
+                    self.assertTrue(opened.empty())
+                    self.assertEqual(client.pending_lockpick_unlocks, {1: first, 3: second})
+                    self.assertEqual(client.bridge.command.await_count, 2)
+
+                    if travel:
+                        next_scope = (scope[0], "d" * 32, area, pawn)
+                        client.stock_interaction_scope.return_value = next_scope
+                        client.zone_epoch = next_scope[1]
+                        await asyncio.wait_for(cancelled.wait(), .5)
+                        crate_inputs.append(input_row("loot-crate-open", area, first, pawn, "6"))
+                        self.assertEqual(await asyncio.wait_for(opened.get(), .5), (next_scope, first, 6))
+                        self.assertTrue(reports.empty())
+                        self.assertTrue(opened.empty())
+                        self.assertFalse(client.pending_lockpick_unlocks)
+                    else:
+                        release[first].set()
+                        self.assertEqual(await asyncio.wait_for(reports.get(), .5), second)
+                        self.assertEqual(await asyncio.wait_for(opened.get(), .5), (scope, first, 2))
+                        self.assertTrue(opened.empty())
+                        release[second].set()
+                        self.assertEqual(await asyncio.wait_for(opened.get(), .5), (scope, second, 4))
+                        self.assertFalse(client.pending_lockpick_unlocks)
+                finally:
+                    for worker in workers:
+                        worker.cancel()
+                    await asyncio.gather(*workers, return_exceptions=True)
 
     async def test_reload_input_is_collected_while_a_shot_waits(self):
         for visit_changed in (False, True):

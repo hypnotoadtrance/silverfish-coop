@@ -67,7 +67,7 @@ local function authority(state, phase)
     return {name = detail.name, pawn = host, save = save}
 end
 
-local function member(state, phase, detail, host)
+local function member(state, phase, detail, host, ground_only)
     local pawn = detail and detail.pawn
     if not exact(pawn, pawn_class) or not pawn:HasAuthority() or pawn:IsActorBeingDestroyed()
         or pawn.Dead ~= false or not same(pawn:GetWorld(), state.world) or pawn:GetFullName() ~= detail.name then return end
@@ -75,7 +75,8 @@ local function member(state, phase, detail, host)
     if detail.kind == "local" and same(pawn, host.pawn) and detail.name == host.name then
         save, standing = host.save, players.is_downed(pawn) == false
     elseif detail.kind == "guest" then
-        local qualified, exact_pawn, detached = pcall(guest_save.exact_item_context, state, phase, detail.name)
+        local binding = ground_only and guest_save.observed_item_context or guest_save.exact_item_context
+        local qualified, exact_pawn, detached = pcall(binding, state, phase, ground_only and detail or detail.name)
         if not qualified or not same(pawn, exact_pawn) or not exact(detached, save_class)
             or same(detached, host.save) or not same(pawn.Save, detached) then return end
         save, standing = detached, players.is_standing_guest(pawn, detail.name)
@@ -158,10 +159,10 @@ local function relocate(victim, geometry, target)
     return true
 end
 
-local function service(state, phase, geometry, lead)
+local function sample_members(state, phase, geometry, lead, ground_only)
     local everyone, members, sampled = {}, {}, {}
     for _, detail in ipairs(state.pawns) do
-        local person = lead and member(state, phase, detail, lead)
+        local person = lead and member(state, phase, detail, lead, ground_only)
         if person then
             local address = person.pawn:GetAddress()
             if members[address] then error("ambiguous_authority_pawn", 0) end
@@ -174,7 +175,11 @@ local function service(state, phase, geometry, lead)
         end
     end
     current.ground = sampled
+    return everyone, members
+end
 
+local function service(state, phase, geometry, lead, ground_only)
+    local everyone, members = sample_members(state, phase, geometry, lead, ground_only)
     local moved, pending, cursor = false, false, 0
     for _ = 1, 5 do
         local sequence, address, source, expired = SilverfishNextNativeKillVolumeCrossing(cursor)
@@ -183,6 +188,12 @@ local function service(state, phase, geometry, lead)
             error("unqualified_crossing", 0)
         end
         cursor = sequence
+        if ground_only then
+            -- A stock callback may queue a crossing while sampling. Freshly qualify
+            -- all participants before repositioning a pawn or changing its save.
+            everyone, members = sample_members(state, phase, geometry, authority(state, phase), false)
+            ground_only = false
+        end
         local person = members[address]
         if person then
             local target, method = safe_spot(state, person, geometry, everyone)
@@ -243,8 +254,8 @@ function volume_guard.sync(state, phase)
         local now = os.clock()
         local crossing = SilverfishNextNativeKillVolumeCrossing(0)
         -- Sample fallback ground periodically. A crossing or pending recovery uses live geometry and ownership immediately.
-        if crossing == 0 and not current.pending and not awaiting_downed_projection()
-            and now < current.next_ground then return false end
+        local ground_only = crossing == 0 and not current.pending and not awaiting_downed_projection()
+        if ground_only and now < current.next_ground then return false end
         current.next_ground = now + ground_sample_interval
         local geometry = stock_box(state)
         current.armed = geometry ~= nil
@@ -252,7 +263,7 @@ function volume_guard.sync(state, phase)
             if crossing ~= 0 then error("stock_volume_geometry_unavailable", 0) end
             return false
         end
-        return service(state, phase, geometry, authority(state, phase))
+        return service(state, phase, geometry, authority(state, phase), ground_only)
     end)
     if not ok then
         current.fault = type(moved) == "string" and moved:match("^[a-z_]+$") or "recovery_bridge_unavailable"

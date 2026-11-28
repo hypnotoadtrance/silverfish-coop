@@ -27,7 +27,8 @@ async def enter_crossroads(host, pawn, *, verify_wall=False):
     return blocked
 
 
-async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_trial=False, rendered=False):
+async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_trial=False,
+                                host_maintenance_trial=False, rendered=False):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
 
     async def weather(seat, action):
@@ -142,7 +143,8 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_t
             performance["crossroads_loading"] = loading
             pawn_name = settled["game"]["pawns"]["local"]["name"]
             performance["crossroads_clock"] = await verify_stock_clock(guest_run, CROSSROADS, settled["zone_epoch"], pawn_name)
-            performance["crossroads"] = await profile_world(host, guest, CROSSROADS, probe, gc_trial=gc_trial)
+            performance["crossroads"] = await profile_world(host, guest, CROSSROADS, probe, gc_trial=gc_trial,
+                                                              host_maintenance_trial=host_maintenance_trial)
             if rendered:
                 performance["rendered_frames"] = dict(zip(("host", "guest"), await asyncio.gather(
                     capture_rendered_frame(host, probe), capture_rendered_frame(guest, probe)), strict=True))

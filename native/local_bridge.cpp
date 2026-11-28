@@ -19,6 +19,7 @@
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <LuaType/LuaUObject.hpp>
+#include <Unreal/Hooks/Hooks.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectHashTables.hpp>
 #include <Unreal/UnrealInitializer.hpp>
@@ -279,6 +280,97 @@ namespace
         lua.set_integer(std::chrono::duration_cast<std::chrono::microseconds>(now).count());
         lua.set_integer(static_cast<std::int64_t>(cycles));
         return 2;
+    }
+
+    namespace Hooks = RC::Unreal::Hook;
+
+    struct TickMark
+    {
+        std::int64_t micros{};
+        ULONG64 cycles{};
+    };
+
+    struct EngineTickProfile
+    {
+        bool active{};
+        TickMark previous_pre, previous_post;
+        std::int64_t count{}, longest{}, engine_micros{};
+        ULONG64 interval_cycles{}, engine_cycles{};
+    };
+
+    thread_local EngineTickProfile engine_profile;
+    Hooks::GlobalCallbackId engine_profile_pre = Hooks::ERROR_ID;
+    Hooks::GlobalCallbackId engine_profile_post = Hooks::ERROR_ID;
+
+    TickMark tick_mark()
+    {
+        TickMark mark{};
+        if (QueryThreadCycleTime(GetCurrentThread(), &mark.cycles))
+            mark.micros = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        return mark;
+    }
+
+    void stop_engine_tick_profile()
+    {
+        if (engine_profile_pre != Hooks::ERROR_ID) Hooks::UnregisterCallback(engine_profile_pre);
+        if (engine_profile_post != Hooks::ERROR_ID) Hooks::UnregisterCallback(engine_profile_post);
+        engine_profile_pre = engine_profile_post = Hooks::ERROR_ID;
+    }
+
+    int begin_engine_tick_profile(const Lua& lua)
+    {
+        if (lua.get_stack_size() != 0 || engine_profile.active) return 0;
+        if (engine_profile_pre == Hooks::ERROR_ID)
+        {
+            constexpr auto owner = STR("SilverfishCoopNative");
+            engine_profile_pre = Hooks::RegisterEngineTickPreCallback(
+                [](auto&, RC::Unreal::UEngine*, float, bool) {
+                    auto& sample = engine_profile;
+                    if (!sample.active) return;
+                    const auto now = tick_mark();
+                    if (sample.previous_pre.micros > 0 && sample.previous_post.micros >= sample.previous_pre.micros
+                        && now.micros >= sample.previous_post.micros)
+                    {
+                        const auto interval = now.micros - sample.previous_pre.micros;
+                        ++sample.count;
+                        if (interval > sample.longest)
+                        {
+                            sample.longest = interval;
+                            sample.engine_micros = sample.previous_post.micros - sample.previous_pre.micros;
+                            sample.interval_cycles = now.cycles - sample.previous_pre.cycles;
+                            sample.engine_cycles = sample.previous_post.cycles - sample.previous_pre.cycles;
+                        }
+                    }
+                    sample.previous_pre = now;
+                    sample.previous_post = {};
+                }, {false, false, owner, STR("Measure the start of a diagnostic engine tick")});
+            engine_profile_post = Hooks::RegisterEngineTickPostCallback(
+                [](auto&, RC::Unreal::UEngine*, float, bool) {
+                    if (engine_profile.active) engine_profile.previous_post = tick_mark();
+                }, {false, false, owner, STR("Measure the end of a diagnostic engine tick")});
+            if (engine_profile_pre == Hooks::ERROR_ID || engine_profile_post == Hooks::ERROR_ID)
+            {
+                stop_engine_tick_profile();
+                return 0;
+            }
+        }
+        engine_profile = {};
+        engine_profile.active = true;
+        lua.set_bool(true);
+        return 1;
+    }
+
+    int finish_engine_tick_profile(const Lua& lua)
+    {
+        if (lua.get_stack_size() != 0 || !engine_profile.active) return 0;
+        engine_profile.active = false;
+        lua.set_integer(engine_profile.count);
+        lua.set_integer(engine_profile.longest);
+        lua.set_integer(engine_profile.engine_micros);
+        lua.set_integer(static_cast<std::int64_t>(engine_profile.interval_cycles));
+        lua.set_integer(static_cast<std::int64_t>(engine_profile.engine_cycles));
+        return 5;
     }
 
     int enqueue_input(const Lua& lua)
@@ -935,12 +1027,15 @@ namespace silverfish::local_bridge
         if (timing_fixture_enabled())
         {
             lua.register_function("SilverfishBridgeProfileStamp", profile_stamp);
+            lua.register_function("SilverfishBeginEngineTickProfile", begin_engine_tick_profile);
+            lua.register_function("SilverfishFinishEngineTickProfile", finish_engine_tick_profile);
             lua.register_function("SilverfishFormatLocalStatusRowUncached", format_status_row<false>);
         }
     }
 
     void stop()
     {
+        stop_engine_tick_profile();
         std::scoped_lock lock(mutex, status_mutex);
         ready = false;
         attached = false;
