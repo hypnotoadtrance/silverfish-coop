@@ -1,4 +1,5 @@
 #include "guest_melee.hpp"
+#include "guest_item.hpp"
 #include "enemy_loot_registry.hpp"
 #include "guest_regen.hpp"
 #include "zone_exit.hpp"
@@ -322,7 +323,7 @@ namespace
 
     struct TraceProof
     {
-        Vector origin{}, direction{};
+        Vector origin{}, direction{}, impact{};
         U::UObject* first{};
     };
 
@@ -411,6 +412,7 @@ namespace
         // Several hit components can belong to the same stock NPC, especially with armor and weapons equipped.
         if (contacted.Num() > (enemy ? 16 : max_stock_sweep_contacts)) return reject("sphere_bounds");
         U::UObject* first{};
+        Vector point{};
         for (int index = 0; index < contacted.Num(); ++index)
         {
             const auto* row = contacted.GetRawPtr(index);
@@ -421,13 +423,16 @@ namespace
             if (!live(owner) || (enemy && owner != enemy)) return reject("sphere_other_actor");
             if (!first)
             {
+                const auto impact = read_vector(hit.impact, row, impact_vector_path);
+                if (!impact) return reject("sphere_impact");
                 first = component;
                 enemy = owner;
+                point = *impact;
             }
         }
         if (refusal) *refusal = "ready";
         if (diagnostic) diagnostic->reason = "ready";
-        return TraceProof{*origin, *direction, first};
+        return TraceProof{*origin, *direction, point, first};
     }
 
     bool guid_from(std::string_view text, Guid& guid)
@@ -617,6 +622,7 @@ namespace
         {
             int contacts{}, hits{}, charged{}, combo{};
             bool active{}, held{}, charged_attack{}, combo_attack{};
+            int attack_row{};
         } input;
         std::optional<FixtureContact> fixture;
         struct Damage
@@ -647,6 +653,18 @@ namespace
     }
     struct PipeFence { U::FWeakObjectPtr pipe, contact; };
     std::vector<PipeFence> fenced_pipes;
+
+    struct GuestContactProbe
+    {
+        U::FWeakObjectPtr pawn, weapon;
+        std::int64_t sequence{};
+        int attack{};
+        std::string identity;
+        std::string_view status{"awaiting_contact"};
+        std::optional<TraceProof> trace;
+    };
+
+    GuestContactProbe guest_contact_probe;
     std::int64_t serial{};
     std::array callbacks{H::ERROR_ID, H::ERROR_ID, H::ERROR_ID};
 
@@ -888,6 +906,7 @@ namespace
                 {
                     selected = row;
                     current.input.charged_attack = true;
+                    current.input.attack_row = -1;
                 }
             }
             for (int index = 0; index < rows.Num() && !selected; ++index)
@@ -897,6 +916,7 @@ namespace
                 {
                     selected = row;
                     current.input.combo_attack = index > 0;
+                    current.input.attack_row = index;
                 }
             }
         }
@@ -1191,6 +1211,50 @@ namespace
         ++swing.qualified;
     }
 
+    // Read the authored animation's Contact on the owning client. Probe mode
+    // retains the fence so the isolated guest cannot mutate the replica.
+    void sample_guest_contact(U::UObject* weapon, U::FFrame& frame)
+    {
+        auto& probe = guest_contact_probe;
+        auto* pawn = probe.pawn.Get();
+        if (!live(pawn) || probe.weapon.Get() != weapon || object(pawn, STR("EquipedItem")) != weapon ||
+            object(weapon, STR("User")) != pawn || object(weapon, STR("Player_Ref")) != pawn ||
+            probe.sequence >= (std::int64_t{1} << 53) - 1) return;
+        auto* animation = object(weapon, STR("As Melee Wep Anim BP"));
+        auto* graph = frame.PreviousFrame();
+        auto* notify = graph ? graph->PreviousFrame() : nullptr;
+        if (!live(animation) || !graph || graph->Object() != animation || !notify ||
+            notify->Object() != animation || !notify->Node() ||
+            notify->Node()->GetFName() != U::FName{STR("AnimNotify_Hit"), U::FNAME_Find} || !frame.Locals()) return;
+
+        ++probe.sequence;
+        probe.identity.clear();
+        probe.trace.reset();
+        Swing attack;
+        attack.mode = SwingMode::ordinary;
+        attack.input.active = true;
+        attack.pipe = weapon;
+        attack.animation = animation;
+        attack.contact = frame.Node();
+        if (!stock_attack(attack, frame.Locals()))
+        {
+            probe.status = "attack_row_unqualified";
+            return;
+        }
+        probe.attack = attack.input.attack_row;
+        auto selected = stock_trace(weapon, pawn, nullptr, &probe.status, nullptr, attack.range, attack.radius);
+        if (!selected) return;
+        probe.identity = silverfish::native_guest_item::shared_contact_identity(selected->first->GetOuterPrivate());
+        if (probe.identity.empty())
+        {
+            probe.status = "contact_identity_unavailable";
+            return;
+        }
+        // The reflected component is only valid in this call.
+        selected->first = nullptr;
+        probe.trace = std::move(selected);
+    }
+
     void observe_pre(Iteration& call, U::UObject* receiver, U::FFrame& frame, void* result)
     {
         if (!U::IsInGameThreadRaw() || !frame.Node()) return;
@@ -1201,7 +1265,11 @@ namespace
                 return guard.pipe.Get() == receiver && guard.contact.Get() == frame.Node();
             }))
         {
-            if (!call.OriginalFunctionCallPrevented()) call.PreventOriginalFunctionCall();
+            if (!call.OriginalFunctionCallPrevented())
+            {
+                call.PreventOriginalFunctionCall();
+                if (receiver == guest_contact_probe.weapon.Get()) sample_guest_contact(receiver, frame);
+            }
             return;
         }
         auto& proof = swing.damage;
@@ -1674,6 +1742,36 @@ namespace
         return report(lua);
     }
 
+    int arm_guest_contact_probe(const Lua& lua)
+    {
+        if (!U::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        auto* pawn = pawn_at(lua.get_integer());
+        auto* weapon = object(pawn, STR("EquipedItem"));
+        if (!live(pawn) || !silverfish::native_guest_melee::ordinary_weapon(weapon)) return 0;
+        auto* world = static_cast<U::AActor*>(pawn)->GetWorld();
+        auto* driver = object(world, STR("NetDriver"));
+        if (!live(object(driver, STR("ServerConnection"))) || object(weapon, STR("Player_Ref")) != pawn) return 0;
+        guest_contact_probe = {};
+        guest_contact_probe.pawn = pawn;
+        guest_contact_probe.weapon = weapon;
+        lua.set_bool(true);
+        return 1;
+    }
+
+    int read_guest_contact_probe(const Lua& lua)
+    {
+        if (!U::IsInGameThreadRaw()) return 0;
+        const auto& probe = guest_contact_probe;
+        lua.set_integer(probe.sequence);
+        lua.set_string(probe.status);
+        if (!probe.trace) return 2;
+        lua.set_integer(probe.attack);
+        lua.set_string(probe.identity);
+        for (const auto& vector : {probe.trace->origin, probe.trace->direction, probe.trace->impact})
+            for (double axis : vector) lua.set_number(axis);
+        return 13;
+    }
+
     int observe_fixture(const Lua& lua)
     {
         if (!fixture_enabled() || !U::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1) ||
@@ -1778,6 +1876,8 @@ void silverfish::native_guest_melee::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishReadNativeGuestMeleeInput", read_input);
     if (headless_contact_enabled())
     {
+        lua.register_function("SilverfishArmGuestMeleeContactProbe", arm_guest_contact_probe);
+        lua.register_function("SilverfishReadGuestMeleeContactProbe", read_guest_contact_probe);
         lua.register_function("SilverfishReadNativeGuestMeleeContactGeometry", [](const Lua& state) {
             if (!headless_contact || !headless_contact->origin || !headless_contact->direction) return 0;
             for (auto axis : *headless_contact->origin) state.set_number(axis);
@@ -1813,5 +1913,6 @@ void silverfish::native_guest_melee::uninstall_hooks()
         callback = H::ERROR_ID;
     }
     swing = {};
+    guest_contact_probe = {};
     fenced_pipes.clear();
 }

@@ -2038,6 +2038,21 @@ local function run(action, actor_path)
     if action == "melee-local-arm" or action == "melee-local-read" then
         assert(not host, "first-person melee observer requires the guest")
         return observe_local_melee(action, pawn)
+    elseif action == "melee-contact-probe-arm" then
+        assert(not host and SilverfishArmGuestMeleeContactProbe(pawn:GetAddress()), "the guest melee probe could not arm")
+        return "armed"
+    elseif action == "melee-contact-probe-target" then
+        assert(host, "the target reference uses the host NPC")
+        local target = melee_target(world, true)
+        local key = valid(target) and require("native_npc_barter_identity").key(target)
+        return key and ("npc:%d"):format(tonumber(key:sub(-4), 16)) or "waiting"
+    elseif action == "melee-contact-probe-read" then
+        assert(not host, "the contact probe requires the owning guest")
+        local row = {SilverfishReadGuestMeleeContactProbe()}
+        for i, value in ipairs(row) do
+            row[i] = type(value) == "number" and ("%.6f"):format(value) or value
+        end
+        return table.concat(row, ";")
     elseif action == "corpse-spawn" then
         assert(host, "only the host can spawn the stock carry target")
         return spawn_carry_target(world, pawn)
@@ -2458,6 +2473,13 @@ local function run(action, actor_path)
         local point = melee_prop.PropMesh:K2_GetComponentLocation()
         return ("%.3f;%.3f;%.3f;%.3f;%.3f"):format(melee_prop.Health,
             math.sqrt(velocity.X^2 + velocity.Y^2 + velocity.Z^2), point.X, point.Y, point.Z)
+    elseif action == "face-away-melee" then
+        assert(host, "the host must keep its own view clear of the test target")
+        local owner, target = authoritative_guest(world), position(actor_path)
+        local eye = owner.Camera:K2_GetComponentLocation()
+        local away = {X=2*eye.X-target.X, Y=2*eye.Y-target.Y, Z=eye.Z}
+        assert(aim_melee(world, owner, away), "the host copy of the guest camera is unavailable")
+        return "ready"
     elseif action == "face-melee" then
         assert(not host, "the guest must drive the test swing")
         assert(aim_melee(world, pawn, position(actor_path)), "the guest stock camera is not ready")

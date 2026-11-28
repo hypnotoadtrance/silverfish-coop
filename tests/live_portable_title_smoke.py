@@ -1258,6 +1258,8 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
         grip_error = float(report)
         assert 0 <= grip_error <= 5, (grip, grip_error)
     misses = []
+    local_contact = None
+    inspect_guest_contact = heavy and os.getenv("SILVERFISH_TEST_GUEST_MELEE_CONTACT") == "1"
     # Retry a verified miss from a different stock contact lane.
     for attempt in range(1, 4 if verify_observer else 2):
         if verify_observer:
@@ -1266,6 +1268,26 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
         async with asyncio.timeout(6):
             while not (await command(guest, f"melee-state\t{center}")).startswith("true;false;"):
                 await asyncio.sleep(.05)
+        if inspect_guest_contact and attempt == 1:
+            try:
+                assert await command(guest, f"face-melee\t{center}") == "ready"
+                assert await command(guest, "melee-contact-probe-arm") == "armed"
+                async with asyncio.timeout(5):
+                    while (reference := await command(host, "melee-contact-probe-target")) == "waiting":
+                        await asyncio.sleep(.05)
+                assert await command(host, f"face-away-melee\t{center}") == "ready"
+                guid = frame["game"]["native_guest_primary_scope"]["guid"]
+                tap = await stock_melee_edge(guest_run, guid, "tap")
+                ack, = await stock_melee_edge_receipts(guest_run, frame, tap)
+                host_contact = await stock_melee_terminal(host_run, ack)
+                local_contact = await read_guest_melee_contact(command, guest)
+                assert host_contact["contacts"] == 1 and host_contact["hits"] == 0, (host_contact, local_contact)
+                assert (local_contact["serial"], local_contact["status"], local_contact.get("attack"),
+                        local_contact.get("identity")) == (1, "ready", 0, reference), local_contact
+                assert (await command(host, f"melee-state\t{center}")).startswith("true;false;7.000;")
+                local_contact.update(host_hits=host_contact["hits"], expected_target=name, shared_target=reference)
+            finally:
+                await asyncio.gather(*(command(seat, "clear-melee-aim") for seat in (host, guest)))
         try:
             watching = await asyncio.gather(*(command(seat, "watch-melee-motion") for seat in (host, guest)))
             assert watching == ["watching", "watching"], watching
@@ -1322,6 +1344,8 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
                        "fixture_target_position": center, "contact_geometry": geometry})
     assert proof["target"] == name and proof["enemy_health_after"] <= 0 and native_guest_melee.verified_damage(proof), (
         proof, contact, before, after, result.get("host_observer_swing"), misses, geometry)
+    if local_contact is not None:
+        result["divergent_guest_contact"] = local_contact
     if misses:
         result["fixture_misses"] = misses
     if grip_error is not None:
@@ -1439,6 +1463,19 @@ async def verify_stock_melee_family(host: Seat, guest: Seat, _pawn: str) -> dict
     return {"stock_melee_family": {"heavy_pipe": heavy_pipe, "old_pipe": old_pipe, "edges": edges, "campaign_unchanged": True}}
 
 
+async def read_guest_melee_contact(command, guest: Seat) -> dict:
+    async with asyncio.timeout(5):
+        while float((observed := await command(guest, "melee-contact-probe-read")).split(";")[0]) == 0:
+            await asyncio.sleep(.04)
+    serial, status, *contact = observed.split(";")
+    result = {"serial": int(float(serial)), "status": status}
+    if status == "ready":
+        attack, identity, *geometry = contact
+        origin, forward, point = [list(map(float, geometry[start:start+3])) for start in range(0, 9, 3)]
+        result.update(attack=int(float(attack)), identity=identity, origin=origin, direction=forward, point=point)
+    return result
+
+
 async def verify_stock_melee_edges_only(host: Seat, guest: Seat, pawn: str) -> dict:
     before = campaign_save_hashes(host.campaign)
     started = time.time()
@@ -1467,12 +1504,18 @@ async def verify_stock_melee_edges_only(host: Seat, guest: Seat, pawn: str) -> d
     health, speed, *position = await prop_state()
     assert health == 250 and speed < 3, (health, speed, position)
     host_run, guest_run = host.campaign / "run", guest.client / "run"
+    guest_contact = None
+    inspect_guest_contact = os.getenv("SILVERFISH_TEST_GUEST_MELEE_CONTACT") == "1"
     try:
         assert await command(guest, f"face-melee\t{center}") == "ready"
         assert await command(host, f"align-melee\t{center}") == "true"
+        if inspect_guest_contact:
+            assert await command(guest, "melee-contact-probe-arm") == "armed"
         started = time.time()
         ack, = await stock_melee_edge_receipts(guest_run, frame, await stock_melee_edge(guest_run, guid, "tap"))
         impact = await stock_melee_terminal(host_run, ack)
+        if inspect_guest_contact:
+            guest_contact = await read_guest_melee_contact(command, guest)
     finally:
         await asyncio.gather(*(command(seat, "clear-melee-aim") for seat in (host, guest)))
     after_health, after_speed, *after_position = await prop_state()
@@ -1488,6 +1531,8 @@ async def verify_stock_melee_edges_only(host: Seat, guest: Seat, pawn: str) -> d
             await asyncio.sleep(.08)
     prop = {"target": target, "health_before": health, "health_after": after_health, "velocity_cm_s": after_speed,
             "movement_cm": travel, "guest_sounds": sounds}
+    if guest_contact is not None:
+        prop["guest_contact"] = guest_contact
     assert await command(host, "clear-melee-prop") == "cleared"
     assert campaign_save_hashes(host.campaign) == before, "A regular melee attack wrote campaign saves"
     return {"stock_melee_edges": {**edges, "first_person_contacts": first_person_contacts, "prop_impact": prop,
@@ -8914,7 +8959,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableBoardOfferProbe",
                                                      fixture="portable_board_offer_probe.lua"))
         if ((stock_npc_override and resident_weapon_cues) or stock_melee_family or tutorial_dock_melee
-                or tutorial_dock_combat or stock_host_corpse_carry or stock_streamed_npc):
+                or tutorial_dock_combat or stock_host_corpse_carry or stock_streamed_npc
+                or stock_melee_edges and os.getenv("SILVERFISH_TEST_GUEST_MELEE_CONTACT") == "1"):
             proof["npc_combat_overlays"] = [probes.enter_context(host_npc_combat_overlay(game)) for game in games]
         elif stock_npc_rivalry or stock_npc_override or stock_melee_edges or stock_dock_population:
             for game in games:

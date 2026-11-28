@@ -4989,6 +4989,16 @@ std::string silverfish::native_guest_item::local_equipped_identity(Unreal::UObje
     return guid != Guid{} ? std::format("{:08X}{:08X}{:08X}{:08X}", guid[0], guid[1], guid[2], guid[3]) : std::string{};
 }
 
+std::string silverfish::native_guest_item::shared_contact_identity(Unreal::UObject* target)
+{
+    if (!live(target)) return {};
+    const auto number = contact_reference(target);
+    if (number) return std::format("npc:{}", number);
+    if (silverfish::campaign_npc::is_spawned_stock_npc(target)) return {};
+    auto path = RC::to_utf8_string(target->GetPathName());
+    return valid_contact_path(path) ? std::move(path) : std::string{};
+}
+
 silverfish::native_guest_item::ShotView silverfish::native_guest_item::capture_shot_view(
     Unreal::UObject* pawn, Unreal::UObject* held, Unreal::UObject* barrel)
 {
@@ -5024,13 +5034,9 @@ silverfish::native_guest_item::ShotView silverfish::native_guest_item::capture_s
     const auto world = static_cast<Unreal::AActor*>(pawn)->GetWorld();
     if (hit && hit->hit && available_projectile_target(hit->actor, world) && takes_projectile_damage(hit->actor))
     {
-        const auto number = contact_reference(hit->actor);
-        auto path = number ? std::format("npc:{}", number) :
-            silverfish::campaign_npc::is_spawned_stock_npc(hit->actor) ? std::string{} :
-            RC::to_utf8_string(hit->actor->GetPathName());
-        if (valid_contact_path(path))
+        if (auto identity = shared_contact_identity(hit->actor); !identity.empty())
         {
-            view.contact_actor = std::move(path);
+            view.contact_actor = std::move(identity);
             view.contact = hit->point;
         }
     }
