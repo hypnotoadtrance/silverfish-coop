@@ -44,7 +44,7 @@ from live_dynamic_board_smoke import staged_probe as eye_board_overlay
 from live_multi_smoke import campaign_save_hashes, saved_hashes
 from live_resident_host_smoke import stock_profile, stock_save_hashes
 from live_same_process_listener_smoke import choose_ports
-from live_stock_creator_smoke import creator_action, installed_probe
+from live_stock_creator_smoke import creator_action, enter_creator, finish_veteran, installed_probe, leave_tutorial
 from live_stock_pause_exit_smoke import stock_pause
 from live_unified_title_smoke import Seat, offered, start_pair
 from portable_dead_drop import (allow_resident_contract_xp, allow_resident_dead_drop_fixtures,
@@ -8722,7 +8722,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False, nonmirrored_startup: bool = False,
                  compact_crate_status: bool = False, compact_world_view: bool = False,
                  guest_shop_lease: bool = False, guest_stash_memory: bool = False, guest_stash_large_memory: bool = False,
-                 stock_pause_exit: bool = False,
+                 stock_pause_exit: bool = False, stock_host_creator: bool = False,
                  stock_friendly_fire=False,
                  lab_terminal_check=None,
                  oil_lamps_check=None, streamed_switch_check=None, crate_transfer_check=None,
@@ -9460,6 +9460,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 or guest_stash_memory or nonmirrored_startup or manage_saves):
             for game in games:
                 probes.enter_context(installed_probe(game))
+        elif stock_host_creator:
+            probes.enter_context(installed_probe(first_game))
         if not second_legacy_work:
             build_ids = []
             for workspace, game in zip(workspaces, games, strict=True):
@@ -9880,6 +9882,13 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             assert len({leg["campaign_id"] for leg in proof["sessions"]}) == 2
         if steam_cloud:
             proof["steam_cloud"] = await verify_cloud_restore(first, second, proof["sessions"][0], second_game, processes)
+        if stock_host_creator:
+            created_host, creator = await enter_creator(first)
+            hosted, controls = await finish_veteran(created_host, creator)
+            stopped = await leave_tutorial(created_host)
+            proof["stock_host_creator"] = {"pid": hosted["pid"], "map": hosted["game"]["map"],
+                                           "creator_controls": controls, "stop_reason": stopped["stop_reason"],
+                                           "stock_title_returned": True}
         for seat, (hashes, preferences) in zip(seats, baselines, strict=True):
             for key in ("singleplayer", "modes", "multiplayer", "modes", "singleplayer"):
                 button = await seat.bridge.command("native-title-button-fixture", key)
@@ -9957,6 +9966,8 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--stock-pause-exit", action="store_true",
                         help="exercise guest stock Quit to Menu and host Save and Quit in the same resident pair")
+    parser.add_argument("--stock-host-creator", action="store_true",
+                        help="start a fresh stock host campaign in the existing process and return to title")
     parser.add_argument("--stock-drop", action="store_true", help="test stock guest backpack Sort, Drop, and Use actions")
     parser.add_argument("--stock-inventory-fall", action="store_true",
                         help="verify ordinary stock host and guest drops fall and remain collectible on the same pair")
@@ -10269,7 +10280,7 @@ if __name__ == "__main__":
     resident_check_options.add("stock_cooked_meal")
     resident_check_options.update(("crossroads_profile", "crossroads_gc_trial", "crossroads_host_maintenance_trial",
                                    "stock_crossroads_recovery", "stock_discovered_overlap", "stock_authored_quest_placement",
-                                   "stock_guest_title_recovery", "rendered"))
+                                   "stock_guest_title_recovery", "stock_host_creator", "rendered"))
     if args.crossroads_gc_trial and not args.crossroads_profile:
         parser.error("--crossroads-gc-trial requires --crossroads-profile")
     if args.crossroads_gc_trial == "stopped" and not args.rendered:
@@ -10335,7 +10346,7 @@ if __name__ == "__main__":
                        stock_nearby=args.stock_nearby, projected_nearby=args.projected_nearby,
                        container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge,
                        stock_use=args.stock_use, stock_food=args.stock_food, stock_campfire=args.stock_campfire,
-                       stock_pause_exit=args.stock_pause_exit,
+                       stock_pause_exit=args.stock_pause_exit, stock_host_creator=args.stock_host_creator,
                        stock_cooked_meal=args.stock_cooked_meal,
                        stock_personal_consumable=args.stock_personal_consumable,
                        stock_wipe_chooser=args.stock_wipe_chooser,

@@ -37,6 +37,7 @@
 #include "host_weather.hpp"
 #include "host_invitation_clipboard.hpp"
 #include "session_exit_input.hpp"
+#include "session_observation.hpp"
 #include "listener_bind.hpp"
 #include "inventory_census.hpp"
 #include "inventory_wipe.hpp"
@@ -1598,6 +1599,7 @@ namespace
         ~SilverfishNativeMod() override
         {
             silverfish::native_title_startup::uninstall_hooks();
+            silverfish::session_observation::reset_phase();
             silverfish::local_bridge::stop();
             silverfish::local_bridge::uninstall_native_dispatch();
             if (jump_shake) Unreal::UObjectGlobals::UnregisterHook(jump_shake, jump_shake_hook);
@@ -1787,6 +1789,7 @@ namespace
             silverfish::native_bag_projection::register_lua(lua);
             silverfish::native_interaction_input::register_lua(lua);
             silverfish::local_bridge::register_lua(lua);
+            silverfish::session_observation::register_phase_lua(lua);
             silverfish::native_title_entry::register_lua(lua);
             silverfish::native_host_weather::register_lua(lua);
             silverfish::native_authored_pickup::register_lua(lua);
@@ -1853,6 +1856,7 @@ namespace
         {
             if (name == lua_mod_name)
             {
+                silverfish::session_observation::reset_phase();
                 silverfish::local_bridge::release_script_driver();
                 silverfish::native_zone::clear_scope();
                 silverfish::native_transport::clear_scope();

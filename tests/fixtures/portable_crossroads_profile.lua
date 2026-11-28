@@ -14,6 +14,7 @@ local cached_format = SilverfishFormatLocalStatusRow
 local uncached_format = SilverfishFormatLocalStatusRowUncached
 local last_status_sample
 local last_census_map, watched_title_scope, session_publication
+local native_ownership = {connected = false, rows = {literal = {}, marker = {}}}
 local clock_lua_requests, clock_lua_count = {}, 0
 local health_lua_requests, health_lua_count = {}, 0
 
@@ -424,6 +425,67 @@ local function compare_paths(count, native, stock)
     return native_ms, lua_ms, native_kib, lua_kib
 end
 
+function probe.native_phase_update(update, action, map, port)
+    local owner, expected, listener, departing = update(action, map, port)
+    if owner and (action == "join" or action == "title_idle") then native_ownership.connected = false end
+    return owner, expected, listener, departing
+end
+
+function probe.native_phase_observe(state, prior_role, prior_map, prior_leaving, owner, phase, departing)
+    local expected_role, expected_phase, expected_leaving = prior_role, nil, prior_leaving
+    if prior_leaving then
+        if state.controller and state.map == main_menu and not state.listening then
+            expected_role, expected_leaving, native_ownership.connected = "idle", false, false
+        else
+            expected_phase = "leaving"
+        end
+    end
+    if not expected_phase then
+        if expected_role == "host" then
+            expected_phase = state.map == prior_map and state.listening and not state.server
+                and state.local_pawn and "hosting" or "opening"
+        elseif expected_role == "client" then
+            if state.server and state.local_pawn and state.map ~= main_menu then
+                native_ownership.connected, expected_phase = true, "connected"
+            else
+                expected_phase = native_ownership.connected and "disconnected" or "joining"
+            end
+        else
+            expected_phase = valid(state.controller) and "ready" or "opening"
+        end
+    end
+    if owner ~= expected_role or phase ~= expected_phase or departing ~= expected_leaving then
+        native_ownership.failure = native_ownership.failure or
+            ("%s session %s/%s/%s differs from stock %s/%s/%s"):format(state.map,
+                owner, phase, tostring(departing), expected_role, expected_phase, tostring(expected_leaving))
+    end
+    native_ownership.map, native_ownership.mode, native_ownership.phase = state.map, owner, phase
+end
+
+function probe.native_phase_row(state, phase, row)
+    if capture or native_ownership.map ~= state.map or native_ownership.mode ~= role
+        or native_ownership.phase ~= phase then return end
+    local kind = row == -1 and "marker" or "literal"
+    local witnessed = native_ownership.rows[kind]
+    if witnessed.map == state.map and witnessed.phase == phase and witnessed.mode == role then
+        witnessed.sequence = sequence
+        return
+    end
+    if kind == "literal" and row ~= status_publication.lua_row(
+        "session", role, phase, state.map, state.clients, state.server and 1 or 0) then
+        native_ownership.failure = native_ownership.failure or "ordinary native-owned session row differs from stock bytes"
+    end
+    witnessed.map, witnessed.mode, witnessed.phase, witnessed.sequence = state.map, role, phase, sequence
+end
+
+local function native_phase_suffix(map, owner, phase, kind)
+    if not native_phase_expected then return "" end
+    assert(not native_ownership.failure, native_ownership.failure)
+    local witnessed = native_ownership.rows[kind]
+    if witnessed.map ~= map or witnessed.mode ~= owner or witnessed.phase ~= phase then return nil end
+    return (",%s,%s,%d"):format(owner, phase, witnessed.sequence)
+end
+
 local function compare_title_session(state)
     local observe = SilverfishObserveNativeSession
     if type(observe) ~= "function" then return "unavailable" end
@@ -431,14 +493,20 @@ local function compare_title_session(state)
         "the observed state is outside the stock title")
     assert(observe(state.world, "host", state.map, true) == nil
         and observe(state.world, "client", state.map, false) == nil, "native census accepted the title world")
-    return state.map
+    local reported = native_phase_suffix(state.map, "idle", "ready", "literal")
+    assert(reported ~= nil, "no ordinary native-owned ready title row was observed")
+    return state.map .. reported
 end
 
 local function watch_title_session()
     if type(SilverfishObserveNativeSession) ~= "function" then return "unavailable" end
     watched_title_scope = nil
+    local armed_at = sequence
     probe.session_watch = function(state)
         if state.map ~= main_menu or state.listening then return end
+        local title = native_ownership.rows.literal
+        if native_phase_expected and (title.map ~= state.map or title.mode ~= "idle" or title.phase ~= "ready"
+            or title.sequence <= armed_at) then return end
         local ok, result = pcall(compare_title_session, state)
         watched_title_scope = ok and result or "session title comparison failed: " .. tostring(result)
         session_publication = nil
@@ -482,6 +550,8 @@ local function compare_session_census()
         or session_publication.pawns ~= #current.pawns then return "awaiting-publication" end
     assert(session_publication.matched and session_publication.bytes > 0,
         "actual native memory publication and the legacy frame bytes differ")
+    local ownership = native_phase_suffix(current.map, role, seat, "marker")
+    if ownership == nil then return "awaiting-publication" end
     for _, key in ipairs({"map", "clients", "server", "listening", "connection_timeout"}) do
         assert(current[key] == previous[key], "session inspection differs in " .. key)
     end
@@ -507,7 +577,7 @@ local function compare_session_census()
 
     local function rows_with_health(local_health)
         local rows = {"schema\t1", -1, "fixture-literal\tunchanged"}
-        local expected = {rows[1], status_row("session", role, seat, previous.map, previous.clients,
+        local expected = {rows[1], status_publication.lua_row("session", role, seat, previous.map, previous.clients,
             previous.server and 1 or 0), rows[3]}
         for index, details in ipairs(previous.pawns) do
             if finite(details.x) and finite(details.y) and finite(details.z) then
@@ -554,7 +624,7 @@ local function compare_session_census()
     local native_ms, lua_ms, native_kib, lua_kib = compare_paths(count, fast, legacy)
     return ("%s,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f"):format(current.map, pawn_count, count, bytes, override_bytes,
         traveled and 1 or 0, session_publication.bytes, session_publication.sequence,
-        native_ms, lua_ms, native_kib, lua_kib)
+        native_ms, lua_ms, native_kib, lua_kib) .. ownership
 end
 
 local function compare_kill_volume_visit()

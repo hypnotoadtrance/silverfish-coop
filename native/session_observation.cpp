@@ -3,9 +3,11 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <utility>
 
+#include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
@@ -19,6 +21,7 @@ namespace
 {
     namespace U = RC::Unreal;
     namespace session = silverfish::session_observation;
+    using Lua = RC::LuaMadeSimple::Lua;
 
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto controller_path = STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C");
@@ -26,6 +29,107 @@ namespace
     constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr std::string_view title = "/Game/Classes/Maps/MainMenu_P";
     constexpr int max_players = 16;
+
+    struct PhaseOwner
+    {
+        session::Role role{};
+        std::string expected_map;
+        std::optional<std::uint16_t> listen_port;
+        bool leaving{}, was_connected{};
+
+        session::PhaseScope scope() const { return {role, expected_map, listen_port, leaving}; }
+
+        void title_idle()
+        {
+            role = session::Role::idle;
+            listen_port.reset();
+        }
+    };
+
+    std::atomic<std::uint64_t> phase_generation{};
+
+    PhaseOwner& phase_owner()
+    {
+        thread_local PhaseOwner owner;
+        thread_local std::uint64_t generation{};
+        const auto current = phase_generation.load(std::memory_order_acquire);
+        if (generation != current)
+        {
+            owner = {};
+            generation = current;
+        }
+        return owner;
+    }
+
+    constexpr std::array phase_actions{
+        std::pair{"host", session::PhaseAction::host},
+        std::pair{"join", session::PhaseAction::join},
+        std::pair{"host_travel", session::PhaseAction::host_travel},
+        std::pair{"leave", session::PhaseAction::leave},
+        std::pair{"title_idle", session::PhaseAction::title_idle},
+    };
+
+    constexpr std::array role_names{"idle", "host", "client"};
+    constexpr std::array phase_names{"opening", "ready", "hosting", "joining", "connected", "disconnected", "leaving"};
+
+    std::string_view stack_text(lua_State* stack, int index)
+    {
+        std::size_t length{};
+        const auto* text = lua_tolstring(stack, index, &length);
+        return {text, length};
+    }
+
+    void push_phase_scope(const Lua& lua, const session::PhaseScope& scope)
+    {
+        auto* stack = lua.get_lua_state();
+        if (scope.expected_map.empty()) lua_pushnil(stack);
+        else lua.set_string(scope.expected_map);
+        if (scope.listen_port) lua_pushinteger(stack, *scope.listen_port);
+        else lua_pushnil(stack);
+        lua.set_bool(scope.leaving);
+    }
+
+    int lua_update_phase(const Lua& lua)
+    {
+        auto* stack = lua.get_lua_state();
+        if (!U::IsInGameThreadRaw() || lua_gettop(stack) != 3 || lua_type(stack, 1) != LUA_TSTRING) return 0;
+        const auto name = stack_text(stack, 1);
+        const auto found = std::ranges::find_if(phase_actions, [name](const auto& entry) { return entry.first == name; });
+        if (found == phase_actions.end()) return 0;
+        const auto action = found->second;
+        const bool needs_map = action == session::PhaseAction::host || action == session::PhaseAction::host_travel;
+        if (needs_map ? lua_type(stack, 2) != LUA_TSTRING : !lua_isnil(stack, 2)) return 0;
+        std::optional<std::uint16_t> port;
+        if (!lua_isnil(stack, 3))
+        {
+            if (action != session::PhaseAction::host || !lua_isinteger(stack, 3)) return 0;
+            const auto value = lua_tointeger(stack, 3);
+            if (value < 1 || value > 65535) return 0;
+            port = static_cast<std::uint16_t>(value);
+        }
+        const auto scope = session::update_phase(action, needs_map ? stack_text(stack, 2) : std::string_view{}, port);
+        if (!scope) return 0;
+        lua.set_string(role_names[static_cast<std::size_t>(scope->role)]);
+        push_phase_scope(lua, *scope);
+        return 4;
+    }
+
+    int lua_observe_phase(const Lua& lua)
+    {
+        auto* stack = lua.get_lua_state();
+        const auto count = lua_gettop(stack);
+        if (!U::IsInGameThreadRaw() || (count != 5 && count != 6) || lua_type(stack, 1) != LUA_TSTRING) return 0;
+        for (int index = 2; index <= count; ++index)
+            if (!lua_isboolean(stack, index)) return 0;
+        const auto flag = [stack](int index) { return lua_toboolean(stack, index) != 0; };
+        const auto result = session::observe_phase({stack_text(stack, 1), flag(2), flag(3), flag(4), flag(5),
+            flag(count == 6 ? 6 : 2)});
+        if (!result) return 0;
+        lua.set_string(role_names[static_cast<std::size_t>(result->scope.role)]);
+        lua.set_string(phase_names[static_cast<std::size_t>(result->phase)]);
+        push_phase_scope(lua, result->scope);
+        return 5;
+    }
 
     bool available()
     {
@@ -269,6 +373,80 @@ namespace
         for (auto next = guests.begin() + 1; next != end; ++next)
             (*next)->guest_slot = static_cast<int>(next - guests.begin());
     }
+}
+
+std::optional<session::PhaseScope> session::update_phase(PhaseAction action, std::string_view map,
+                                                         std::optional<std::uint16_t> port)
+{
+    if (!U::IsInGameThreadRaw()) return {};
+    const bool needs_map = action == PhaseAction::host || action == PhaseAction::host_travel;
+    if ((needs_map ? !world_path::package(map) : !map.empty()) ||
+        (port && (action != PhaseAction::host || *port == 0))) return {};
+    auto& owner = phase_owner();
+    switch (action)
+    {
+        case PhaseAction::host:
+            owner.role = Role::host;
+            owner.expected_map.assign(map);
+            owner.listen_port = port;
+            break;
+        case PhaseAction::join:
+            owner.role = Role::client;
+            owner.was_connected = false;
+            break;
+        case PhaseAction::host_travel:
+            owner.expected_map.assign(map);
+            break;
+        case PhaseAction::leave:
+            owner.leaving = true;
+            break;
+        case PhaseAction::title_idle:
+            owner.title_idle();
+            break;
+    }
+    return owner.scope();
+}
+
+std::optional<session::PhaseObservation> session::observe_phase(const PhaseFacts& facts)
+{
+    if (!U::IsInGameThreadRaw()) return {};
+    auto& owner = phase_owner();
+    if (owner.leaving)
+    {
+        if (!facts.controller_present || facts.map != title || facts.listening)
+            return PhaseObservation{owner.scope(), Phase::leaving};
+        owner.title_idle();
+        owner.leaving = false;
+        owner.was_connected = false;
+    }
+    if (owner.role == Role::host)
+    {
+        const bool hosting = facts.map == owner.expected_map && facts.listening && !facts.server && facts.has_local_pawn;
+        return PhaseObservation{owner.scope(), hosting ? Phase::hosting : Phase::opening};
+    }
+    if (owner.role == Role::client)
+    {
+        if (facts.server && facts.has_local_pawn && facts.map != title)
+        {
+            owner.was_connected = true;
+            return PhaseObservation{owner.scope(), Phase::connected};
+        }
+        return PhaseObservation{owner.scope(), owner.was_connected ? Phase::disconnected : Phase::joining};
+    }
+    return PhaseObservation{owner.scope(), facts.controller_valid ? Phase::ready : Phase::opening};
+}
+
+void session::reset_phase()
+{
+    // UE4SS can retire the driver away from the game thread. The next
+    // game-thread caller discards the retired owner before using it.
+    phase_generation.fetch_add(1, std::memory_order_release);
+}
+
+void session::register_phase_lua(Lua& lua)
+{
+    lua.register_function("SilverfishUpdateNativeSessionPhase", lua_update_phase);
+    lua.register_function("SilverfishObserveNativeSessionPhase", lua_observe_phase);
 }
 
 bool silverfish::session_observation::read_pawn(U::UWorld* world, U::AActor* actor, bool read_health, Pawn& result)

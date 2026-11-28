@@ -100,8 +100,21 @@ end
 """)
     native_fast = "SilverfishMakeFastLocalBridgeCallback(fast_actions, dispatch_fast)" in source
     passive_title = "status_publication.command_attached = active" in source
+    native_phase = "SilverfishObserveNativeSessionPhase(" in source
     code = (f"local native_fast_expected = {str(native_fast).lower()}\n"
-            f"local passive_title_expected = {str(passive_title).lower()}\n" + code)
+            f"local passive_title_expected = {str(passive_title).lower()}\n"
+            f"local native_phase_expected = {str(native_phase).lower()}\n" + code)
+    if native_phase:
+        observe = '    if type(SilverfishObserveNativeSessionPhase) == "function" then\n'
+        update = "SilverfishUpdateNativeSessionPhase(action, map, port)"
+        adopted = ("        role, expected_map, host_listen_port, leaving = "
+                   "observed_role, observed_map, observed_port, observed_leaving\n")
+        assert all(source.count(marker) == 1 for marker in (observe, update, adopted))
+        source = source.replace(observe, observe + "        local prior_role, prior_map, prior_leaving = role, expected_map, leaving\n")
+        source = source.replace(update, "status_publication.profile.native_phase_update("
+                                "SilverfishUpdateNativeSessionPhase, action, map, port)")
+        source = source.replace(adopted, adopted + "        status_publication.profile.native_phase_observe("
+                                "state, prior_role, prior_map, prior_leaving, role, observed_phase, leaving)\n")
     if native_fast:
         inspection = ("        pending.dispatched = true\n        SilverfishPublishLocalBridgeReply(pending.ticket,\n"
                       "            native_loot_actions.local_reply(fields, state, current_phase, status_row))")
@@ -132,9 +145,15 @@ end
     census_publish = ("            published, frame = SilverfishPublishLocalBridgeStatusRows(rows, census_token, "
                       "census_local_health,\n                status_publication.mirror)\n")
     census_rows = census_publish in status_code
+    watch = "    if status_publication.profile.session_watch then status_publication.profile.session_watch(state) end\n"
+    if native_phase:
+        session_fields = ('    if current_phase == "hosting" or current_phase == "connected" then\n'
+                          '        rows[#rows + 1] = status_row("native-guest-ui-memory", 1)')
+        assert status_code.count(session_fields) == 1
+        row_witness = "    status_publication.profile.native_phase_row(state, current_phase, rows[4])\n"
+        status_code = status_code.replace(session_fields, row_witness + watch + session_fields)
     for needle, call in (
-        ("    sequence = sequence + 1\n", f"    {mark}()\n"
-         "    if status_publication.profile.session_watch then status_publication.profile.session_watch(state) end\n"),
+        ("    sequence = sequence + 1\n", f"    {mark}()\n" + ("" if native_phase else watch)),
         ("    if not failure then\n", f'    {mark}("status_base_rows")\n'),
         ("        local crate_rows\n", f'        {mark}("status_gameplay_rows")\n'),
         ('    rows[#rows + 1] = ""\n', f'    {mark}("status_world_rows")\n'),
@@ -320,8 +339,15 @@ async def read_session_title(seat, probe, *, watched=False):
     reply = await session_profile_request(seat, probe, "sessiontitleresult" if watched else "sessiontitle")
     if reply == "unavailable":
         return None
-    assert reply == MENU, reply
-    return {"map": reply, "native_roles_refused": ["host", "client"]}
+    area, *phase = reply.split(",")
+    assert area == MENU, reply
+    result = {"map": area, "native_roles_refused": ["host", "client"]}
+    if phase:
+        owner, derived, sequence = phase
+        assert (owner, derived) == ("idle", "ready") and int(sequence) > 0, reply
+        result["native_ownership_phase"] = {"mode": owner, "phase": derived, "row_sequence": int(sequence),
+                                            "stock_reducer_and_literal_row_matched": True}
+    return result
 
 
 async def read_session_census(host, guest, probe, area):
@@ -342,7 +368,7 @@ async def read_session_census(host, guest, probe, area):
             continue
         assert not reply.startswith("session census comparison failed"), (seat, reply)
         (map_name, pawns, count, bytes_, override_bytes, traveled, frame_bytes, frame_sequence,
-         native_ms, lua_ms, native_kib, lua_kib) = reply.split(",")
+         native_ms, lua_ms, native_kib, lua_kib, *phase) = reply.split(",")
         assert map_name == area and int(pawns) >= 2 and int(count) == 64, (seat, reply)
         assert min(int(bytes_), int(override_bytes), int(frame_bytes), int(frame_sequence)) > 0, (seat, reply)
         assert traveled in ("0", "1"), reply
@@ -355,6 +381,14 @@ async def read_session_census(host, guest, probe, area):
                           "native_memory_publication_matched_legacy_bytes": True,
                           "geometry_skipped_health_and_save": True, "invalid_role_and_world_refused": True,
                           "invalidated_status_token_refused": True, "prior_travel_map_refused": traveled == "1"}
+        if phase:
+            owner, derived, derived_sequence = phase
+            assert (owner, derived) == (("host", "hosting") if seat == "host" else ("client", "connected")), reply
+            assert int(derived_sequence) > 0, reply
+            evidence[seat]["native_ownership_phase"] = {
+                "mode": owner, "phase": derived, "row_sequence": int(derived_sequence),
+                "stock_reducer_and_session_row_matched": True,
+            }
     assert not evidence or set(evidence) == set(seats), evidence
     return evidence
 

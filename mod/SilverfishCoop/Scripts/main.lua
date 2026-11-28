@@ -462,7 +462,42 @@ function status_publication.session_collection(current_phase)
     end
 end
 
+function status_publication.update_session_phase(action, map, port)
+    if type(SilverfishUpdateNativeSessionPhase) == "function" then
+        local updated_role, updated_map, updated_port, updated_leaving = SilverfishUpdateNativeSessionPhase(action, map, port)
+        if not updated_role then error("Native co-op session transition refused: " .. action, 0) end
+        role, expected_map, host_listen_port, leaving = updated_role, updated_map, updated_port, updated_leaving
+        return
+    end
+    if status_publication.installed then error("Native co-op session phase is unavailable", 0) end
+
+    -- The optional script-only developer stage still uses the file bridge.
+    if action == "host" then
+        role, expected_map, host_listen_port = "host", map, port
+    elseif action == "host_travel" then
+        expected_map = map
+    elseif action == "join" then
+        role, was_connected = "client", false
+    elseif action == "leave" then
+        leaving = true
+    elseif action == "title_idle" then
+        role, host_listen_port = "idle", nil
+    end
+end
+
 local function phase(state)
+    if type(SilverfishObserveNativeSessionPhase) == "function" then
+        local controller_present = not not state.controller
+        local controller_valid = controller_present
+        if role == "idle" or leaving then controller_valid = valid(state.controller) end
+        local observed_role, observed_phase, observed_map, observed_port, observed_leaving = SilverfishObserveNativeSessionPhase(
+            state.map, controller_valid, not not state.listening, not not state.server, not not state.local_pawn, controller_present)
+        if not observed_role then error("Native co-op session observation refused", 0) end
+        role, expected_map, host_listen_port, leaving = observed_role, observed_map, observed_port, observed_leaving
+        return observed_phase
+    end
+    if status_publication.installed then error("Native co-op session phase is unavailable", 0) end
+
     if leaving then
         if state.controller and state.map == main_menu and not state.listening then
             role = "idle"
@@ -633,7 +668,7 @@ local function run_command(fields, state, current_phase)
                 return match
             end,
             function(destination, port)
-                role, expected_map, host_listen_port = "host", destination, port
+                status_publication.update_session_phase("host", destination, port)
             end)
     end
 
@@ -791,9 +826,7 @@ local function run_command(fields, state, current_phase)
         if expanded_routes then native_authored_arrival.prepare_time(state, current_phase, 0) end
         native_anomaly_fields.guest(false)
         open_level(state.controller, argument, "listen", listen_port)
-        host_listen_port = listen_port
-        role = "host"
-        expected_map = argument
+        status_publication.update_session_phase("host", argument, listen_port)
         return "listen travel requested"
     elseif command == "travel" then
         local blue = #fields == 5 and fields[4] == "blue" and native_bed.profile(argument)
@@ -852,7 +885,7 @@ local function run_command(fields, state, current_phase)
             native_authored_arrival.prepare_time(state, current_phase, authored and tonumber(fields[5]) or 0)
         end
         open_level(state.controller, argument, "listen", host_listen_port)
-        expected_map = argument
+        status_publication.update_session_phase("host_travel", argument)
         return "zone travel requested"
     elseif command == "native-blue-route" or command == "native-wipe-route"
         or command == "native-blue-rest-fixture" or command == "native-blue-rest-restore" then
@@ -1164,8 +1197,7 @@ local function run_command(fields, state, current_phase)
         end
         open_level(state.controller, argument, "")
         native_anomaly_fields.guest(true)
-        role = "client"
-        was_connected = false
+        status_publication.update_session_phase("join")
         return "client travel requested"
     elseif command == "native-zone-loading-start" or command == "native-zone-loading-clear" then
         local source = fields[4]
@@ -1200,10 +1232,9 @@ local function run_command(fields, state, current_phase)
         vitals.reset()
         if state.map ~= main_menu or state.listening or role == "client" then
             open_level(state.controller, main_menu, "")
-            leaving = true
+            status_publication.update_session_phase("leave")
         else
-            role = "idle"
-            host_listen_port = nil
+            status_publication.update_session_phase("title_idle")
         end
         return "leaving session"
     elseif command == "restore" or command == "restore-exact" then

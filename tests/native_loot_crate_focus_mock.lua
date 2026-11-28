@@ -38,7 +38,10 @@ camera.K2_SetRelativeRotation = camera.K2_SetWorldRotation
 local objects = { [path] = crate, ["/Script/Engine.CameraComponent"] = camera_type,
     ["/Script/Engine.BoxComponent"] = box_type, ["/Script/Engine.StaticMeshComponent"] = mesh_type }
 StaticFindObject = function(name) return objects[name] end
-package.loaded.native_loot = {profile = function(map, target) if map == area and target == profile.name then return profile end end}
+package.loaded.native_loot = {
+    matches_crate = require("native_loot").matches_crate,
+    profile = function(map, target) if map == area and target == profile.name then return profile end end,
+}
 
 local chosen, sequence = box, 0
 pawn.LookTrace = function(self)
@@ -204,6 +207,7 @@ local function status_case(installed, headless, resident)
     }, {__index = _G})
     assert(loadfile("mod/SilverfishCoop/Scripts/main.lua", "t", env))()
     local publication = upvalue(callback, "status_publication")
+    publication.command_attached = true
     local tick = upvalue(publication.dispatch, "tick")
     upvalue(tick, "observe_session", function() return state, "connected" end)
     local write = upvalue(tick, "write_status")
