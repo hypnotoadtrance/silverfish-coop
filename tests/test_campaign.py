@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 import uuid
 
 from tools.silverfish import native_host_save
+from tools.silverfish.authored_loot import LEGACY_CRATE
 from tools.silverfish.campaign import (
     AuthenticationError,
     CampaignFormatError,
@@ -170,7 +171,7 @@ class CampaignStoreTests(unittest.TestCase):
             primary = store.path.read_bytes()
             previous = store.previous_path.read_bytes()
             escrow = dict(frame, slot=native_host_save.new_slot())
-            invalid_party = {"native_loot_rolls": {"crate": {"escrow": escrow}}}
+            invalid_party = {"native_loot_rolls": {LEGACY_CRATE: {"escrow": escrow}}}
             with self.assertRaisesRegex(CampaignFormatError, "Cannot read the isolated Unreal save generation"):
                 store.save_world(dict(world, day=3, party=invalid_party))
             self.assertEqual(store.path.read_bytes(), primary)

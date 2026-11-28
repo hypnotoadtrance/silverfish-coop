@@ -21,6 +21,7 @@ import time
 import uuid
 
 from .content_paths import asset_name, item_class_name
+from .guest_request_scope import mark_effect
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from . import native_finite_shop, native_shop_view
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
@@ -135,6 +136,7 @@ def write_text(path: Path, data: str, *, newline: str | None = None) -> None:
         for attempt in range(5):
             try:
                 temporary.replace(path)
+                mark_effect("file_publication")
                 return
             except PermissionError:
                 if attempt == 4:

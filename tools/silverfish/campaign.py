@@ -20,6 +20,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from .guest_request_scope import mark_effect
+
 
 SCHEMA_VERSION = 2
 DEFAULT_RECONNECT_GRACE = 90.0
@@ -394,6 +396,7 @@ class CampaignStore:
                         raise
                     time.sleep(delay)
                 else:
+                    mark_effect("campaign_publication")
                     temp_path = None
                     break
         finally:

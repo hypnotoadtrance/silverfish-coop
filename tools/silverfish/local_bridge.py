@@ -6,6 +6,8 @@ from ctypes import wintypes
 import os
 from pathlib import Path
 
+from .guest_request_scope import mark_effect
+
 STATUS_LIMIT = 2 * 1024 * 1024
 # Match the native FIFO and its largest accepted input record.
 INPUT_LIMIT = 1536
@@ -235,6 +237,7 @@ class LocalBridge:
             ticket = self._submit(payload, len(payload))
             if not ticket:
                 raise LocalCommandNotSubmitted("The game could not queue the local co-op command")
+            mark_effect("game_command")
             try:
                 delay = max(1, min(120000, int(timeout * 1000)))
                 size = await asyncio.to_thread(self._wait, ticket, delay)

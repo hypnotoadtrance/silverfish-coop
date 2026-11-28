@@ -8,7 +8,8 @@ from unittest.mock import ANY, AsyncMock, Mock, call, patch
 import uuid
 
 from tools.silverfish import (
-    gameplay_snapshot, native_flashlight, native_loot, native_pickup_audio, native_player_avatar, native_stock_door, native_world_loot,
+    gameplay_snapshot, guest_request_scope, native_flashlight, native_loot, native_pickup_audio,
+    native_player_avatar, native_stock_door, native_world_loot,
     runtime, service,
 )
 from tools.silverfish.travel import OBSERVATORY, PLAYTEST_MAPS
@@ -1425,7 +1426,7 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
             await host.service_guest_native_requests(bridge)
             self.assertFalse(host.native_request_ready.is_set())
 
-    async def test_host_batches_ready_guests_in_fifo_without_overlapping_claims(self):
+    def host_native_queue(self):
         host = service.Host.__new__(service.Host)
         host.native_requests = asyncio.Queue()
         host.native_request_ready = asyncio.Event()
@@ -1437,6 +1438,11 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         host.guest_leave_pending = Mock(return_value=False)
         host.pickup_audio = Mock()
         host.pickup_audio.frame.return_value = None
+        host.control = Mock()
+        return host
+
+    async def test_host_batches_ready_guests_in_fifo_without_overlapping_claims(self):
+        host = self.host_native_queue()
         bridge = Mock()
         order = []
 
@@ -1473,6 +1479,75 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await asyncio.gather(*tasks), [
                 {"ok": True, "claimed_by": "character-0"}, *([{"ok": False, "error": "already_claimed"}] * 3),
             ])
+
+    async def test_host_contains_pre_dispatch_fault_and_services_the_next_guest(self):
+        host = self.host_native_queue()
+        bridge = Mock()
+        operation = "a" * 32
+        request = {"action": service.native_loose_pickup.CLAIM, "target": "item", "operation_id": operation}
+        failed = asyncio.get_running_loop().create_future()
+        following = asyncio.get_running_loop().create_future()
+        host.native_requests.put_nowait(("first", request, failed))
+        host.native_requests.put_nowait(("second", request, following))
+        claim = AsyncMock(side_effect=[AttributeError("private handler state"), {"claimed_by": "character-second"}])
+        with patch.object(service.native_loose_pickup, "claim", claim), patch.object(
+                service, "time", SimpleNamespace(monotonic=lambda: 100.0)):
+            await host.service_guest_native_batch(bridge)
+        self.assertEqual(failed.result(), {"ok": False, "error": "native_request_failed"})
+        self.assertEqual(following.result(), {"ok": True, "claimed_by": "character-second"})
+        self.assertFalse(host.stopping or host.native_checkpoint_unsafe)
+        self.assertIsNone(guest_request_scope.active.get())
+        host.control.event.assert_any_call(
+            "host_guest_request_fault", action=request["action"], operation_id=operation, stage="dispatch",
+            effect=None, contained=True, error_type="AttributeError", source=ANY, function=ANY, line=ANY,
+        )
+
+    async def test_host_fences_unexpected_fault_after_publishing_game_command(self):
+        host = self.host_native_queue()
+        operation = "a" * 32
+        request = {"action": service.native_loose_pickup.CLAIM, "target": "item", "operation_id": operation}
+        failed = asyncio.get_running_loop().create_future()
+        following = asyncio.get_running_loop().create_future()
+        host.native_requests.put_nowait(("first", request, failed))
+        host.native_requests.put_nowait(("second", request, following))
+        with TemporaryDirectory() as directory:
+            command = Path(directory) / "command.tsv"
+            bridge = runtime.Bridge(Path(directory), Mock())
+            bridge.wait_for = AsyncMock(side_effect=AttributeError("failed readback"))
+
+            async def claim(_host, game, *_args):
+                return await game.command("stock-claim-test")
+
+            with patch.object(service.native_loose_pickup, "claim", side_effect=claim):
+                with self.assertRaisesRegex(AttributeError, "failed readback"):
+                    await host.service_guest_native_batch(bridge)
+            self.assertIn("stock-claim-test", command.read_text(encoding="utf-8"))
+        self.assertEqual(failed.result(), {"ok": False, "error": "native_checkpoint_unsafe"})
+        self.assertTrue(host.native_checkpoint_unsafe)
+        self.assertFalse(following.done())
+        self.assertEqual(host.native_requests.qsize(), 1)
+        self.assertIsNone(guest_request_scope.active.get())
+        host.control.event.assert_any_call(
+            "host_guest_request_fault", action=request["action"], operation_id=operation, stage="dispatch",
+            effect="file_publication", contained=False, error_type="AttributeError", source=ANY, function=ANY, line=ANY,
+        )
+
+    async def test_host_keeps_committed_receipt_after_optional_pickup_cue_fault(self):
+        host = self.host_native_queue()
+        host.pickup_audio.frame.side_effect = KeyError("missing optional cue")
+        operation = "a" * 32
+        request = {"action": service.native_loose_pickup.CLAIM, "target": "item", "operation_id": operation}
+        future = asyncio.get_running_loop().create_future()
+        host.native_requests.put_nowait(("guest", request, future))
+        receipt = {"claimed_by": "character-guest"}
+        with patch.object(service.native_loose_pickup, "claim", AsyncMock(return_value=receipt)):
+            await host.service_guest_native_requests(Mock())
+        self.assertEqual(future.result(), {"ok": True, **receipt})
+        self.assertFalse(host.stopping or host.native_checkpoint_unsafe)
+        host.control.event.assert_any_call(
+            "host_guest_request_fault", action=request["action"], operation_id=operation, stage="reply_metadata",
+            effect=None, contained=True, error_type="KeyError", source=ANY, function=ANY, line=ANY,
+        )
 
     async def test_host_batch_yields_after_slow_action_or_scope_change(self):
         for boundary in ("time", "visit", "unsafe", "wipe"):

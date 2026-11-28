@@ -16,7 +16,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 
-from . import gameplay_snapshot, guest_weapon_profiles, native_board_contract
+from . import gameplay_snapshot, guest_request_scope, guest_weapon_profiles, native_board_contract
 from . import (direct_ip, link, matrix_service, native_authored_pickup, native_blue, native_broker, native_computer_board, native_dialogue, native_downed_markers,
                native_dream, native_enemy_loot, native_enemy_shells, native_finite_shop, native_flood_jammer, native_lenny,
                native_gold, native_green, native_guest_armor, native_guest_clock, native_guest_consumable, native_guest_npc, native_guest_stack_drop,
@@ -87,6 +87,7 @@ _TIMED_INTERACTIONS = (frozenset({"native-loot-inspect", "native-loot-open", "na
                                   native_authored_pickup.ACTION, native_loose_pickup.CLAIM})
                        if os.environ.get("SILVERFISH_COOP_TITLE_FIXTURES") == "1" else frozenset())
 _NATIVE_REQUESTS_PER_PASS = 3
+_REQUEST_HANDLER_ERRORS = (AttributeError, LookupError, TypeError)
 _NATIVE_REQUEST_PASS_SECONDS = .025
 _LOCAL_STOCK_INPUT_BACKLOG = 64
 _LOCAL_STOCK_PICKUP_REQUESTS = 2
@@ -2467,16 +2468,21 @@ class Host:
             self.native_request_ready.clear()
         if future.cancelled():
             return
-        timed = request["action"] in _TIMED_INTERACTIONS
+        action = request["action"]
+        timed = action in _TIMED_INTERACTIONS
         crate_visit = self.last_game.get("map"), self.zone_epoch
         if timed:
-            self.control.event("host_interaction_started", action=request["action"], operation_id=request["operation_id"])
+            with contextlib.suppress(OSError):
+                self.control.event("host_interaction_started", action=action, operation_id=request["operation_id"])
+        scope = guest_request_scope.GuestRequestScope()
+        initial_party = self.party
+        token = guest_request_scope.active.set(scope)
         try:
             identity = self.authenticated_guest(guest_id)
             if not identity:
                 raise party.RuleError("guest_not_active")
             _, character = identity
-            action, target = request["action"], request["target"]
+            target = request["target"]
             if action in (link.GUEST_LEAVE, link.GUEST_LEAVE_CONFIRM):
                 result = await self.guest_leave(bridge, guest_id, character, request)
             elif self.guest_leave_pending(guest_id):
@@ -2649,24 +2655,55 @@ class Host:
                 result = await native_enemy_loot.claim(self, bridge, character, target, request["operation_id"])
             else:
                 result = await native_quest.action(self, bridge, character, action, target)
-        except (OSError, RuntimeError, ValueError) as error:
-            result = {"ok": False, "error": str(error)}
-        if not future.done():
             reply = {"ok": True, **result}
-            roll = result.get("native_loot_roll")
-            if isinstance(roll, dict) and crate_visit == (self.last_game.get("map"), self.zone_epoch):
-                area, _ = crate_visit
-                rolls = native_loot.published(self.party.get(native_loot.STATE_KEY, {}), area, game=self.last_game)
-                # A replay can still return its original receipt after the roll has changed.
-                if rolls.get(roll.get("crate")) == roll:
-                    reply[native_loot.ROLL_REVISION] = self.crate_publication.observe(rolls, crate_visit)
-            if reply["ok"] and (cue := self.pickup_audio.frame(
-                    self.last_game, self.zone_epoch, operation=request["operation_id"])):
-                reply[native_pickup_audio.KEY] = cue
-            if timed:
-                self.control.event("host_interaction_finished", action=request["action"],
-                                   operation_id=request["operation_id"], ok=reply["ok"])
+        except (OSError, RuntimeError, ValueError) as error:
+            reply = {"ok": False, "error": str(error)}
+        except _REQUEST_HANDLER_ERRORS as error:
+            effect = scope.first_effect or ("party_publication" if self.party is not initial_party else None)
+            unsafe = bool(effect or self.native_checkpoint_unsafe or self.stopping or self.transitioning)
+            if unsafe:
+                self.native_checkpoint_unsafe = True
+            self.log_guest_request_fault(request, error, stage="dispatch", effect=effect, contained=not unsafe)
+            if unsafe:
+                if not future.done():
+                    future.set_result({"ok": False, "error": "native_checkpoint_unsafe"})
+                raise
+            reply = {"ok": False, "error": "native_request_failed"}
+        finally:
+            guest_request_scope.active.reset(token)
+        if not future.done():
+            try:
+                roll = reply.get("native_loot_roll")
+                if isinstance(roll, dict) and crate_visit == (self.last_game.get("map"), self.zone_epoch):
+                    area, _ = crate_visit
+                    rolls = native_loot.published(self.party.get(native_loot.STATE_KEY, {}), area, game=self.last_game)
+                    # A replay can still return its original receipt after the roll has changed.
+                    if rolls.get(roll.get("crate")) == roll:
+                        reply[native_loot.ROLL_REVISION] = self.crate_publication.observe(rolls, crate_visit)
+                if reply["ok"] and (cue := self.pickup_audio.frame(
+                        self.last_game, self.zone_epoch, operation=request["operation_id"])):
+                    reply[native_pickup_audio.KEY] = cue
+            except (OSError, RuntimeError, ValueError, *_REQUEST_HANDLER_ERRORS) as error:
+                # Optional presentation cannot replace a completed action's receipt.
+                self.log_guest_request_fault(request, error, stage="reply_metadata", effect=None, contained=True)
             future.set_result(reply)
+            if timed:
+                with contextlib.suppress(OSError):
+                    self.control.event("host_interaction_finished", action=action,
+                                       operation_id=request["operation_id"], ok=reply["ok"])
+
+    def log_guest_request_fault(self, request, error, *, stage, effect, contained):
+        trace = error.__traceback__
+        while trace.tb_next is not None:
+            trace = trace.tb_next
+        code = trace.tb_frame.f_code
+        operation = request.get("operation_id")
+        if not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
+            operation = None
+        with contextlib.suppress(OSError):
+            self.control.event("host_guest_request_fault", action=request["action"], operation_id=operation,
+                               stage=stage, effect=effect, contained=contained, error_type=type(error).__name__,
+                               source=os.path.basename(code.co_filename), function=code.co_name, line=trace.tb_lineno)
 
     async def read_quest_catalog(self, bridge: Bridge) -> dict:
         if self.last_game.get("state") != "hosting" or self.transitioning or self.stopping:

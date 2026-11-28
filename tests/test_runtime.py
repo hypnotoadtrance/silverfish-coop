@@ -9,8 +9,8 @@ import unittest
 import uuid
 from unittest.mock import AsyncMock, Mock, patch
 
-from tools.silverfish import runtime, service
-from tools.silverfish.local_bridge import INPUT_LIMIT, LocalBridge
+from tools.silverfish import guest_request_scope, runtime, service
+from tools.silverfish.local_bridge import INPUT_LIMIT, LocalBridge, LocalCommandNotSubmitted
 from tools.silverfish.control import Control
 
 
@@ -88,6 +88,27 @@ class LocalBridgeInputTests(unittest.TestCase):
 
         library.SilverfishBridgeReadInputV1.side_effect = read
         self.assertEqual(bridge.read_input(), [b"interact\t1"])
+
+
+class LocalBridgeCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_resident_command_marks_guest_effect_only_after_ticket_submission(self):
+        library = Mock()
+        bridge = LocalBridge(library)
+        scope = guest_request_scope.GuestRequestScope()
+        token = guest_request_scope.active.set(scope)
+        try:
+            library.SilverfishBridgeSubmitV1.side_effect = [0, 23]
+            with self.assertRaises(LocalCommandNotSubmitted):
+                await bridge.command(b"test", 1)
+            self.assertIsNone(scope.first_effect)
+
+            library.SilverfishBridgeWaitV1.side_effect = AttributeError("lost native readback")
+            with self.assertRaisesRegex(AttributeError, "lost native readback"):
+                await bridge.command(b"test", 1)
+            self.assertEqual(scope.first_effect, "game_command")
+            library.SilverfishBridgeCancelV1.assert_called_once_with(23)
+        finally:
+            guest_request_scope.active.reset(token)
 
 
 class BridgeWalkTests(unittest.IsolatedAsyncioTestCase):
