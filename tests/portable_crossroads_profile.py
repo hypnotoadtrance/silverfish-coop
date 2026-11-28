@@ -30,6 +30,23 @@ async def compare_acid_reader(seat, probe, *, dynamic):
 
 def instrument_profile(source, *, stock_receipts=False):
     code = (Path(__file__).with_name("fixtures") / "portable_crossroads_profile.lua").read_text(encoding="utf-8")
+    startup = ""
+    if "SilverfishActivateLocalBridgeDriver" in source:
+        startup = """do
+    local read = SilverfishReadNativeBridgeLifecycle
+    SilverfishProfileBridgeLifecycleStartup = type(read) == "function" and read() or "missing"
+end
+
+"""
+    action = '    if action == "gcrestore" then\n'
+    assert code.count(action) == 1
+    code = code.replace(action, """    if action == "bridgelifecycle" and not capture then
+        local startup = SilverfishProfileBridgeLifecycleStartup
+        local read = SilverfishReadNativeBridgeLifecycle
+        local current = type(read) == "function" and read() or "missing"
+        message = startup and (startup .. "," .. current) or "unavailable"
+    elseif action == "gcrestore" then
+""")
     native_fast = "SilverfishMakeFastLocalBridgeCallback(fast_actions, dispatch_fast)" in source
     code = "local native_fast_expected = " + ("true" if native_fast else "false") + "\n" + code
     if native_fast:
@@ -195,7 +212,7 @@ def instrument_profile(source, *, stock_receipts=False):
     fallback_query = 'FindAllOf("Player_FP_C")'
     assert before.count(fallback_query) == 1
     before = before.replace(fallback_query, f'{wrapper}("player_actor_fallback", FindAllOf, "Player_FP_C")')
-    return before + "status_publication.profile = (function()\n" + code + "\nend)()\n\n" + anchor + rest
+    return startup + before + "status_publication.profile = (function()\n" + code + "\nend)()\n\n" + anchor + rest
 
 
 async def read_stock_receipts(seat, probe):
@@ -217,6 +234,28 @@ async def read_collector_modes(host, guest, probe):
 async def session_profile_request(seat, probe, action):
     reply = await probe(seat.bridge, "crossroads-profile", action, reply_end="|end")
     return reply.removesuffix("|end")
+
+
+async def read_native_bridge_lifecycle(host, guest, probe, *, expected):
+    async def sample(seat):
+        deadline = time.monotonic() + 8
+        while True:
+            reply = await session_profile_request(seat, probe, "bridgelifecycle")
+            if reply == "unavailable":
+                return None
+            startup, current = reply.split(",")
+            assert startup == "initialized", (seat.bridge.process.pid, reply)
+            if current == expected:
+                return {"pid": seat.bridge.process.pid, "before_lua_adapter": startup, "current": current}
+            assert current in {"initialized", "ready", "attached"}, reply
+            assert time.monotonic() < deadline, (seat.bridge.process.pid, expected, current)
+            await asyncio.sleep(0.2)
+
+    samples = await asyncio.gather(*(sample(seat) for seat in (host, guest)))
+    if all(sample is None for sample in samples):
+        return {}
+    assert all(samples), samples
+    return dict(zip(("host", "guest"), samples, strict=True))
 
 
 async def read_session_title(seat, probe, *, watched=False):
@@ -485,15 +524,27 @@ def instrument_zone_walls(source):
     assert source.count(anchor) == 1
     source = source.replace(anchor, 'local sources = SilverfishProfileCrossroadsCall("zone_wall_sources", '
                             'wall_sources, world, scope.map, route, scope.fixture, scope.secondary)')
+    batch_call = "        certified, discovered = SilverfishSnapshotNativeWallOverlapSources(world_address, refresh_discovered)\n"
+    has_batch = batch_call in source
+    if has_batch:
+        source = source.replace("local function wall_sources(", "local profiled_wall_batch\nlocal function wall_sources(", 1)
+        source = source.replace(batch_call, batch_call + """        if type(certified) == "table" then
+            if not profiled_wall_batch or profiled_wall_batch.world ~= world_address then
+                profiled_wall_batch = {world = world_address}
+            end
+            profiled_wall_batch.authored = certified
+            if refresh_discovered then profiled_wall_batch.discovery = type(discovered) == "table" end
+        end
+""", 1)
     end = "\nreturn wall\n"
     assert source.count(end) == 1
-    fixture = """
+    fixture = ("" if has_batch else "local profiled_wall_batch\n") + """
 function SilverfishProfileCrossroadsWallSources(world, map)
     local certify = SilverfishCertifyNativeAuthoredOverlapWall
     if type(certify) ~= "function" then return "unavailable" end
     local plans = assert(authored_routes[map], "missing authored Crossroads wall plans")
     local address = world:GetAddress()
-    scan_authored(world, plans)
+    scan_authored(world, plans, nil, os.time())
     local qualified = {}
     for _, plan in ipairs(plans) do
         if plan.kind == "overlap" then
@@ -519,9 +570,57 @@ function SilverfishProfileCrossroadsWallSources(world, map)
             qualified_source(sample[1], world, sample[2], world_address)
         end
     end
-    local native_ms, lua_ms, native_kib, lua_kib = SilverfishProfileCrossroadsCompare(
-        count, function() read(address) end, read)
-    return ("%d,%d,%.3f,%.3f,%.3f,%.3f"):format(#qualified, count, native_ms, lua_ms, native_kib, lua_kib)
+    local sample = SilverfishSnapshotNativeWallOverlapSources
+    local native = function() read(address) end
+    local batch_fields = ""
+    if type(sample) == "function" then
+        local authored, discovered = sample(address, true)
+        local observed = profiled_wall_batch
+        assert(type(authored) == "table" and observed and observed.world == address,
+            "stock wall sync did not use the native batch in the active world")
+        assert(sample(address + 1, false) == nil and sample(0, true) == nil,
+            "native wall batch accepted a stale world")
+        for _, item in ipairs(qualified) do
+            local fixture, plan = item[1], item[2]
+            assert(same(authored[plan.actor], fixture) and same(observed.authored[plan.actor], fixture),
+                "native batch authored fixture differs from stock: " .. plan.actor)
+        end
+        local authored_count = 0
+        for _ in pairs(authored) do authored_count = authored_count + 1 end
+        assert(authored_count == #qualified, "native batch authored count differs from stock")
+        local discovery_count = -1
+        if type(discovered) == "table" then
+            local route = assert(zones[map])
+            local known = {}
+            for _, plan in ipairs(plans) do known[plan.actor] = true end
+            if route.fixture then known[route.fixture] = true end
+            if route.secondary then known[route.secondary.fixture] = true end
+            local prior_world, prior_sources, prior_after = discovered_world, discovered_sources, discover_after
+            local ok, expected, actual = pcall(function()
+                discovered_world, discovered_sources, discover_after = nil, {}, 0
+                local legacy = discovered_walls(world, known, nil, os.time())
+                discovered_world, discovered_sources, discover_after = nil, {}, 0
+                local batch = discovered_walls(world, known, discovered, os.time())
+                return legacy, batch
+            end)
+            discovered_world, discovered_sources, discover_after = prior_world, prior_sources, prior_after
+            assert(ok, expected)
+            discovery_count = 0
+            for path, row in pairs(expected) do
+                local item = actual[path]
+                assert(item and same(item.fixture, row.fixture) and item.tag == row.tag
+                    and item.kind == row.kind and item.discovered == row.discovered,
+                    "native batch discovered fixture differs from stock: " .. path)
+                discovery_count = discovery_count + 1
+            end
+            for path in pairs(actual) do assert(expected[path], "native batch added an unexpected fixture: " .. path) end
+        end
+        batch_fields = (",%d,%d,%d"):format(authored_count, discovery_count, observed.discovery and 1 or 0)
+        native = function() return sample(address, false) end
+    end
+    local native_ms, lua_ms, native_kib, lua_kib = SilverfishProfileCrossroadsCompare(count, native, read)
+    return ("%d%s,%d,%.3f,%.3f,%.3f,%.3f"):format(
+        #qualified, batch_fields, count, native_ms, lua_ms, native_kib, lua_kib)
 end
 
 function SilverfishProfileCrossroadsExitPosition()
@@ -2446,6 +2545,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     object_paths = await asyncio.gather(*(command(seat, "objectpath") for seat in seats.values()))
     verified_lookup = "matched world and package, returned an invalid object for the missing path"
     assert all(result in ("unavailable", verified_lookup) for result in object_paths), object_paths
+    bridge_lifecycle = await read_native_bridge_lifecycle(host, guest, probe, expected="attached")
     collector_modes = await read_collector_modes(host, guest, probe)
     session_census = await read_session_census(host, guest, probe, area)
     world_scene = await read_world_scene(command, host)
@@ -2870,8 +2970,16 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
                           "native_heap_growth_kib": native_kib, "lua_heap_growth_kib": lua_kib,
                           "matched_stock_values": True, "invalid_scope_refused": True}
                 if action == "wallsources":
-                    sources, = scope
+                    sources, *batch = scope
                     record["authored_overlap_sources"] = int(sources)
+                    if batch:
+                        authored, discovered, discovered_in_sync = map(int, batch)
+                        assert authored == int(sources) and discovered >= -1 and discovered_in_sync in (0, 1), reply
+                        record["native_batch"] = {
+                            "authored_overlap_sources": authored, "authored_batch_used_in_sync": True,
+                            "discovered_overlap_sources": discovered if discovered >= 0 else None,
+                            "discovery_batch_used_in_sync": bool(discovered_in_sync),
+                        }
                 else:
                     game_seconds, verified_sequence = scope
                     record["local_save_game_seconds"] = game_seconds
@@ -2961,6 +3069,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             assert "capped_idle" in scheduler, "The native scheduler needs a measured low-FPS idle sample"
             scheduler["commands"] = await verify_bridge_scheduler_commands(host, guest, command, area)
     return {"collector_modes": collector_modes, "exact_object_lookup": dict(zip(seats, object_paths, strict=True)),
+            "native_bridge_lifecycle": bridge_lifecycle,
             "native_session_census": session_census,
             "world_scene_comparison": world_scene,
             "idle": idle, "guest_walking": moving,

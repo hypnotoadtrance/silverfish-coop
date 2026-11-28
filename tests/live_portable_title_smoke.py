@@ -9575,7 +9575,12 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
 
             host = first
             if crossroads_profile:
-                from portable_crossroads_profile import read_collector_modes, read_session_title
+                from portable_crossroads_profile import (
+                    read_collector_modes, read_native_bridge_lifecycle, read_session_title,
+                )
+
+                proof["initial_title_bridge_lifecycle"] = await read_native_bridge_lifecycle(
+                    first, second, portable_probe_command, expected="ready")
 
                 proof["initial_title_collector_modes"] = await read_collector_modes(first, second, portable_probe_command)
                 title_census = await asyncio.gather(*(read_session_title(seat, portable_probe_command)
@@ -9596,6 +9601,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 else:
                     session = await run_resident_campaign(campaign, checks, host)
                 if crossroads_profile:
+                    closed = await read_native_bridge_lifecycle(host, second, portable_probe_command, expected="ready")
+                    if closed:
+                        assert (closed["host"]["pid"], closed["guest"]["pid"]) == (session["host_pid"], session["guest_pid"]), closed
+                        session["title_bridge_lifecycle"] = closed
                     session["title_collector_modes"] = await read_collector_modes(host, second, portable_probe_command)
                 proof["sessions"].append(dict(session, resident_campaign=campaign))
                 if saved := session.get("loki_saved_load"):
