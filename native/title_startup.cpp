@@ -1,5 +1,5 @@
 #include "title_startup.hpp"
-#include "title_entry.hpp"
+#include "local_bridge.hpp"
 
 #include <algorithm>
 #include <array>
@@ -193,16 +193,37 @@ extern "C" __declspec(dllexport) std::uint32_t SilverfishCopyNativeTitleStartupV
     return size;
 }
 
+bool silverfish::native_title_startup::command_attachment_ready()
+{
+    if (!enabled(L"SILVERFISH_COOP_HEADLESS") || !enabled(L"SILVERFISH_COOP_TITLE_FIXTURES")) return false;
+    std::lock_guard lock(state_mutex);
+    return installed.load(std::memory_order_acquire) && !publication.frame.empty() && Clock::now() < publication.expires;
+}
+
+std::optional<title::Input> silverfish::native_title_startup::command_context(U::UEngine* engine)
+{
+    if (!U::IsInGameThreadRaw() || !installed.load(std::memory_order_acquire)) return {};
+    const auto input = current_title(engine);
+    const auto observation = input ? title::observe(*input) : std::nullopt;
+    return observation && observation->ready() ? input : std::nullopt;
+}
+
 void silverfish::native_title_startup::install_hooks()
 {
     if (installed.load(std::memory_order_relaxed) || !qualified_boot()) return;
     next_sample = {};
     travel_hook = Hooks::RegisterLoadMapPreCallback(
-        [](auto&, U::UEngine*, U::FWorldContext&, U::FURL, U::UPendingNetGame*, U::FString&) { retire(); },
+        [](auto&, U::UEngine*, U::FWorldContext&, U::FURL, U::UPendingNetGame*, U::FString&) {
+            retire();
+            local_bridge::retire_native_title();
+        },
         {false, true, mod_name, STR("Retire native startup title before travel")});
     if (travel_hook == Hooks::ERROR_ID) return;
     tick_hook = Hooks::RegisterEngineTickPostCallback(
-        [](auto&, U::UEngine* engine, float, bool idle) { sample(engine, idle); },
+        [](auto&, U::UEngine* engine, float, bool idle) {
+            if (!idle) local_bridge::tick_native_title(engine);
+            sample(engine, idle);
+        },
         {false, true, mod_name, STR("Publish stock title readiness before command attachment")});
     if (tick_hook == Hooks::ERROR_ID)
     {

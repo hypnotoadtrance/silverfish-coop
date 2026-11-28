@@ -4,6 +4,7 @@
 #include <string_view>
 
 namespace RC::LuaMadeSimple { class Lua; }
+namespace RC::Unreal { class UEngine; }
 
 namespace silverfish::local_bridge
 {
@@ -13,6 +14,8 @@ namespace silverfish::local_bridge
     void initialize();
     void install_native_dispatch();
     void uninstall_native_dispatch();
+    void tick_native_title(RC::Unreal::UEngine* engine);
+    void retire_native_title();
     void register_lua(RC::LuaMadeSimple::Lua& lua);
     void release_script_driver();
     void stop();

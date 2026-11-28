@@ -28,7 +28,10 @@ namespace
 {
     namespace U = RC::Unreal;
     namespace title = silverfish::native_title_entry;
+    namespace scope = silverfish::native_save_scope;
     using Lua = RC::LuaMadeSimple::Lua;
+    constexpr auto title_required = "Switch co-op save scope at the stock title";
+    constexpr auto scope_mismatch = "The co-op save scope did not match";
 
     struct Route
     {
@@ -166,14 +169,20 @@ namespace
         }
     };
 
-    std::optional<GuestFields> guest_fields(U::UWorld* world, std::string_view* reason = nullptr)
+    struct SaveWorld
     {
-        const auto refuse = [reason](std::string_view error) -> std::optional<GuestFields> {
+        U::UObject* instance{};
+        bool at_title{};
+    };
+
+    std::optional<SaveWorld> save_world(U::UWorld* world, std::string_view* reason = nullptr)
+    {
+        const auto refuse = [reason](std::string_view error) -> std::optional<SaveWorld> {
             if (reason) *reason = error;
             return {};
         };
         if (!U::UnrealInitializer::ShouldUseHashTables() || !live(world)) return refuse("guest_save_world_unavailable");
-        static U::FWeakObjectPtr world_type, instance_type, save_type, local_type, viewport_type;
+        static U::FWeakObjectPtr world_type, instance_type, local_type, viewport_type;
         if (world->GetClassPrivate() != loaded_class(world_type, STR("/Script/Engine.World"))) return refuse("guest_save_world_class");
         auto* instance = object(world, STR("OwningGameInstance"));
         if (!live(instance) || instance->GetClassPrivate() != loaded_class(instance_type,
@@ -197,15 +206,27 @@ namespace
         const bool at_title = world->GetPathName() == STR("/Game/Classes/Maps/MainMenu_P.MainMenu_P");
         if (at_title ? driver != nullptr : !live(driver) || object(driver, STR("World")) != world ||
             !live(object(driver, STR("ServerConnection")))) return refuse("guest_save_net_driver_scope");
+        return SaveWorld{instance, at_title};
+    }
 
+    std::optional<GuestFields> guest_fields(U::UWorld* world, std::string_view* reason = nullptr)
+    {
+        const auto current = save_world(world, reason);
+        if (!current) return {};
+        auto* instance = current->instance;
+
+        static U::FWeakObjectPtr save_type;
         auto* save_class = loaded_class(save_type, STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"));
         auto* save = field<U::FObjectProperty>(instance, STR("SaveSlot_Ref"));
         auto* slot = field<U::FStrProperty>(instance, STR("CurrentSaveSlot"));
         auto* autosave = field<U::FBoolProperty>(instance, STR("SaveAfterTransition"));
         auto* step = field<U::FDoubleProperty>(instance, STR("Travel_TimeStep"));
         if (!save_class || !save || save->GetPropertyClass().Get() != save_class || !slot || !autosave)
-            return refuse("guest_save_view_schema");
-        return GuestFields{instance, save_class, save, slot, autosave, step, at_title};
+        {
+            if (reason) *reason = "guest_save_view_schema";
+            return {};
+        }
+        return GuestFields{instance, save_class, save, slot, autosave, step, current->at_title};
     }
 
     U::UObject* create_guest_save(U::UClass* save_class, std::string_view& reason)
@@ -364,11 +385,10 @@ namespace
         return true;
     }
 
-    bool restore_guest(const GuestFields& fields, std::string_view id, std::string_view& reason)
+    bool restore_guest_locked(const GuestFields& fields, std::string_view id, std::string_view& reason, bool& mutated)
     {
         const auto refuse = [&reason](std::string_view error) { reason = error; return false; };
         if (!fields.at_title) return refuse("guest_save_restore_title_required");
-        std::scoped_lock lock{lifecycle};
         if (!selected || selected->id != id) return refuse("guest_save_route_unavailable");
         if (!guest) return true;
         if (guest->instance.Get() != fields.instance) return refuse("guest_save_restore_instance");
@@ -381,6 +401,7 @@ namespace
         const bool restore_save = save && fields.current_save() == save;
         const bool restore_travel = guest->previous_travel_step &&
             fields.travel_step->GetPropertyValueInContainer(fields.instance) == 0;
+        mutated = restore_slot || restore_save || restore_travel || fields.current_autosave() != guest->previous_autosave;
         if (restore_slot) fields.slot->SetPropertyValueInContainer(fields.instance, U::FString{guest->previous_slot});
         if (restore_save) fields.set_save(previous);
         fields.autosave->SetPropertyValueInContainer(fields.instance, guest->previous_autosave);
@@ -393,6 +414,7 @@ namespace
         if (!reference_guest(fields.instance, save, false)) return refuse("guest_save_reference_release");
         guest.reset();
         guest_restored = true;
+        mutated = true;
         return true;
     }
 
@@ -608,7 +630,12 @@ namespace
         const auto id = stack_id(stack, 2, 2);
         std::string_view reason = "guest_save_invalid_scope_id";
         const auto fields = scope_id(id) ? guest_fields(wrapped<RC::LuaType::UWorld>(lua, 1, "UWorld"), &reason) : std::nullopt;
-        const bool restored = fields && restore_guest(*fields, id, reason);
+        bool restored{}, mutated{};
+        if (fields)
+        {
+            std::scoped_lock lock{lifecycle};
+            restored = restore_guest_locked(*fields, id, reason, mutated);
+        }
         lua_pushboolean(stack, restored);
         if (restored) return 1;
         lua_pushlstring(stack, reason.data(), reason.size());
@@ -622,7 +649,7 @@ namespace
         return 1;
     }
 
-    std::string_view select(std::string_view id)
+    std::string_view select(std::string_view id, U::UWorld* world = nullptr, U::UObject* instance = nullptr)
     {
         if (!scope_id(id)) return "Expected a co-op save scope ID";
         std::uint64_t before{};
@@ -633,12 +660,19 @@ namespace
             before = generation;
         }
 
+        const U::FWeakObjectPtr world_ref{world}, instance_ref{instance};
         std::string_view error;
         const auto paths = title::resolve_save_routing_paths(id, error);
         if (!paths) return error;
         auto route = std::make_shared<const Route>(Route{std::string{id}, L"SilverfishCoop/" + RC::to_wstring(id) + L"/",
             RC::to_wstring(paths->directory) + L"/", normalize(RC::to_wstring(paths->raw_root)),
             normalize(RC::to_wstring(paths->absolute_root))});
+        if (world)
+        {
+            if (world_ref.Get() != world || instance_ref.Get() != instance) return title_required;
+            const auto current = save_world(world);
+            if (!current || !current->at_title || current->instance != instance) return title_required;
+        }
 
         std::scoped_lock lock{lifecycle};
         if (generation != before) return "The co-op save scope changed during selection";
@@ -656,6 +690,14 @@ namespace
         return push_text(stack, select(stack_id(stack, 1, 1)));
     }
 
+    bool release_locked(std::string_view id)
+    {
+        if (!selected || selected->id != id || creating_guest || guest) return false;
+        selected.reset();
+        ++generation;
+        return true;
+    }
+
     int lua_release(const Lua& lua)
     {
         if (!U::IsInGameThreadRaw()) return 0;
@@ -664,12 +706,7 @@ namespace
         bool released{};
         {
             std::scoped_lock lock{lifecycle};
-            if (selected && selected->id == id && !creating_guest && !guest)
-            {
-                selected.reset();
-                ++generation;
-                released = true;
-            }
+            released = release_locked(id);
         }
         lua_pushboolean(stack, released);
         return 1;
@@ -681,6 +718,41 @@ namespace
         const auto route = current_route();
         return route ? push_text(lua.get_lua_state(), route->id) : 0;
     }
+}
+
+scope::TitleResult scope::select_at_title(U::UWorld* world, std::string_view id)
+{
+    if (!U::IsInGameThreadRaw()) return {false, false, title_required};
+    const auto current = save_world(world);
+    if (!current || !current->at_title) return {false, false, title_required};
+    const auto result = select(id, world, current->instance);
+    if (result == "selected") return {true, true, "selected co-op save scope"};
+    return {false, false, result.empty() ? "Stock co-op save routing is unavailable" : result};
+}
+
+scope::TitleResult scope::release_at_title(U::UWorld* world, U::UObject* controller, std::string_view id)
+{
+    if (!U::IsInGameThreadRaw()) return {false, false, title_required};
+    if (!scope_id(id)) return {false, false, scope_mismatch};
+    const title::Input input{world, controller, title::Phase::ready};
+    const auto report = title::observe(input);
+    if (!report || !report->ready()) return {false, false, title_required};
+
+    bool mutated{};
+    {
+        std::scoped_lock lock{lifecycle};
+        if (!selected || selected->id != id || creating_guest) return {false, false, scope_mismatch};
+        if (guest)
+        {
+            std::string_view reason;
+            const auto fields = guest_fields(world, &reason);
+            if (!fields || !restore_guest_locked(*fields, id, reason, mutated)) return {false, mutated, reason};
+        }
+        if (!release_locked(id)) return {false, mutated, scope_mismatch};
+    }
+
+    const auto error = title::refresh_singleplayer(input);
+    return error.empty() ? TitleResult{true, true, "released co-op save scope"} : TitleResult{false, true, error};
 }
 
 void silverfish::native_save_scope::register_lua(Lua& lua)
@@ -697,6 +769,12 @@ void silverfish::native_save_scope::register_lua(Lua& lua)
 bool silverfish::native_save_scope::active()
 {
     return static_cast<bool>(current_route());
+}
+
+std::string scope::selected_id()
+{
+    const auto route = current_route();
+    return route ? route->id : std::string{};
 }
 
 void silverfish::native_save_scope::clear()

@@ -283,6 +283,29 @@ class LocalBridge(LocalStatus):
         bridge.enable_crate_outcome_input()
         return bridge
 
+    @classmethod
+    def connect_native_title(cls, image: Path):
+        """Opt into the scoped native title lane without enabling gameplay inputs."""
+        try:
+            library = _loaded_bridge_library(image)
+            if library is None:
+                return None
+            open_title = library.SilverfishBridgeOpenNativeTitleV1
+            open_title.argtypes, open_title.restype = [], ctypes.c_int
+            bridge = cls(library)
+        except (AttributeError, OSError):
+            return None
+        if not open_title():
+            return None
+        try:
+            if bridge._enable_reader(bridge._enable_status):
+                return bridge
+        except BaseException:
+            bridge.close()
+            raise
+        bridge.close()
+        return None
+
     def enable_crate_outcome_input(self) -> None:
         if self._enable_crate_outcome_input is None:
             return

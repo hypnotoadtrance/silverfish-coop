@@ -2,7 +2,9 @@
 #include "guest_clock.hpp"
 #include "guest_health.hpp"
 #include "local_catalog_ticket.hpp"
+#include "save_scope.hpp"
 #include "session_observation.hpp"
+#include "title_startup.hpp"
 #include "world_scene.hpp"
 
 #include <algorithm>
@@ -74,7 +76,7 @@ namespace
     constexpr std::string_view guest_health_action = "native-guest-health-project";
 
     enum class State { idle, queued, taken, running, replied, too_large };
-    enum class NativeCommand { none, clock, health };
+    enum class NativeCommand { none, clock, health, title_select, title_release };
     std::mutex mutex;
     std::mutex status_mutex;
     std::condition_variable changed;
@@ -82,6 +84,10 @@ namespace
     // Installing the native hooks and attaching a command consumer are separate startup steps.
     bool script_driver_ready{};
     bool attached{};
+    bool native_title_attached{};
+    std::atomic<bool> native_title_retiring{};
+    std::atomic<bool> native_title_needs_status{};
+    std::uint64_t native_title_sequence{};
     std::int64_t last_ticket{};
     std::int64_t active_ticket{};
     State state{State::idle};
@@ -480,6 +486,9 @@ namespace
     void detach_worker(bool retire_status = false)
     {
         // Caller holds both bridge locks. Retire any outstanding ticket before releasing them.
+        if (native_title_attached) native_title_retiring.store(true, std::memory_order_release);
+        native_title_attached = false;
+        native_title_needs_status.store(false, std::memory_order_release);
         attached = false;
         worker_status_enabled = false;
         if (retire_status || !resident_status_enabled) status_frame.reset();
@@ -506,7 +515,8 @@ namespace
         if (lua.get_stack_size() == 0 && RC::Unreal::IsInGameThreadRaw())
         {
             std::lock_guard lock(mutex);
-            active = script_driver_ready = runtime_initialized;
+            active = script_driver_ready = runtime_initialized && !native_title_attached &&
+                !native_title_retiring.load(std::memory_order_relaxed);
         }
         lua.set_bool(active);
         return 1;
@@ -1058,6 +1068,68 @@ namespace
         return {};
     }
 
+    bool title_command(NativeCommand action)
+    {
+        return action == NativeCommand::title_select || action == NativeCommand::title_release;
+    }
+
+    NativeCommand classify_title_command(std::string_view payload)
+    {
+        if (payload.size() > 160) return NativeCommand::none;
+        const auto fields = parse_native_command(payload);
+        if (!fields || fields->count != 3) return NativeCommand::none;
+        const auto id = fields->values[2];
+        if (id.size() != 32 || !std::ranges::all_of(id, [](char ch) {
+            return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+        })) return NativeCommand::none;
+        const auto action = fields->values[1];
+        if (action == "native-save-scope-select") return NativeCommand::title_select;
+        if (action == "native-save-scope-release") return NativeCommand::title_release;
+        return NativeCommand::none;
+    }
+
+    void publish_native_title_status(std::int64_t ticket, std::int64_t sequence, std::string_view request,
+        const std::optional<silverfish::native_title_entry::Rows>& rows,
+        silverfish::native_save_scope::TitleResult result)
+    {
+        const auto scope = silverfish::native_save_scope::selected_id();
+        std::string prefix = "schema\t1\nseq\t" + std::to_string(sequence) + '\n';
+        std::string body;
+        if (rows && rows->startup)
+        {
+            body = "session\tidle\tready\t/Game/Classes/Maps/MainMenu_P\t0\t0\n";
+            body.append("native-save-scope\t").append(scope.empty() ? "-" : scope).append("\n");
+            body.append(rows->title).append("\n").append(*rows->startup).append("\n");
+        }
+        else
+        {
+            body = "session\tidle\topening\t/Game/Classes/Maps/MainMenu_P\t0\t0\n";
+            body.append("native-save-scope\t").append(scope.empty() ? "-" : scope).append("\n");
+        }
+        auto status = std::make_shared<const std::string>(prefix + body);
+        std::shared_ptr<const std::string> receipt;
+        if (ticket)
+        {
+            prefix.append("ack\t").append(request).append(result.accepted ? "\taccepted\t" : "\terror\t");
+            append_status_field(prefix, result.message);
+            prefix.append("\n").append(body);
+            prefix.append(result.mutated ? "native-title-scope-result\t1\n" : "native-title-scope-result\t0\n");
+            receipt = std::make_shared<const std::string>(std::move(prefix));
+        }
+        std::scoped_lock lock(mutex, status_mutex);
+        if (!native_title_attached) return;
+        // An observer can reconcile a command that was claimed before its caller timed out.
+        status_frame.swap(status);
+        ++status_revision;
+        native_title_needs_status.store(false, std::memory_order_release);
+        if (ticket && ticket == active_ticket && state == State::running)
+        {
+            reply = std::move(receipt);
+            state = State::replied;
+            changed.notify_all();
+        }
+    }
+
     std::optional<ClockCommand> parse_clock_command(std::span<const std::string_view> fields)
     {
         if (fields.size() != 6 || fields[1] != guest_clock_action || fields[2].empty() ||
@@ -1187,7 +1259,7 @@ namespace
         NativeCommand action{};
         {
             std::unique_lock lock(mutex, std::try_to_lock);
-            if (!lock || !attached || state != State::queued || command.size() > buffer.size()) return;
+            if (!lock || !attached || native_title_attached || state != State::queued || command.size() > buffer.size()) return;
             action = native_queued.load(std::memory_order_relaxed);
             if (action == NativeCommand::none) return;
             length = command.size();
@@ -1637,8 +1709,18 @@ namespace
 extern "C" __declspec(dllexport) int SilverfishBridgeOpenV1()
 {
     std::lock_guard lock(mutex);
-    if (!runtime_initialized || !script_driver_ready || attached) return 0;
+    if (!runtime_initialized || !script_driver_ready || attached || native_title_retiring.load(std::memory_order_relaxed)) return 0;
     attached = true;
+    return 1;
+}
+
+extern "C" __declspec(dllexport) int SilverfishBridgeOpenNativeTitleV1()
+{
+    std::lock_guard lock(mutex);
+    if (!runtime_initialized || script_driver_ready || attached || native_title_retiring.load(std::memory_order_relaxed) ||
+        silverfish::native_save_scope::active() || !silverfish::native_title_startup::command_attachment_ready()) return 0;
+    native_title_attached = attached = true;
+    native_title_needs_status.store(true, std::memory_order_release);
     return 1;
 }
 
@@ -1886,13 +1968,15 @@ extern "C" __declspec(dllexport) std::int64_t SilverfishBridgeSubmitV1(const cha
     }
     std::lock_guard lock(mutex);
     if (!attached || state != State::idle || last_ticket == std::numeric_limits<std::int64_t>::max()) return 0;
+    const auto native_title_action = native_title_attached ? classify_title_command({data, size}) : NativeCommand::none;
+    if (native_title_attached && !title_command(native_title_action)) return 0;
     if (large_catalog.empty()) command.assign(data, size);
     else command = std::move(large_catalog);
     active_ticket = ++last_ticket;
     state = State::queued;
     fast_header = classify_fast_header(command);
     fast_queued.store(fast_header.fields != 0, std::memory_order_release);
-    native_queued.store(classify_native_command(command), std::memory_order_release);
+    native_queued.store(native_title_attached ? native_title_action : classify_native_command(command), std::memory_order_release);
     return active_ticket;
 }
 
@@ -1935,6 +2019,73 @@ extern "C" __declspec(dllexport) void SilverfishBridgeCancelV1(std::int64_t tick
 
 namespace silverfish::local_bridge
 {
+    void tick_native_title(RC::Unreal::UEngine* engine)
+    {
+        namespace title_startup = native_title_startup;
+        namespace save = native_save_scope;
+        const bool retiring = native_title_retiring.load(std::memory_order_acquire);
+        if (!retiring && !native_title_needs_status.load(std::memory_order_acquire) &&
+            !title_command(native_queued.load(std::memory_order_acquire))) return;
+        if (!RC::Unreal::IsInGameThreadRaw()) return;
+        if (retiring)
+        {
+            const auto scope = save::selected_id();
+            if (!scope.empty())
+            {
+                if (const auto input = title_startup::command_context(engine))
+                    save::release_at_title(input->world, input->controller, scope);
+                if (save::active()) save::clear();
+            }
+            native_title_retiring.store(false, std::memory_order_release);
+            return;
+        }
+        NativeCommand action{};
+        std::int64_t ticket{};
+        std::string payload;
+        {
+            std::unique_lock lock(mutex, std::try_to_lock);
+            if (!lock || !native_title_attached) return;
+            action = native_queued.load(std::memory_order_relaxed);
+            if (state == State::queued && title_command(action))
+            {
+                ticket = active_ticket;
+                payload = command;
+            }
+        }
+        const auto input = title_startup::command_context(engine);
+        const auto next_sequence = native_title_sequence + 1;
+        const auto rows = input ? native_title_entry::rows(*input, next_sequence) : std::nullopt;
+        if (!ticket)
+        {
+            if (rows && rows->startup)
+                publish_native_title_status(0, ++native_title_sequence, {}, rows, {});
+            return;
+        }
+
+        const auto fields = parse_native_command(payload);
+        if (!fields || !claim_native_command(ticket, action, true)) return;
+        save::TitleResult result{false, false, "The stock title is unavailable"};
+        if (input && rows && rows->startup)
+        {
+            const auto scope = fields->values[2];
+            result = action == NativeCommand::title_select ? save::select_at_title(input->world, scope)
+                : save::release_at_title(input->world, input->controller, scope);
+        }
+        publish_native_title_status(ticket, ++native_title_sequence, fields->values[0], rows, result);
+    }
+
+    void retire_native_title()
+    {
+        {
+            std::scoped_lock lock(mutex, status_mutex);
+            if (!native_title_attached && !native_title_retiring.load(std::memory_order_relaxed)) return;
+            detach_worker();
+        }
+        if (!RC::Unreal::IsInGameThreadRaw()) return;
+        native_save_scope::clear();
+        native_title_retiring.store(false, std::memory_order_release);
+    }
+
     void initialize()
     {
         std::lock_guard lock(mutex);
