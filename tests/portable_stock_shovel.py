@@ -223,7 +223,9 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
         equipped = await submit(guest_run, "native-guest-weapon-equip", target=item["guid"])
         assert equipped["ok"] and equipped["native_guest_weapon"]["kind"] == "spade", equipped
         current = await wait_resident_status(
-            guest_run, lambda frame: frame.get("game", {}).get("native_guest_primary_scope", {}).get("kind") == "spade",
+            guest_run, lambda frame: (
+                (scope := frame.get("game", {}).get("native_guest_primary_scope", {})).get("kind") == "spade"
+                and scope.get("mode") == "stock_held"),
             timeout=10,
         )
 
@@ -487,9 +489,16 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
     for run in (host_run, guest_run):
         await wait_resident_status(run, projected, timeout=12)
     await host.bridge.command(native_world_loot.APPROACH, identity, pawn, timeout=5)
-    arrived = await wait_resident_status(guest_run, lambda f: math.dist(f["game"]["pawns"]["local"]["location"],
-                                                                        reward["transform"]["position"]) < 180, timeout=7)
-    guest_actor = projected(arrived)["actor"].split(" ", 1)[1]
+    async with asyncio.timeout(7):
+        guest_actor = None
+        while True:
+            arrived = await wait_resident_status(guest_run, lambda f: projected(f) and not projected(f).get("moving")
+                and math.dist(f["game"]["pawns"]["local"]["location"], reward["transform"]["position"]) < 180,
+                timeout=5)
+            guest_actor = projected(arrived)["actor"].split(" ", 1)[1]
+            if await observe(guest, "loot-ready", guest_actor) == "ready":
+                break
+            await asyncio.sleep(.05)
     press = await submit(guest_run, native_world_loot.FIXTURE, target=identity)
     if not press["ok"]:
         sight = await observe(guest, "sight", guest_actor)

@@ -77,6 +77,14 @@
             assert(active.Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A == 1)
             return "staged the stock Missing Contact quest"
         end
+        if fields[2] == "fixture-spade-loot-ready" then
+            assert(phase == "connected" and #fields == 3)
+            local actor = StaticFindObject(fields[3])
+            if not valid(actor) or not same(actor:GetWorld(), state.world) or actor:IsActorBeingDestroyed()
+                or not actor:GetActorEnableCollision() or not valid(actor.Box)
+                or actor.Box:GetCollisionEnabled() == 0 then return "pending" end
+            return "ready"
+        end
         if fields[2] == "fixture-spade-sight" then
             assert(phase == "connected" and #fields == 3)
             local pawn = state.local_pawn.pawn
