@@ -111,7 +111,8 @@ namespace
     thread_local ClockDispatchProfile clock_profile;
     thread_local std::deque<std::shared_ptr<const std::string>> health_profile;
     std::shared_ptr<const std::string> reply;
-    bool status_enabled{};
+    bool worker_status_enabled{};
+    bool resident_status_enabled{};
     std::shared_ptr<const std::string> status_frame;
     std::uint64_t status_revision{};
     std::deque<std::string> input;
@@ -476,12 +477,12 @@ namespace
 
     void clear_weapon_cues();
 
-    void detach_worker()
+    void detach_worker(bool retire_status = false)
     {
         // Caller holds both bridge locks. Retire any outstanding ticket before releasing them.
         attached = false;
-        status_enabled = false;
-        status_frame.reset();
+        worker_status_enabled = false;
+        if (retire_status || !resident_status_enabled) status_frame.reset();
         input.clear();
         crate_outcome_input_enabled = false;
         prop_poses.clear();
@@ -737,11 +738,16 @@ namespace
         return 1;
     }
 
-    bool timing_fixture_enabled()
+    bool environment_enabled(const wchar_t* name)
     {
         wchar_t value[2]{};
-        return GetEnvironmentVariableW(L"SILVERFISH_COOP_HEADLESS", value, 2) == 1 && value[0] == L'1' &&
-            GetEnvironmentVariableW(L"SILVERFISH_COOP_TITLE_FIXTURES", value, 2) == 1 && value[0] == L'1';
+        return GetEnvironmentVariableW(name, value, 2) == 1 && value[0] == L'1';
+    }
+
+    bool timing_fixture_enabled()
+    {
+        return environment_enabled(L"SILVERFISH_COOP_HEADLESS") &&
+            environment_enabled(L"SILVERFISH_COOP_TITLE_FIXTURES");
     }
 
     int profile_stamp(const Lua& lua)
@@ -1265,7 +1271,7 @@ namespace
         {
             // Snapshot publication should not wait for gameplay ticket or input queue work.
             std::lock_guard lock(status_mutex);
-            if (status_enabled)
+            if (worker_status_enabled || resident_status_enabled)
             {
                 published = snapshot != nullptr;
                 // Retire the previous buffer after releasing the bridge lock.
@@ -1645,8 +1651,18 @@ extern "C" __declspec(dllexport) void SilverfishBridgeCloseV1()
 extern "C" __declspec(dllexport) int SilverfishBridgeEnableStatusV1()
 {
     std::scoped_lock lock(mutex, status_mutex);
-    status_enabled = attached;
-    return status_enabled;
+    worker_status_enabled = attached;
+    return worker_status_enabled;
+}
+
+extern "C" __declspec(dllexport) int SilverfishBridgeEnableResidentStatusV1()
+{
+    if (!environment_enabled(L"SILVERFISH_COOP_RESIDENT_TITLE") ||
+        !environment_enabled(L"SILVERFISH_COOP_INSTALLED_TITLE")) return 0;
+    std::scoped_lock lock(mutex, status_mutex);
+    if (!runtime_initialized) return 0;
+    resident_status_enabled = true;
+    return 1;
 }
 
 extern "C" __declspec(dllexport) std::uint64_t SilverfishBridgeStatusRevisionV1()
@@ -1938,13 +1954,10 @@ namespace silverfish::local_bridge
 
     void install_native_dispatch()
     {
-        const auto enabled = [](const wchar_t* name) {
-            wchar_t value[2]{};
-            return GetEnvironmentVariableW(name, value, 2) == 1 && value[0] == L'1';
-        };
         if (native_dispatch_hook != Hooks::ERROR_ID ||
-            !enabled(L"SILVERFISH_COOP_RESIDENT_TITLE") || !enabled(L"SILVERFISH_COOP_INSTALLED_TITLE") ||
-            !enabled(L"SILVERFISH_COOP_NATIVE_ZONE")) return;
+            !environment_enabled(L"SILVERFISH_COOP_RESIDENT_TITLE") ||
+            !environment_enabled(L"SILVERFISH_COOP_INSTALLED_TITLE") ||
+            !environment_enabled(L"SILVERFISH_COOP_NATIVE_ZONE")) return;
         native_dispatch_hook = Hooks::RegisterEngineTickPreCallback(
             [](auto&, RC::Unreal::UEngine*, float, bool) { dispatch_native_command(); },
             {false, false, STR("SilverfishCoopNative"), STR("Dispatch qualified local gameplay commands")});
@@ -2027,7 +2040,7 @@ namespace silverfish::local_bridge
         {
             std::scoped_lock lock(mutex, status_mutex);
             script_driver_ready = false;
-            detach_worker();
+            detach_worker(true);
             fast_actions.clear();
         }
         stop_engine_tick_profile();
@@ -2039,7 +2052,8 @@ namespace silverfish::local_bridge
             std::scoped_lock lock(mutex, status_mutex);
             runtime_initialized = false;
             script_driver_ready = false;
-            detach_worker();
+            resident_status_enabled = false;
+            detach_worker(true);
             fast_actions.clear();
         }
         stop_engine_tick_profile();

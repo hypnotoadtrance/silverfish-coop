@@ -230,8 +230,13 @@ local function capture(current)
     return report
 end
 
-function view.observe(state, phase)
-    if phase ~= "hosting" or not profiles[state.map] then return nil end
+local function append_storm(report, current)
+    local ok, storm = pcall(storm_ambience.capture, current)
+    if ok then report.storm_ambience = storm end
+    return report
+end
+
+local function observe_lua(state, phase)
     local current = context(state, phase)
     local report = capture(current)
     report.game_seconds = game_seconds(current.save)
@@ -239,9 +244,19 @@ function view.observe(state, phase)
     if ok and weather then copy_weather(report, weather) end
     local rain_ok, rain = pcall(weather_view.read_rain, current)
     if rain_ok and rain then weather_view.copy_rain(report, rain) end
-    local storm_ok, storm = pcall(storm_ambience.capture, current)
-    if storm_ok then report.storm_ambience = storm end
-    return report
+    return append_storm(report, current)
+end
+
+function view.observe(state, phase)
+    local profile = profiles[state.map]
+    if phase ~= "hosting" or not profile then return nil end
+    local pawn = state.local_pawn and state.local_pawn.pawn
+    if state.listening and state.server == false and type(SilverfishReadNativeHostWeather) == "function"
+        and valid(state.world) and valid(pawn) then
+        local report, day = SilverfishReadNativeHostWeather(state.world:GetAddress(), pawn:GetAddress(), profile)
+        if report then return append_storm(report, { world = state.world, day = day }) end
+    end
+    return observe_lua(state, phase)
 end
 
 local function real_time(current)

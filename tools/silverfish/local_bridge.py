@@ -59,8 +59,82 @@ async def combat_command(bridge, command, operation, *, timeout):
     return {**receipt, REPLY_RECOVERED: True}
 
 
-class LocalBridge:
+def _loaded_bridge_library(image: Path):
+    if os.name != "nt":
+        return None
+    path = image.parent / "ue4ss" / "Mods" / "SilverfishCoopNative" / "dlls" / "main.dll"
+    get_module = ctypes.WinDLL("kernel32").GetModuleHandleExW
+    get_module.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, ctypes.POINTER(wintypes.HMODULE)]
+    get_module.restype = wintypes.BOOL
+    handle = wintypes.HMODULE()
+    pin_until_exit = 1
+    if get_module(pin_until_exit, str(path), ctypes.byref(handle)):
+        return ctypes.CDLL(str(path), handle=handle.value)
+    return None
+
+
+class LocalStatus:
+    """Read the native status frame without owning its command queue."""
+
     def __init__(self, library):
+        self._status_buffer = None
+        self._status_revision = 0
+        self._status_frame = None
+        self._latest_status = getattr(library, "SilverfishBridgeStatusRevisionV1", None)
+        self._copy_status = getattr(library, "SilverfishBridgeCopyStatusV1", None)
+        if self._latest_status is not None and self._copy_status is not None:
+            self._latest_status.argtypes, self._latest_status.restype = [], ctypes.c_uint64
+            self._copy_status.argtypes = [ctypes.c_uint64, ctypes.c_void_p, ctypes.c_uint32,
+                                         ctypes.POINTER(ctypes.c_uint64)]
+            self._copy_status.restype = ctypes.c_uint32
+
+    @classmethod
+    def connect_readonly(cls, image: Path):
+        try:
+            library = _loaded_bridge_library(image)
+            if library is None:
+                return None
+            enable = library.SilverfishBridgeEnableResidentStatusV1
+        except (AttributeError, OSError):
+            return None
+        reader = cls(library)
+        return reader if reader._enable_reader(enable) else None
+
+    def _enable_reader(self, enable) -> bool:
+        if enable is None or self._latest_status is None or self._copy_status is None:
+            return False
+        enable.argtypes, enable.restype = [], ctypes.c_int
+        if not enable():
+            return False
+        self._status_buffer = ctypes.create_string_buffer(STATUS_LIMIT)
+        return True
+
+    def status_ready(self) -> bool:
+        return self._status_buffer is not None and self._latest_status() != self._status_revision
+
+    def read_status(self) -> str | None:
+        if self._status_buffer is None:
+            return None
+        latest = self._latest_status()
+        if not latest:
+            self._status_revision = 0
+            self._status_frame = None
+        elif latest != self._status_revision:
+            revision = ctypes.c_uint64()
+            size = self._copy_status(self._status_revision, self._status_buffer, STATUS_LIMIT, ctypes.byref(revision))
+            if not revision.value or not 0 < size <= STATUS_LIMIT:
+                return None
+            self._status_revision = revision.value
+            try:
+                self._status_frame = self._status_buffer[:size].decode("utf-8")
+            except UnicodeError:
+                self._status_frame = None
+        return self._status_frame
+
+
+class LocalBridge(LocalStatus):
+    def __init__(self, library):
+        super().__init__(library)
         self._open = library.SilverfishBridgeOpenV1
         self._open.argtypes, self._open.restype = [], ctypes.c_int
         self._close = library.SilverfishBridgeCloseV1
@@ -163,33 +237,14 @@ class LocalBridge:
             self._avatar_pose_buffer = ctypes.create_string_buffer(512)
         self._lock = asyncio.Lock()
         self._command_count = 0
-        self._status_buffer = None
-        self._status_revision = 0
-        self._status_frame = None
         self._enable_status = getattr(library, "SilverfishBridgeEnableStatusV1", None)
-        self._latest_status = getattr(library, "SilverfishBridgeStatusRevisionV1", None)
-        self._copy_status = getattr(library, "SilverfishBridgeCopyStatusV1", None)
-        if self._enable_status is not None and self._latest_status is not None and self._copy_status is not None:
-            self._enable_status.argtypes, self._enable_status.restype = [], ctypes.c_int
-            self._latest_status.argtypes, self._latest_status.restype = [], ctypes.c_uint64
-            self._copy_status.argtypes = [ctypes.c_uint64, ctypes.c_void_p, ctypes.c_uint32,
-                                         ctypes.POINTER(ctypes.c_uint64)]
-            self._copy_status.restype = ctypes.c_uint32
 
     @classmethod
     def connect(cls, image: Path):
-        if os.name != "nt":
-            return None
-        path = image.parent / "ue4ss" / "Mods" / "SilverfishCoopNative" / "dlls" / "main.dll"
-        get_module = ctypes.WinDLL("kernel32").GetModuleHandleExW
-        get_module.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, ctypes.POINTER(wintypes.HMODULE)]
-        get_module.restype = wintypes.BOOL
-        handle = wintypes.HMODULE()
-        pin_until_exit = 1
-        if not get_module(pin_until_exit, str(path), ctypes.byref(handle)):
-            return None
         try:
-            library = ctypes.CDLL(str(path), handle=handle.value)
+            library = _loaded_bridge_library(image)
+            if library is None:
+                return None
             bridge = cls(library)
         except (AttributeError, OSError):
             return None
@@ -209,10 +264,7 @@ class LocalBridge:
             self._input_buffer = buffer
 
     def enable_status(self) -> None:
-        if self._enable_status is None or self._latest_status is None or self._copy_status is None:
-            return
-        if self._enable_status():
-            self._status_buffer = ctypes.create_string_buffer(STATUS_LIMIT)
+        self._enable_reader(self._enable_status)
 
     @property
     def has_pause_exit(self) -> bool:
@@ -227,28 +279,6 @@ class LocalBridge:
         press = ctypes.c_uint64()
         reason = {1: "quit_to_menu", 2: "save_and_quit"}.get(self._pause_take(token, role, ctypes.byref(press)))
         return (press.value, reason) if reason and press.value else None
-
-    def status_ready(self) -> bool:
-        return self._status_buffer is not None and self._latest_status() != self._status_revision
-
-    def read_status(self) -> str | None:
-        if self._status_buffer is None:
-            return None
-        latest = self._latest_status()
-        if not latest:
-            self._status_revision = 0
-            self._status_frame = None
-        elif latest != self._status_revision:
-            revision = ctypes.c_uint64()
-            size = self._copy_status(self._status_revision, self._status_buffer, STATUS_LIMIT, ctypes.byref(revision))
-            if not revision.value or not 0 < size <= STATUS_LIMIT:
-                return None
-            self._status_revision = revision.value
-            try:
-                self._status_frame = self._status_buffer[:size].decode("utf-8")
-            except UnicodeError:
-                self._status_frame = None
-        return self._status_frame
 
     async def command(self, payload: bytes, timeout: float, *, skip_if_busy: bool = False, timing=None) -> str:
         if timing is not None:

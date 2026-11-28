@@ -34,6 +34,7 @@
 #include "guest_melee.hpp"
 #include "host_landmine.hpp"
 #include "host_dig.hpp"
+#include "host_weather.hpp"
 #include "host_invitation_clipboard.hpp"
 #include "session_exit_input.hpp"
 #include "listener_bind.hpp"
@@ -1784,6 +1785,7 @@ namespace
             silverfish::native_interaction_input::register_lua(lua);
             silverfish::local_bridge::register_lua(lua);
             silverfish::native_title_entry::register_lua(lua);
+            silverfish::native_host_weather::register_lua(lua);
             silverfish::native_authored_pickup::register_lua(lua);
             silverfish::native_mindcore::register_lua(lua);
             silverfish::native_mindcore_carry::register_lua(lua);

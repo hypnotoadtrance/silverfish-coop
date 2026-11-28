@@ -979,6 +979,7 @@ class Bridge:
         self._status_snapshot: dict | None = None
         self.status_error: str | None = None
         self.local_bridge = None
+        self.resident_status = None
         self._local_interaction_records = deque(maxlen=64)
         self._local_menu_inputs = {tag: deque(maxlen=64) for tag in
                                    (b"wire-board", b"dialogue-input", b"inventory-view", b"shop-view")}
@@ -1551,10 +1552,13 @@ class Bridge:
 
     def snapshot(self) -> dict | None:
         """Return the current read-only bridge frame, parsing each publication once."""
-        text = self.local_bridge.read_status() if self.local_bridge is not None else None
-        self.status_source = "memory" if text is not None else "file"
+        reader = self.local_bridge if self.local_bridge is not None else self.resident_status
+        text = reader.read_status() if reader is not None else None
+        # Once the resident reader opts in, a missing frame cannot revive an older file snapshot.
+        read_file = text is None and self.resident_status is None
+        self.status_source = "file" if read_file else "memory"
         try:
-            if text is None:
+            if read_file:
                 with (self.directory / "status.tsv").open(encoding="utf-8") as stream:
                     published = os.fstat(stream.fileno())
                     text = stream.read()

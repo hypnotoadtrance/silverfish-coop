@@ -13,7 +13,7 @@ import threading
 
 from . import native_host_save, native_title_entry, runtime
 from .control import NAME
-from .local_bridge import LocalBridge
+from .local_bridge import LocalBridge, LocalStatus
 from .title_handoff import _isolated_stock_title
 
 
@@ -237,6 +237,8 @@ class EmbeddedEngine:
         self.internal_port = internal_port
         self.returncode = None
         self.bridge = runtime.Bridge(mailbox, self)
+        if os.environ.get(INSTALLED_ENV) == "1" and os.environ.get("SILVERFISH_COOP_RESIDENT_TITLE") == "1":
+            self.bridge.resident_status = LocalStatus.connect_readonly(_current_startup(()).image)
         self.session_directory = session_directory
         self._saved_directory = saved_directory
         self._save_scope = None

@@ -547,6 +547,27 @@ class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(bridge.snapshot()["sequence"], 10)
             self.assertEqual(bridge.status_source, "file")
 
+    async def test_resident_status_reads_without_a_command_lease_and_ignores_stale_file(self):
+        with TemporaryDirectory() as temporary:
+            bridge = runtime.Bridge(Path(temporary), Mock(poll=Mock(return_value=None)))
+            frame = "schema\t1\nseq\t{}\nsession\tidle\tready\t/Game/Classes/Maps/MainMenu_P\t0\t0\n"
+            (bridge.directory / "status.tsv").write_text(frame.format(10), encoding="utf-8")
+            bridge.resident_status = Mock(read_status=Mock(return_value=None))
+
+            self.assertIsNone(bridge.snapshot())
+            self.assertIsNone(bridge.local_bridge)
+            bridge.resident_status.read_status.return_value = frame.format(11)
+            self.assertEqual(bridge.snapshot()["sequence"], 11)
+            self.assertEqual(bridge.status_source, "memory")
+
+            bridge.local_bridge = Mock(read_status=Mock(return_value=frame.format(12)))
+            self.assertEqual(bridge.snapshot()["sequence"], 12)
+            bridge.local_bridge = None
+            bridge.resident_status.read_status.return_value = frame.format(13)
+            self.assertEqual(bridge.snapshot()["sequence"], 13)
+            bridge.resident_status.read_status.return_value = None
+            self.assertIsNone(bridge.snapshot())
+
     async def test_embedded_inputs_wake_worker_without_reading_stale_file_input(self):
         with TemporaryDirectory() as temporary:
             bridge = runtime.Bridge(Path(temporary), None)

@@ -1349,6 +1349,8 @@ local function read_command(periodic, memory_only)
     if type(SilverfishTakeLocalBridgeCommand) == "function" then
         local active
         active, ticket, content = SilverfishTakeLocalBridgeCommand()
+        status_publication.command_attached = active
+        if not active then status_publication.memory_live = false end
         if pending_local and pending_local.ticket ~= ticket then pending_local = nil end
         if pending_local then
             if pending_local.dispatched then return nil, pending_local end
@@ -1828,9 +1830,7 @@ local function write_status(state, current_phase, failure, fields, pending, crat
     if not periodic_due then return end
     status_publication.next_frame = now + 0.25
     -- Share the native buffer with the reply when both need the same rows.
-    if reply_in_native then
-        status_publication.memory_live = published
-    elseif join_in_native then
+    if join_in_native then
         if census_token then
             published, frame = SilverfishPublishLocalBridgeStatusRows(rows, census_token, census_local_health,
                 status_publication.mirror)
@@ -1838,24 +1838,24 @@ local function write_status(state, current_phase, failure, fields, pending, crat
                 status_publication.restore_session_rows(rows, state, current_phase, census_local_health)
                 published = SilverfishPublishLocalBridgeStatusRows(rows)
             end
-            status_publication.memory_live = published
         else
-            status_publication.memory_live = SilverfishPublishLocalBridgeStatusRows(rows)
+            published = SilverfishPublishLocalBridgeStatusRows(rows)
         end
-    else
-        status_publication.memory_live = type(SilverfishPublishLocalBridgeStatus) == "function"
+    elseif not reply_in_native then
+        published = type(SilverfishPublishLocalBridgeStatus) == "function"
             and SilverfishPublishLocalBridgeStatus(frame)
     end
+    status_publication.memory_live = published and status_publication.command_attached
     if resident_title and status_publication.installed and status_publication.memory_live then
         status_publication.context = {phase = current_phase, map = state.map, clients = state.clients, world = state.world, pawn = pawn}
     else
         status_publication.context = nil
     end
-    if status_publication.memory_live and not status_publication.mirror and not file_command then return end
+    if published and not status_publication.mirror and not file_command then return end
     frame = frame or table.concat(rows, "\n")
     if crate_details then frame = frame .. crate_details .. "\n" end
     -- A memory command can publish a newer frame before a file client polls.
-    local destination = file_command and status_publication.memory_live and bridge .. "/command-reply.tsv" or status_path
+    local destination = file_command and published and bridge .. "/command-reply.tsv" or status_path
     local temporary = destination .. ".tmp"
     local file = io.open(temporary, "wb")
     if not file then return end
