@@ -666,7 +666,7 @@ def instrument_crate_pickup_inventory_timing(source):
 
 def crate_pickup_timing(rows, identity, receipt, guest_events, request_us, command_return_us, wall_offset_us):
     press, = (row for row in rows if row[0] == "press" and row[3] == identity)
-    serial, pressed, verified = map(int, press[4:])
+    serial, pressed, verified, _ = map(int, press[4:])
     assert request_us <= pressed <= verified <= command_return_us, press
     drain, = (row for row in rows if row[:3] == ["drain", identity, str(serial)])
     enqueue, = (row for row in rows if row[:3] == ["enqueue", identity, str(serial)] and row[6] == "1")
