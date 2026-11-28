@@ -12,6 +12,7 @@ from tools.silverfish import native_downed_markers, native_kill_volume, native_l
 from tools.silverfish import native_loose_pickup, native_stash
 from tools.silverfish.authored_loot import full_name
 from tools.silverfish.control import current_status, submit
+from tools.silverfish.runtime import MENU
 from tools.silverfish.travel import CROSSROADS
 
 
@@ -58,8 +59,12 @@ def instrument_profile(source, *, stock_receipts=False):
     mark = "status_publication.profile.status_mark"
     native_reply = "published = SilverfishPublishLocalBridgeReplyRows(pending.ticket, rows, periodic_due)"
     lua_join_guard = "(join_in_native or reply_in_native)" if native_reply in status_code else "join_in_native"
+    census_publish = ("            published, frame = SilverfishPublishLocalBridgeStatusRows(rows, census_token, "
+                      "census_local_health,\n                status_publication.mirror)\n")
+    census_rows = census_publish in status_code
     for needle, call in (
-        ("    sequence = sequence + 1\n", f"    {mark}()\n"),
+        ("    sequence = sequence + 1\n", f"    {mark}()\n"
+         "    if status_publication.profile.session_watch then status_publication.profile.session_watch(state) end\n"),
         ("    if not failure then\n", f'    {mark}("status_base_rows")\n'),
         ("        local crate_rows\n", f'        {mark}("status_gameplay_rows")\n'),
         ('    rows[#rows + 1] = ""\n', f'    {mark}("status_world_rows")\n'),
@@ -69,13 +74,25 @@ def instrument_profile(source, *, stock_receipts=False):
     ):
         assert status_code.count(needle) == 1, needle
         if call is None:
+            sample_args = "rows, census_token, census_local_health" if census_rows else "rows"
             status_code = status_code.replace(needle, needle + f'    {mark}("status_concat", #rows - 1, frame and #frame or nil)\n'
-                                              '    status_publication.profile.keep_status_sample(rows)\n')
+                                              f'    status_publication.profile.keep_status_sample({sample_args})\n')
         else:
             status_code = status_code.replace(needle, call + needle)
     status_code = status_code.replace(native_reply, 'published = ' + wrapper
                                       + '("status_native_reply", SilverfishPublishLocalBridgeReplyRows, '
                                         'pending.ticket, rows, periodic_due)')
+    if census_rows:
+        assert status_code.count(census_publish) == 1
+        status_code = status_code.replace(
+            census_publish, f'            published, frame = {wrapper}("status_native_session_publish",\n'
+            '                SilverfishPublishLocalBridgeStatusRows, rows, census_token, census_local_health,\n'
+            '                status_publication.mirror)\n'
+            '            status_publication.profile.session_published(published, frame, rows, state, current_phase,\n'
+            '                census_local_health)\n'
+            + ('            if published then status_publication.profile.stock_receipt("native-status-publication", 0)'
+               ' end\n' if stock_receipts else ''),
+        )
     rest = status_code + boundary + after_status
     if stock_receipts:
         native_publish = "        status_publication.memory_live = SilverfishPublishLocalBridgeStatusRows(rows)\n"
@@ -195,6 +212,54 @@ async def read_collector_modes(host, guest, probe):
         original, active = reply.removesuffix("|end").split(",")
         modes[role] = {"original": original, "active": active}
     return modes
+
+
+async def session_profile_request(seat, probe, action):
+    reply = await probe(seat.bridge, "crossroads-profile", action, reply_end="|end")
+    return reply.removesuffix("|end")
+
+
+async def read_session_title(seat, probe, *, watched=False):
+    reply = await session_profile_request(seat, probe, "sessiontitleresult" if watched else "sessiontitle")
+    if reply == "unavailable":
+        return None
+    assert reply == MENU, reply
+    return {"map": reply, "native_roles_refused": ["host", "client"]}
+
+
+async def read_session_census(host, guest, probe, area):
+    seats = {"host": host, "guest": guest}
+    async def sample(seat):
+        try:
+            async with asyncio.timeout(4):
+                while (reply := await session_profile_request(seat, probe, "sessioncensus")) == "awaiting-publication":
+                    await asyncio.sleep(.15)
+                return reply
+        except TimeoutError as error:
+            raise AssertionError(f"No qualified native session frame was published in {area}") from error
+
+    replies = await asyncio.gather(*(sample(seat) for seat in seats.values()))
+    evidence = {}
+    for seat, reply in zip(seats, replies, strict=True):
+        if reply == "unavailable":
+            continue
+        assert not reply.startswith("session census comparison failed"), (seat, reply)
+        (map_name, pawns, count, bytes_, override_bytes, traveled, frame_bytes, frame_sequence,
+         native_ms, lua_ms, native_kib, lua_kib) = reply.split(",")
+        assert map_name == area and int(pawns) >= 2 and int(count) == 64, (seat, reply)
+        assert min(int(bytes_), int(override_bytes), int(frame_bytes), int(frame_sequence)) > 0, (seat, reply)
+        assert traveled in ("0", "1"), reply
+        evidence[seat] = {"map": map_name, "pawns": int(pawns), "passes_per_path": int(count),
+                          "native_ms": float(native_ms), "legacy_ms": float(lua_ms),
+                          "native_heap_growth_kib": float(native_kib), "legacy_heap_growth_kib": float(lua_kib),
+                          "status_bytes": int(bytes_), "status_bytes_with_local_health_override": int(override_bytes),
+                          "session_and_pawn_rows_matched": True, "inspection_matched": True,
+                          "published_frame_bytes": int(frame_bytes), "published_frame_sequence": int(frame_sequence),
+                          "native_memory_publication_matched_legacy_bytes": True,
+                          "geometry_skipped_health_and_save": True, "invalid_role_and_world_refused": True,
+                          "invalidated_status_token_refused": True, "prior_travel_map_refused": traveled == "1"}
+    assert not evidence or set(evidence) == set(seats), evidence
+    return evidence
 
 
 def instrument_kill_volume(source, *, measure=False, recovery_fixture=False):
@@ -2050,6 +2115,8 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
         profiles = await asyncio.gather(*(read(seat) for seat in seats.values()))
         for seat, profile in zip(seats, profiles, strict=True):
             timings = profile["timings"]
+            if session_census:
+                assert timings.get("status_native_session_publish", {}).get("count", 0) > 0, (seat, area, timings)
             for operation in ("command_mailbox", "crate_inline_scan", "journal_host_context",
                               "death_pawn_receipt", "roster_spawn_qualify",
                               "player_actor_fallback", "stash_ui_binding"):
@@ -2058,7 +2125,8 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             assert 0 < discoveries <= math.ceil(profile["seconds"] / .125) + 1, profile
             lookups = timings.get("player_actor_query", {}).get("count", 0)
             if seat == "guest":
-                assert 0 < lookups <= math.ceil(profile["seconds"]) + 1, (area, lookups, profile["seconds"])
+                assert (session_census or lookups > 0) and lookups <= math.ceil(profile["seconds"]) + 1, (
+                    area, lookups, profile["seconds"])
                 weather_reads = timings.get("weather_status_readback", {}).get("count", 0)
                 assert weather_reads <= math.ceil(profile["seconds"] / .5) + 1, (area, weather_reads)
             else:
@@ -2144,6 +2212,9 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     verified_lookup = "matched world and package, returned an invalid object for the missing path"
     assert all(result in ("unavailable", verified_lookup) for result in object_paths), object_paths
     collector_modes = await read_collector_modes(host, guest, probe)
+    session_census = await read_session_census(host, guest, probe, area)
+    if area == CROSSROADS and session_census:
+        assert all(sample["prior_travel_map_refused"] for sample in session_census.values()), session_census
     scheduler = {}
 
     async def start_scheduler_sample():
@@ -2654,6 +2725,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             assert "capped_idle" in scheduler, "The native scheduler needs a measured low-FPS idle sample"
             scheduler["commands"] = await verify_bridge_scheduler_commands(host, guest, command, area)
     return {"collector_modes": collector_modes, "exact_object_lookup": dict(zip(seats, object_paths, strict=True)),
+            "native_session_census": session_census,
             "idle": idle, "guest_walking": moving,
             "guest_max_displacement_cm": displacement,
             "transport_idle": traffic(before, after_idle), "transport_guest_walking": traffic(before_movement, after_movement),

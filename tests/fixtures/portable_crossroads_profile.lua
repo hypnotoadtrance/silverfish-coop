@@ -13,6 +13,7 @@ local long_interval_limit = 5
 local cached_format = SilverfishFormatLocalStatusRow
 local uncached_format = SilverfishFormatLocalStatusRowUncached
 local last_status_sample
+local last_census_map, watched_title_scope, session_publication
 
 local function record(active, tag, wall_ms, cycles)
     local rows = active.rows[tag]
@@ -90,8 +91,26 @@ function probe.observers_end(started, started_cycles)
     record_call(capture, "delayed_observers", (now - started) / 1000, cycles - started_cycles)
 end
 
-function probe.keep_status_sample(rows)
-    if capture and not capture.status_sample then capture.status_sample = rows end
+function probe.keep_status_sample(rows, token, local_health)
+    if not capture or capture.status_sample then return end
+    if token then
+        local frame = assert(SilverfishFormatNativeSessionStatusRows(rows, token, local_health),
+            "could not render native status sample")
+        local materialized = {}
+        for line in frame:gmatch("[^\n]+") do materialized[#materialized + 1] = line end
+        rows = materialized
+    end
+    capture.status_sample = rows
+end
+
+function probe.session_published(published, frame, rows, state, phase, local_health)
+    if published ~= true or capture or #state.pawns < 2
+        or session_publication and session_publication.map == state.map
+            and session_publication.pawns == #state.pawns then return end
+    local expected = table.move(rows, 1, #rows, 1, {})
+    status_publication.restore_session_rows(expected, state, phase, local_health)
+    session_publication = {map = state.map, pawns = #state.pawns, bytes = type(frame) == "string" and #frame or 0,
+        matched = frame == table.concat(expected, "\n"), sequence = sequence}
 end
 
 local function count_status_bytes(active)
@@ -401,6 +420,139 @@ local function compare_paths(count, native, stock)
     if running then collectgarbage("restart") end
     if not ok then error(native_ms, 0) end
     return native_ms, lua_ms, native_kib, lua_kib
+end
+
+local function compare_title_session(state)
+    local observe = SilverfishObserveNativeSession
+    if type(observe) ~= "function" then return "unavailable" end
+    assert(valid(state.world) and state.map == main_menu and not state.listening and not state.native_session_token,
+        "the observed state is outside the stock title")
+    assert(observe(state.world, "host", state.map, true) == nil
+        and observe(state.world, "client", state.map, false) == nil, "native census accepted the title world")
+    return state.map
+end
+
+local function watch_title_session()
+    if type(SilverfishObserveNativeSession) ~= "function" then return "unavailable" end
+    watched_title_scope = nil
+    probe.session_watch = function(state)
+        if state.map ~= main_menu or state.listening then return end
+        local ok, result = pcall(compare_title_session, state)
+        watched_title_scope = ok and result or "session title comparison failed: " .. tostring(result)
+        session_publication = nil
+        probe.session_watch = nil
+    end
+    return "armed"
+end
+
+local function compare_session_census()
+    local observe, format = SilverfishObserveNativeSession, SilverfishFormatNativeSessionStatusRows
+    if type(observe) ~= "function" then return "unavailable" end
+    assert(type(format) == "function", "missing native session frame formatter")
+    local current, previous = inspect(), inspect(true)
+    local seat = phase(current)
+    if type(current.native_session_token) ~= "number" then
+        local world, controller = previous.world, previous.controller
+        local pawn = previous.local_pawn and previous.local_pawn.pawn
+        local driver = valid(world) and world.NetDriver or nil
+        local instance = valid(world) and world.OwningGameInstance or nil
+        local function describe(call)
+            local ok, value = pcall(call)
+            return ok and tostring(value) or "unavailable"
+        end
+        local function class_name(object)
+            return describe(function() return object:GetClass():GetFullName() end)
+        end
+        local function local_role(object)
+            return describe(function() return object:GetLocalRole() end)
+        end
+        error(("native census declined %s (%s), controller role=%s loading=%s, pawn role=%s, "
+            .. "instance=%s, driver=%s WorldMatches=%s ServerConnection=%s ClientConnections=%s"):format(
+                seat, previous.map, local_role(controller), describe(function() return controller.Loading end),
+                local_role(pawn), class_name(instance), class_name(driver),
+                describe(function() return same_object(driver.World, world) end),
+                describe(function() return valid(driver.ServerConnection) end),
+                describe(function() return #driver.ClientConnections end)), 0)
+    end
+    assert((seat == "hosting" or seat == "connected") and not previous.native_session_token,
+        "current and forced legacy inspection did not use distinct paths")
+    if not session_publication or session_publication.map ~= current.map
+        or session_publication.pawns ~= #current.pawns then return "awaiting-publication" end
+    assert(session_publication.matched and session_publication.bytes > 0,
+        "actual native memory publication and the legacy frame bytes differ")
+    for _, key in ipairs({"map", "clients", "server", "listening", "connection_timeout"}) do
+        assert(current[key] == previous[key], "session inspection differs in " .. key)
+    end
+    local function same_optional(a, b)
+        return (not valid(a) and not valid(b)) or same_object(a, b)
+    end
+    assert(same_object(current.world, previous.world) and same_object(current.controller, previous.controller),
+        "session world or local controller differs")
+    local function compare_pawn(a, b)
+        assert(a and b, "missing observed pawn")
+        for _, key in ipairs({"name", "kind", "slot", "controller", "x", "y", "z", "health", "max_health"}) do
+            assert(a[key] == b[key], "session pawn differs in " .. key)
+        end
+        assert(same_object(a.pawn, b.pawn) and same_optional(a.controller_object, b.controller_object)
+            and same_optional(a.save, b.save), "session pawn, controller, or save differs")
+    end
+    local pawn_count = #current.pawns
+    assert(pawn_count >= 2 and pawn_count == #previous.pawns and #current.guests == #previous.guests,
+        "session roster shape differs")
+    compare_pawn(current.local_pawn, previous.local_pawn)
+    for index, details in ipairs(current.pawns) do compare_pawn(details, previous.pawns[index]) end
+    for index, details in ipairs(current.guests) do compare_pawn(details, previous.guests[index]) end
+
+    local function rows_with_health(local_health)
+        local rows = {"schema\t1", -1, "fixture-literal\tunchanged"}
+        local expected = {rows[1], status_row("session", role, seat, previous.map, previous.clients,
+            previous.server and 1 or 0), rows[3]}
+        for index, details in ipairs(previous.pawns) do
+            if finite(details.x) and finite(details.y) and finite(details.z) then
+                rows[#rows + 1] = index
+                local health = details == previous.local_pawn and local_health or details.health
+                expected[#expected + 1] = status_row("pawn", details.slot or details.kind, details.name, health or "-",
+                    details.x, details.y, details.z, details.controller, details.max_health or "-")
+            end
+        end
+        rows[#rows + 1], expected[#expected + 1] = "", ""
+        assert(#rows == pawn_count + 4, "session row proof did not include every pawn")
+        local selected_health = local_health == nil and previous.local_pawn.health or local_health
+        local actual = format(rows, current.native_session_token, selected_health)
+        assert(actual == table.concat(expected, "\n"), "native session and pawn status bytes differ")
+        return rows, #actual
+    end
+    local rows, bytes = rows_with_health(nil)
+    local _, override_bytes = rows_with_health(0)
+
+    local opposite = role == "host" and "client" or "host"
+    local prior_map = last_census_map
+    last_census_map = current.map
+    local traveled = prior_map ~= nil and prior_map ~= current.map
+    assert(observe(current.world, role, traveled and prior_map or current.map .. "_missing", true) == nil,
+        "native census accepted another map")
+    assert(format(rows, current.native_session_token, nil) == nil, "native status reused an invalidated token")
+    assert(observe(current.world, opposite, current.map, true) == nil
+        and observe(current.local_pawn.pawn, role, current.map, false) == nil,
+        "native census accepted another role or a pawn as its world")
+    local geometry = observe(current.world, role, current.map, false)
+    assert(type(geometry) == "table" and #geometry.pawns == pawn_count
+        and same_object(geometry.world, previous.world)
+        and geometry.connection_timeout == previous.connection_timeout, "geometry-only census lost the current visit or roster")
+    for index, details in ipairs(geometry.pawns) do
+        local expected = previous.pawns[index]
+        assert(same_object(details.pawn, expected.pawn) and details.x == expected.x and details.y == expected.y
+            and details.z == expected.z and details.health == nil and not valid(details.save),
+            "geometry-only census read personal health or differed from the roster")
+    end
+
+    local count = 64
+    local function fast() assert(inspect().native_session_token, "timed census fell back to Lua") end
+    local function legacy() assert(not inspect(true).native_session_token, "legacy benchmark used native census") end
+    local native_ms, lua_ms, native_kib, lua_kib = compare_paths(count, fast, legacy)
+    return ("%s,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f"):format(current.map, pawn_count, count, bytes, override_bytes,
+        traveled and 1 or 0, session_publication.bytes, session_publication.sequence,
+        native_ms, lua_ms, native_kib, lua_kib)
 end
 
 local function compare_kill_volume_visit()
@@ -863,6 +1015,16 @@ LoopInGameThreadWithDelay(50, function()
         else
             message = "unavailable"
         end
+    elseif action == "sessiontitle" and not capture then
+        local ok, value = pcall(function() return compare_title_session(inspect()) end)
+        if ok then message = value else message = "session title comparison failed: " .. tostring(value) end
+    elseif action == "watchsessiontitle" and not capture then
+        message = watch_title_session()
+    elseif action == "sessiontitleresult" and not capture then
+        message = watched_title_scope or "unobserved"
+    elseif action == "sessioncensus" and not capture then
+        local ok, value = pcall(compare_session_census)
+        if ok then message = value else message = "session census comparison failed: " .. tostring(value) end
     elseif action == "pawnvalues" and not capture then
         local ok, value = pcall(compare_pawn_values)
         if ok then message = value else message = "pawn scalar comparison failed: " .. tostring(value) end

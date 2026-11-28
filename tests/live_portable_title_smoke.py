@@ -8677,7 +8677,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_streamed_pickup, "streamed_loose_pickup", "streamed_loose_pickup", verify_streamed_loose_pickup),
         (stock_flashlights, "observatory", "stock_flashlights", verify_stock_flashlights),
         (stock_inventory_fall, "inventory_fall", "stock_inventory_fall", verify_stock_inventory_fall),
-        (stock_guest_title_recovery, "observatory", "stock_guest_title_recovery", verify_stock_guest_title_recovery),
+        (stock_guest_title_recovery, "observatory", "stock_guest_title_recovery",
+         lambda host, guest, pawn: verify_stock_guest_title_recovery(
+             host, guest, pawn, probe=portable_probe_command if crossroads_profile else None)),
         (stock_melee_edges, "observatory", "stock_melee_edges", verify_stock_melee_edges_only),
         (stock_avatar_tail, "observatory", "stock_avatar_tail", verify_stock_avatar_tail),
         (stock_avatar_binoculars, "observatory", "stock_avatar_binoculars", verify_stock_avatar_binoculars),
@@ -9531,9 +9533,14 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
 
             host = first
             if crossroads_profile:
-                from portable_crossroads_profile import read_collector_modes
+                from portable_crossroads_profile import read_collector_modes, read_session_title
 
                 proof["initial_title_collector_modes"] = await read_collector_modes(first, second, portable_probe_command)
+                title_census = await asyncio.gather(*(read_session_title(seat, portable_probe_command)
+                                                      for seat in (first, second)))
+                if any(title_census):
+                    assert all(title_census), title_census
+                    proof["initial_title_native_census"] = dict(zip(("host", "guest"), title_census, strict=True))
             for campaign, checks in resident_campaigns.items():
                 if proof["sessions"]:
                     # A fresh loopback port also preserves the stock first-contact trust exercise.
