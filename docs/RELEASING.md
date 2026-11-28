@@ -4,7 +4,7 @@ The mod is a proof of concept in heavy development. Publish Windows release cand
 
 ## Build the ZIP on Windows
 
-Use a local Windows x64 machine with the qualified Steam installation, the pinned UE4SS v4.0.0 release and game signature, and the matching C++ build dependencies. Build from one committed revision throughout. [Native add-on build](../native/README.md) · [Embedded runtime build and manifest pin](../native/embedded_runtime/README.md#build-and-layout)
+Use a local Windows x64 machine with the qualified Steam installation, the pinned UE4SS v4.0.0 release, and the matching C++ build dependencies. Build from one committed revision throughout. [Native add-on build](../native/README.md) · [Embedded runtime build and manifest pin](../native/embedded_runtime/README.md#build-and-layout)
 
 1. Build the gameplay native DLL with the pinned UE4SS toolchain.
 2. Build the embedded Python runtime from the same Git revision and link the embedded startup DLL with that runtime manifest’s SHA-256.
@@ -17,7 +17,7 @@ $sfVersion = "rc-$($sfRevision.Substring(0,7))"
   --output "$sfReleaseFolder\Silverfish-Coop-RC-$($sfRevision.Substring(0,7)).zip" `
   --version $sfVersion --revision $sfRevision `
   --shipping "$sfGame\SilverFish\Binaries\Win64\SilverFish-Win64-Shipping.exe" `
-  --ue4ss $sfUe4ssRelease --signatures $sfSignatures --include-loader `
+  --ue4ss $sfUe4ssRelease --include-loader `
   --cpp-addon $sfGameplayDll --embedded-addon $sfEmbeddedDll --embedded-runtime $sfRuntime `
   --steam-api $sfSteamApi
 ```

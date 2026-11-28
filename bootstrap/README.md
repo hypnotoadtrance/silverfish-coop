@@ -2,7 +2,7 @@
 
 ## Current Steam installation
 
-Close Project Silverfish. In Steam, choose **Manage → Browse local files**. Copy the ZIP's `SilverFish` folder into the folder containing `SilverFish.exe` and merge it with the existing `SilverFish` folder. Use the same ZIP for a first install or an update. It includes the pinned UE4SS v4.0.0 loader and Silverfish signature. Replace files when prompted. The ZIP replaces the bundled UE4SS settings INI during an update. Updates use the existing co-op workspace. The default location is `%LOCALAPPDATA%\SilverfishCoop\Resident`.
+Close Project Silverfish. In Steam, choose **Manage → Browse local files**. Copy the ZIP's `SilverFish` folder into the folder containing `SilverFish.exe` and merge it with the existing `SilverFish` folder. Use the same ZIP for a first install or an update. It includes the pinned UE4SS v4.0.0 loader. Replace files when prompted. The ZIP replaces the bundled UE4SS settings INI during an update. Updates use the existing co-op workspace. The default location is `%LOCALAPPDATA%\SilverfishCoop\Resident`.
 
 Launch the game through Steam after extraction. The first screen offers **Singleplayer** and **Multiplayer**. Choose **Host** to create or load a campaign, or **Join by Direct IP** to connect to a host. Maintainers build this ZIP with `python -m bootstrap.resident_drop`. [Release build instructions](../docs/RELEASING.md)
 

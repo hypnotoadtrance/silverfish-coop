@@ -38,10 +38,6 @@ class ResidentDropTests(unittest.TestCase):
             pins[relative] = sha256(contents).hexdigest()
         self.enterContext(patch.object(install_stock, "UE4SS_OFFICIAL", pins))
         self.write(self.ue4ss / "ue4ss/LICENSE", b"notice")
-        self.signatures = self.root / "Signatures"
-        signature = b"approved signature"
-        self.write(self.signatures / install_stock.SIGNATURE.name, signature)
-        self.enterContext(patch.object(install_stock, "SIGNATURE_SHA256", sha256(signature).hexdigest()))
 
         self.scripts = {
             "main.lua": b"return true\r\n",
@@ -63,12 +59,12 @@ class ResidentDropTests(unittest.TestCase):
         path.write_bytes(contents)
         return path
 
-    def assemble(self, filename, *, include_loader=False, steam_api=None):
+    def assemble(self, filename, *, include_loader=False, steam_api=None, signatures=None):
         return resident_drop.assemble(
             self.root / filename, version="fixture-1", revision="a" * 40, shipping=self.shipping,
             cpp_addon=self.gameplay, embedded_addon=self.root / "embedded.dll",
             embedded_runtime=self.root / "runtime", ue4ss=self.ue4ss,
-            signatures=self.signatures if include_loader else None, include_loader=include_loader, steam_api=steam_api,
+            signatures=signatures, include_loader=include_loader, steam_api=steam_api,
         )
 
     def test_update_contains_only_mod_files_and_versioned_runtime(self):
@@ -119,8 +115,12 @@ class ResidentDropTests(unittest.TestCase):
                 (binary / install_stock.PROXY).as_posix(),
                 (binary / install_stock.SETTINGS).as_posix(),
                 (binary / "ue4ss/LICENSE").as_posix(),
-                (binary / "ue4ss" / install_stock.SIGNATURE).as_posix(),
             })
+
+    def test_older_build_command_can_supply_the_retired_signatures_argument(self):
+        result = self.assemble("older-command.zip", include_loader=True, signatures=self.root / "missing-signatures")
+        with ZipFile(result["file"]) as archive:
+            self.assertFalse(any("/UE4SS_Signatures/" in name for name in archive.namelist()))
 
     def test_rejects_gameplay_addon_missing_a_resident_binding(self):
         image = self.gameplay.read_bytes()
@@ -154,6 +154,7 @@ class ResidentDropTests(unittest.TestCase):
             mods / "mods.txt": b"UnrelatedMod : 1",
             mods / "UnrelatedMod/Scripts/main.lua": b"print('keep')",
             bin_dir / runtime.SHIPPING.name: b"original stock binary",
+            bin_dir / "ue4ss" / install_stock.SIGNATURE: b"signature left by an older release",
         }
         for file, contents in workspace_records.items():
             self.write(file, contents)

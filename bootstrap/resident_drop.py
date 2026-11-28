@@ -64,11 +64,11 @@ _STEAM_TRIAL = (
     "relay. An optional host password still applies.\n"
 )
 _FULL_INSTALL = ("Use this ZIP for a first install or an update. It includes the pinned\n"
-                 "UE4SS v4.0.0 loader and Project Silverfish signature. Updating with this\n"
+                 "UE4SS v4.0.0 loader. Updating with this\n"
                  "ZIP replaces bundled UE4SS files, including UE4SS-settings.ini.")
-_UPDATE = ("This archive is for a game with the supported UE4SS v4.0.0 loader and\n"
-           "Project Silverfish signature already in place. If you need those\n"
-           "files, use the matching archive that includes UE4SS.")
+_UPDATE = ("This archive is for a game with the supported UE4SS v4.0.0 loader\n"
+           "already in place. For a first install, use the matching archive\n"
+           "that includes UE4SS.")
 
 
 def _json(value: dict) -> bytes:
@@ -119,15 +119,17 @@ def _features(work: Path, stage: dict, payload: dict[Path, bytes], loader: bytes
 def assemble(output: Path, *, version: str, revision: str, shipping: Path, cpp_addon: Path,
              embedded_addon: Path, embedded_runtime: Path, ue4ss: Path, signatures: Path | None = None,
              include_loader: bool = False, cpp_addon_sha256: str | None = None, steam_api: Path | None = None) -> dict:
-    """Package an exact committed Lua and embedded runtime pair for a qualified stock executable."""
+    """Package an exact committed Lua and embedded runtime pair for a qualified stock executable.
+
+    Accept the retired signatures argument for existing build commands. The pinned loader uses
+    stock Kismet text conversion, so the old FText constructor signature is omitted.
+    """
     if not layout.VERSION.fullmatch(version) or version.endswith("."):
         raise ValueError("Supply a version made from letters, numbers, dots, underscores, or hyphens")
     output = Path(os.path.abspath(output))
     if output.suffix.lower() != ".zip" or os.path.lexists(output):
         raise ValueError("Output must name a new ZIP")
     layout._ordinary(output.parent, directory=True)
-    if include_loader and signatures is None:
-        raise ValueError("Supply the approved signature folder with --include-loader")
 
     def absolute(path: Path) -> Path:
         return Path(os.path.abspath(path))
@@ -175,15 +177,13 @@ def assemble(output: Path, *, version: str, revision: str, shipping: Path, cpp_a
     for module in ("SilverfishCoop", runtime.CPP_MOD_NAME, install_stage.MOD):
         payload[_MODS / module / "enabled.txt"] = b""
     if include_loader:
-        proxy, signature, license_name = install_stock.PROXY, install_stock.SIGNATURE, Path("ue4ss/LICENSE")
+        proxy, license_name = install_stock.PROXY, Path("ue4ss/LICENSE")
         settings = install_stock.SETTINGS
         payload.update({
             _BINARIES / runtime.CPP_RUNTIME_DLL: loader,
             _BINARIES / proxy: install_stock._pinned(ue4ss / proxy, install_stock.UE4SS_OFFICIAL[proxy]),
             _BINARIES / settings: install_stock._pinned(ue4ss / settings, install_stock.UE4SS_OFFICIAL[settings]),
             _BINARIES / license_name: release_bundle._read(ue4ss / license_name, 32 * 1024),
-            _BINARIES / "ue4ss" / signature: install_stock._pinned(absolute(signatures) / signature.name,
-                                                                  install_stock.SIGNATURE_SHA256),
         })
 
     with TemporaryDirectory(prefix=".resident-drop-", dir=output.parent) as temporary:
@@ -210,8 +210,8 @@ def main() -> None:
     parser.add_argument("--revision", required=True)
     for artifact in ("shipping", "ue4ss", "cpp-addon", "embedded-addon", "embedded-runtime"):
         parser.add_argument("--" + artifact, type=Path, required=True)
-    parser.add_argument("--signatures", type=Path)
-    parser.add_argument("--include-loader", action="store_true", help="include the pinned UE4SS loader and game signature")
+    parser.add_argument("--signatures", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--include-loader", action="store_true", help="include the pinned UE4SS loader")
     parser.add_argument("--cpp-addon-sha256")
     parser.add_argument("--steam-api", type=Path, help="include the pinned Windows x64 Valve Steamworks redistributable")
     try:

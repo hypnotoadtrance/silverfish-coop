@@ -736,7 +736,7 @@ async def native_startup_receipt(mailbox, process, *, ordinary_after=None):
     raise RuntimeError("The isolated game exited before the native title startup receipt")
 
 
-async def verify_cold_native_title(game, work, release, stock_slots, proof, *, rendered):
+async def verify_cold_native_title(game, work, release, stock_slots, proof, *, rendered, scope_commands=False):
     mods = game / runtime.SHIPPING.parent / "ue4ss/Mods"
     mods_list = mods / "mods.txt"
     enabled = mods / "SilverfishCoop/enabled.txt"
@@ -769,6 +769,10 @@ async def verify_cold_native_title(game, work, release, stock_slots, proof, *, r
             mailbox = await discover_mailbox(mailbox_root, process)
             assert runtime.read_json(mailbox / embedded_startup.UNIFIED_FILE) == release.selection
             receipt = await native_startup_receipt(mailbox, process)
+            if scope_commands:
+                scope_receipt = await wait_native_title_scope_receipt(mailbox, process)
+                proof["scope_commands"] = scope_receipt
+                assert scope_receipt.get("verified") is True and scope_receipt.get("pid") == process.pid, scope_receipt
             raw = log.read_bytes()
             current_log = raw[len(prior_log):] if prior_log and raw.startswith(prior_log) else raw
             assert b"Mod 'SilverfishCoop' disabled in mods.txt." in current_log, "UE4SS did not report disabling the Lua module"
@@ -788,6 +792,17 @@ async def verify_cold_native_title(game, work, release, stock_slots, proof, *, r
             mods_list.unlink()
         suspended.rename(enabled)
     assert proof["process_closed"]
+
+
+async def wait_native_title_scope_receipt(mailbox, process):
+    path = mailbox / "native-title-scope-fixture.json"
+    async with asyncio.timeout(20):
+        while process.poll() is None:
+            try:
+                return runtime.read_json(path, limit=8192)
+            except (FileNotFoundError, PermissionError):
+                await asyncio.sleep(.1)
+    raise RuntimeError("The isolated game exited before the native title scope receipt")
 
 
 def fingerprint(path: Path) -> str | None:
