@@ -7299,7 +7299,7 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
     }
 
 
-async def claim_stock_crate_item(host, guest, pawn, crate, roll, host_state, guest_state):
+async def claim_stock_crate_item(host, guest, pawn, crate, roll, host_state, guest_state, *, preview=False):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     selected = min(roll["items"], key=lambda item: item["class_path"] in native_loot.CASH_RANGES)
     guid = selected["guid"]
@@ -7318,6 +7318,9 @@ async def claim_stock_crate_item(host, guest, pawn, crate, roll, host_state, gue
         await wait(guest_run, lambda state: (point := state["game"]["pawns"]["local"].get("location"))
                    and math.dist(point, position) < 35)
         try:
+            if preview:
+                observed = await guest.bridge.command(native_world_loot.FIXTURE, identity, "preview", timeout=5)
+                assert observed["ack"]["message"] == "world loot preview canceled on exact press"
             picked = await guest.bridge.command(native_world_loot.FIXTURE, identity, timeout=5)
         except RuntimeError as error:
             if not str(error).startswith("world_loot_fixture_focus_unavailable:"):

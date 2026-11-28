@@ -18,6 +18,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <Helpers/String.hpp>
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
@@ -91,7 +92,8 @@ namespace
         int stack_count{};
         Clock::time_point expiry{};
         std::int64_t intent{}, last_press{};
-        Clock::time_point intent_expiry{};
+        Clock::time_point intent_expiry{}, preview_until{};
+        std::int64_t preview_press{};
         bool visible{}, claimable{true}, simulating{};
         std::optional<Motion> motion;
     };
@@ -239,6 +241,14 @@ namespace
         return true;
     }
 
+    void restore_pickup_preview(Projection& entry)
+    {
+        auto& [projection, lease] = entry;
+        if (!std::exchange(lease.preview_press, 0) || !lease.visible) return;
+        auto* actor = static_cast<U::AActor*>(projection.object.Get());
+        if (mutable_actor(actor)) actor->SetActorHiddenInGame(false);
+    }
+
     void conceal(Projection& entry)
     {
         auto& [projection, lease] = entry;
@@ -250,6 +260,7 @@ namespace
         }
         lease.visible = false;
         lease.intent = 0;
+        lease.preview_press = 0;
         lease.motion.reset();
         auto* actor = static_cast<U::AActor*>(projection.object.Get());
         if (!mutable_actor(actor)) return;
@@ -296,6 +307,7 @@ namespace
             if (!entry.actor.object.Get()) continue;
             if (!same_scene(entry.lease) || now >= entry.lease.expiry + hidden_retention) clear(entry);
             else if (!scope_current(entry.lease)) conceal(entry);
+            else if (entry.lease.preview_press && now >= entry.lease.preview_until) restore_pickup_preview(entry);
         }
         while (active_projection_slots && !projections[active_projection_slots - 1].actor.object.Get())
             --active_projection_slots;
@@ -956,7 +968,11 @@ namespace
             lease.stack_count = stack_count;
             const bool changed_mode = lease.claimable != claimable;
             lease.claimable = claimable;
-            if (changed_mode) lease.intent = 0;
+            if (changed_mode)
+            {
+                lease.intent = 0;
+                restore_pickup_preview(entry);
+            }
             if ((!changed_mode && lease.visible) || (inert(existing) && show(lease, existing)))
                 return report(lua, true, "projected");
             clear(entry);
@@ -1037,6 +1053,7 @@ namespace
             return report(lua, false, "stock_world_loot_physics_body_unverified");
         }
         physics->SetPropertyValueInContainer(actor, simulate);
+        restore_pickup_preview(*entry);
         lease.simulating = simulate;
         lease.motion.reset();
         lease.intent = 0;
@@ -1078,12 +1095,41 @@ namespace
         for (auto& entry : std::span{projections}.first(active_projection_slots))
         {
             auto& lease = entry.lease;
+            auto* actor = static_cast<U::AActor*>(entry.actor.object.Get());
             if (!lease.intent || Clock::now() >= lease.intent_expiry ||
-                !lease.visible || pawn != lease.pawn.Get() || !scope_current(lease)) continue;
-            lease.intent = 0;
+                !lease.visible || pawn != lease.pawn.Get() || !scope_current(lease) || !mutable_actor(actor)) continue;
+            const auto press = std::exchange(lease.intent, 0);
+            if (&entry != &projections.front() && lease.claimable && !lease.simulating &&
+                !lease.preview_press && boolean(actor, STR("bHidden"), false))
+            {
+                // Keep the claim lease and query collision live while the world item is hidden locally.
+                actor->SetActorHiddenInGame(true);
+                lease.preview_press = press;
+                lease.preview_until = Clock::now() + std::chrono::milliseconds(1500);
+            }
             lua.set_string(lease.epoch);
             lua.set_string(lease.id);
-            return 2;
+            lua.set_integer(press);
+            return 3;
+        }
+        return 0;
+    }
+
+    int cancel_pickup_preview(const Lua& lua)
+    {
+        if (!ready() || lua.get_stack_size() != 4 || !lua.is_integer(1) || !lua.is_string(2) ||
+            !lua.is_string(3) || !lua.is_integer(4)) return 0;
+        auto* pawn = input::current_local_pawn(static_cast<std::uintptr_t>(lua.get_integer()));
+        const std::string epoch{lua.get_string()}, id{lua.get_string()};
+        const auto press = lua.get_integer();
+        if (!pawn || press <= 0 || !id_valid(epoch) || !id_valid(id)) return 0;
+        for (auto& entry : std::span{projections}.first(active_projection_slots))
+        {
+            const auto& lease = entry.lease;
+            if (lease.preview_press != press || lease.pawn.Get() != pawn ||
+                lease.epoch != epoch || lease.id != id || !scope_current(lease)) continue;
+            restore_pickup_preview(entry);
+            break;
         }
         return 0;
     }
@@ -1284,6 +1330,7 @@ namespace silverfish::native_guest_drop_projection
         lua.register_function("SilverfishSetNativeWorldLootPhysics", set_world_item_physics);
         lua.register_function("SilverfishReadNativeGuestDropProjection", read_projection);
         lua.register_function("SilverfishTakeNativeGuestDropProjectionPress", take_press);
+        lua.register_function("SilverfishCancelNativeWorldLootPreview", cancel_pickup_preview);
         lua.register_function("SilverfishClearNativeGuestDropProjection", clear_lua);
     }
 

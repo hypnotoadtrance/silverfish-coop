@@ -94,14 +94,12 @@ end
 
 function projection.take_press(pawn)
     if not valid(pawn) or type(SilverfishTakeNativeGuestDropProjectionPress) ~= "function" then return end
-    local epoch, id = SilverfishTakeNativeGuestDropProjectionPress(pawn:GetAddress())
+    local epoch, id, sequence = SilverfishTakeNativeGuestDropProjectionPress(pawn:GetAddress())
     if not identifier(epoch) or not identifier(id) then return end
     local item = world_items[id]
     if item and item.epoch == epoch and same(item.pawn, pawn) then
-        local active, observed_epoch, observed_id, actor, sequence = SilverfishReadNativeGuestDropProjection(item.slot)
-        if active and observed_epoch == epoch and observed_id == id and math.type(sequence) == "integer" and sequence > 0 then
-            local qualified = drop_items.actor_path(item.class, item.map, world_path.leaf(item.map), actor)
-            return "world-loot:" .. epoch .. ":" .. id .. ":" .. tostring(sequence), qualified and actor or nil
+        if math.type(sequence) == "integer" and sequence > 0 then
+            return "world-loot:" .. epoch .. ":" .. id .. ":" .. tostring(sequence)
         end
         return
     end
@@ -109,6 +107,17 @@ function projection.take_press(pawn)
         local actor = proof()
         return "stack-drop:" .. epoch .. ":" .. id, actor
     end
+end
+
+function projection.cancel_preview(state, phase, target)
+    local epoch, id, press = target:match("^world%-loot:([0-9a-f]+):([0-9a-f]+):(%d+)$")
+    local pawn = epoch and local_pawn(state, phase)
+    if not pawn or type(SilverfishCancelNativeWorldLootPreview) ~= "function"
+        or not identifier(epoch) or not identifier(id) then return end
+    local sequence = math.tointeger(press)
+    if not sequence or sequence <= 0 or sequence >= 2^53 then return end
+    SilverfishCancelNativeWorldLootPreview(pawn:GetAddress(), epoch, id, sequence)
+    return true
 end
 
 function projection.authority_sight(state, phase, pawn, id, position)

@@ -632,6 +632,9 @@ local arguments = {
 function pickup.command(fields, state, phase, status_row)
     local action = fields[2]
     if action == "native-pickup-cancel-preview" then
+        if #fields == 3 and loot_projection.cancel_preview(state, phase, fields[3]) then
+            return "pickup preview released"
+        end
         if #fields ~= 3 or not binding or not same(binding.world, state.world)
             or phase ~= (binding.host and "hosting" or "connected") then
             error("pickup_preview_scope_unavailable", 0)
@@ -922,14 +925,14 @@ end
 
 function pickup.preview_input(pawn, target, projected_actor)
     if not binding or not same(binding.pawn, pawn) or type(target) ~= "string" or previews[target] then return end
-    if binding.host and (not projected_actor or not target:match("^world%-loot:%x+:%x+:")) then return end
+    if binding.host or target:match("^world%-loot:") then return end
     local profile = binding.active and binding.active[target]
     local loose = target:match("^loose:(.+)$")
     local path = profile and profile.path or loose_actor_path(loose, binding.map)
         or projected_actor and projected_actor:match("^%S+ (/[A-Za-z0-9_./:%-]+)$")
     local actor = path and StaticFindObject(path)
     if not valid(actor) or (projected_actor and actor:GetFullName() ~= projected_actor)
-        or (binding.host and actor.bReplicates ~= false) or actor.bHidden or actor:IsActorBeingDestroyed()
+        or actor.bHidden or actor:IsActorBeingDestroyed()
         or not world_path.visible_actor_level(actor, binding.world) then return end
     if not valid(mesh_class) then mesh_class = StaticFindObject("/Script/Engine.MeshComponent") end
     if not valid(mesh_class) then return end

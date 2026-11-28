@@ -23,6 +23,32 @@ def install_fixture(game):
     return suite.portable_script_overlay(game, "native_loot_actions.lua", inject)
 
 
+def install_preview_fixture(game):
+    def inject(source):
+        entry = '        if #fields ~= 3 or not item or not same(pawn, item.pawn) or not same(state.world, item.world) then'
+        condition = ('        local preview_fixture = #fields == 4 and fields[4] == "preview" and headless and title_fixtures\n'
+                     '        if (#fields ~= 3 and not preview_fixture) or not item or not same(pawn, item.pawn)\n'
+                     '            or not same(state.world, item.world) then')
+        point = '            return "stock world loot interaction intercepted"'
+        check = '''
+            if preview_fixture then
+                local press_epoch, press_id, press = SilverfishTakeNativeGuestDropProjectionPress(pawn:GetAddress())
+                assert(press_epoch == epoch and press_id == id and press == after)
+                assert(actor.bHidden and actor:GetActorEnableCollision(), "local preview did not preserve collision")
+                assert(SilverfishReadNativeGuestDropProjection(item.slot), "preview retired the claim lease")
+                projection.cancel_preview(state, phase, "world-loot:" .. epoch .. ":" .. id .. ":" .. (press - 1))
+                assert(actor.bHidden, "a stale rejection restored the wrong pickup preview")
+                assert(projection.cancel_preview(state, phase, "world-loot:" .. epoch .. ":" .. id .. ":" .. press))
+                assert(not actor.bHidden and actor:GetActorEnableCollision(), "a rejected preview did not restore the actor")
+                return "world loot preview canceled on exact press"
+            end
+'''
+        assert source.count(entry) == source.count(point) == 1
+        return source.replace(entry, condition).replace(point, check + point)
+
+    return suite.portable_script_overlay(game, "native_guest_drop_projection.lua", inject)
+
+
 async def verify_transfer(host, guest, _pawn):
     checkpoint = suite.campaign_save_hashes(host.campaign)
     evidence = {}
@@ -123,8 +149,24 @@ async def verify_streamed_transfer(host, guest, pawn):
 
 async def verify_crates(host, guest, pawn):
     return {"persistent": await verify_transfer(host, guest, pawn),
+            "pickup_preview": await verify_pickup_preview(host, guest, pawn),
             "streamed": await verify_streamed_transfer(host, guest, pawn),
             "runtime": await verify_runtime_transfer(host, guest, pawn)}
+
+
+async def verify_pickup_preview(host, guest, pawn):
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    before = suite.campaign_save_hashes(host.campaign)
+    crate = next(name for name, area in native_loot.CRATES.items() if area == OBSERVATORY
+                 and name.endswith(":PersistentLevel.LootCrate_Small_BP_C_1"))
+    opened = await suite.submit(host_run, "native-loot-open", target=crate)
+    assert opened["ok"] and opened["native_loot_roll"]["items"], opened
+    host_state, guest_state = await asyncio.gather(*(suite.wait(run, lambda frame:
+        crate in frame.get("gameplay", {}).get(native_loot.STATE_KEY, {})) for run in (host_run, guest_run)))
+    pickup = await suite.claim_stock_crate_item(host, guest, pawn, crate, opened["native_loot_roll"],
+                                               host_state, guest_state, preview=True)
+    assert suite.campaign_save_hashes(host.campaign) == before
+    return {**pickup, "rejected_preview_restored_same_actor": True, "checkpoint_unchanged": True}
 
 
 async def verify_runtime_transfer(host, guest, pawn):
@@ -192,6 +234,7 @@ async def exercise(work, first, second, saved):
     with ExitStack() as fixtures:
         for game in (first, second):
             fixtures.enter_context(install_fixture(game))
+            fixtures.enter_context(install_preview_fixture(game))
         await suite.verify(work, first, second, saved, crate_transfer_check=verify_crates)
 
 

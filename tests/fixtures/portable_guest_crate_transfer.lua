@@ -116,6 +116,7 @@
             for index, item in ipairs(spawned) do
                 assert(rows[index].class_path == item.class_path and item.object:GetActorEnableCollision())
             end
+            retire_items(spawned)
             actions.transfer_fixture = { world = state.world, crate = requested, rows = rows }
             return table.concat({#rows, lucky and "1" or "0", source, tostring(reply[6])}, "|")
         elseif mode == "read" and phase == "connected" then
