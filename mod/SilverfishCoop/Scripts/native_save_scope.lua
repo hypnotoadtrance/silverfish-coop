@@ -29,9 +29,11 @@ end
 
 local function prepare_native_guest(world)
     local prepare = SilverfishPrepareNativeGuestSaveView
-    local save, reason
-    if type(prepare) == "function" then save, reason = prepare(world, active.id) end
-    if not valid(save) then error(reason or "The game did not retain the isolated co-op guest view", 0) end
+    local save, result
+    if type(prepare) == "function" then save, result = prepare(world, active.id) end
+    if not valid(save) then
+        error(type(result) == "string" and result or "The game did not retain the isolated co-op guest view", 0)
+    end
     local guest = active.guest
     if guest then
         if not same(guest.save, save) then error("The isolated co-op guest view changed identity", 0) end

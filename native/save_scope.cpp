@@ -302,7 +302,7 @@ namespace
         return fields.installed(save, guest->slot) ? save : nullptr;
     }
 
-    U::UObject* prepare_guest(U::UWorld* world, std::string_view id, std::string_view& reason)
+    U::UObject* prepare_guest(U::UWorld* world, std::string_view id, std::string_view& reason, bool& created)
     {
         const auto refuse = [&reason](std::string_view error) -> U::UObject* { reason = error; return nullptr; };
         const auto fields = guest_fields(world, &reason);
@@ -348,7 +348,9 @@ namespace
             L"SFCoopGuest_" + RC::to_wstring(id), std::wstring{current->current_slot()}, current->current_autosave()};
         if (!reference_guest(current->instance, save, true)) return refuse("guest_save_reference_readback");
         guest.emplace(std::move(snapshot));
-        return install_guest(*current) ? save : refuse("guest_save_install_readback");
+        if (!install_guest(*current)) return refuse("guest_save_install_readback");
+        created = true;
+        return save;
     }
 
     bool remember_travel_step(const GuestFields& fields, U::UObject* save, std::string_view id, double step)
@@ -551,7 +553,8 @@ namespace
         auto* stack = lua.get_lua_state();
         const auto id = stack_id(stack, 2, 2);
         std::string_view reason = "guest_save_invalid_scope_id";
-        auto* save = scope_id(id) ? prepare_guest(wrapped<RC::LuaType::UWorld>(lua, 1, "UWorld"), id, reason) : nullptr;
+        bool created{};
+        auto* save = scope_id(id) ? prepare_guest(wrapped<RC::LuaType::UWorld>(lua, 1, "UWorld"), id, reason, created) : nullptr;
         if (!save)
         {
             lua_pushnil(stack);
@@ -559,7 +562,8 @@ namespace
             return 2;
         }
         RC::LuaType::auto_construct_object(lua, save);
-        return 1;
+        lua_pushboolean(stack, created);
+        return 2;
     }
 
     int lua_rebind_guest(const Lua& lua)
