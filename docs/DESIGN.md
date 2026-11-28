@@ -93,6 +93,8 @@ An ordinary placed container can use its live stock class and actor path as its 
 
 For an ordinary container spawned by the host in the persistent level, replicate the stock actor and give it a shared ID through an Unreal actor reference. Each seat uses its own actor path to apply local stock behavior. Keep the shared roll in memory for the current visit. Release it when the host observes the crate end play or starts a new visit. The checkpoint still saves collected items with their owners.
 
+For remote avatars, reuse the stock NPC poses and animations for actions that NPCs already perform, including weapon hold, aim, and fire. Use the matching equipment and action state so the game selects the correct stock pose. Reserve custom posing for actions or rigs without a suitable stock path.
+
 ## Compatibility with game updates and other mods
 
 - Discover quest offers, objective items, progress, and reward data from the host’s active stock boards and journal. Use stock acceptance and completion paths for quests with the same recipe. Publish the resulting journal and campaign changes to the party.

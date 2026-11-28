@@ -16,6 +16,10 @@ Use the host to relay outcomes and settle conflicts over shared resources such a
 
 When adding or changing an integration, trace both players' normal game input through local feedback, the network message, and the other player's applied result. Record any host round trip that still gates normal play in the [gameplay path audit](docs/DESIGN.md#gameplay-path-audit). Test simultaneous claims and late or repeated results where the action can race.
 
+# Avatar animation
+
+Use the base game's existing poses and animations whenever they fit the action. For remote avatars, check the stock NPC animation path first for weapon hold, aim, fire, reload, melee, and other actions NPCs already perform. Feed the matching stock states and equipment data into that path and reuse its assets as authored. Check idle, aim, and action transitions with the relevant equipment and avatar rigs before adding custom animation or pose adjustments.
+
 # Automated testing
 
 Reuse the existing isolated game replicas. For new replicas on the same volume, pass `stage --stock-cache` with the project-local shared stock cache so the IoStore archive, radio tracks, and TV clips use hard links. The cache has `SilverFish-Windows.ucas` at its root and stores media under its original `SilverFish/Content` paths. Keep mods, configuration and user data private to each replica. Keep the shared stock copy separate from the live Steam installation.
