@@ -2306,6 +2306,58 @@ namespace
         return 1;
     }
 
+    int read_avatar_motion(const Lua& lua)
+    {
+        auto* stack = lua.get_lua_state();
+        if (!available() || !scope.host || lua_gettop(stack) != 2 ||
+            !lua_isinteger(stack, 1) || !lua_isinteger(stack, 2)) return 0;
+        const auto world_address = lua_tointeger(stack, 1);
+        const auto pawn_address = lua_tointeger(stack, 2);
+        if (address(scope.world.Get()) != world_address || world_address <= 0 || pawn_address <= 0) return 0;
+        auto* pawn = address(scope.pawn.Get()) == pawn_address
+            ? silverfish::native_interaction_input::current_local_pawn(pawn_address)
+            : remote_avatar_pawn(world_address, pawn_address);
+        if (!pawn) return 0;
+
+        struct MotionReader
+        {
+            Unreal::FWeakObjectPtr type, function;
+            Unreal::FBoolProperty *aiming{}, *sprinting{};
+        };
+        using Velocity = std::array<double, 3>;
+        static MotionReader reader;
+        auto* type = pawn->GetClassPrivate();
+        auto* velocity = static_cast<Unreal::UFunction*>(reader.function.Get());
+        if (type != reader.type.Get() || !velocity)
+        {
+            if (type != find<Unreal::UClass>(pawn_path)) return 0;
+            velocity = find<Unreal::UFunction>(STR("/Script/Engine.Actor:GetVelocity"));
+            auto* result = field<Unreal::FStructProperty>(velocity, STR("ReturnValue"));
+            auto* vector = find<Unreal::UScriptStruct>(STR("/Script/CoreUObject.Vector"));
+            auto* aiming = field<Unreal::FBoolProperty>(type, STR("Aiming"));
+            auto* sprinting = field<Unreal::FBoolProperty>(type, STR("Sprinting"));
+            if (!result || result != velocity->GetReturnProperty() || !vector || !aiming || !sprinting ||
+                velocity != type->GetFunctionByNameInChain(velocity->GetFName()) ||
+                !velocity->HasAnyFunctionFlags(Unreal::FUNC_Native) || velocity->GetNumParms() != 1 ||
+                velocity->GetParmsSize() != sizeof(Velocity) || result->GetOffset_Internal() != 0 ||
+                result->GetSize() != sizeof(Velocity) || result->GetStruct().Get() != vector) return 0;
+            constexpr std::array axes{STR("X"), STR("Y"), STR("Z")};
+            for (std::size_t index = 0; index < axes.size(); ++index)
+            {
+                auto* axis = field<Unreal::FDoubleProperty>(vector, axes[index]);
+                if (!axis || axis->GetOffset_Internal() != static_cast<int>(index * sizeof(double))) return 0;
+            }
+            reader = {type, velocity, aiming, sprinting};
+        }
+        // Call stock GetVelocity so the engine still chooses the movement or physics source.
+        Velocity speed{};
+        pawn->ProcessEvent(velocity, speed.data());
+        lua_pushboolean(stack, reader.aiming->GetPropertyValueInContainer(pawn));
+        lua_pushboolean(stack, reader.sprinting->GetPropertyValueInContainer(pawn));
+        lua_pushboolean(stack, speed[0] * speed[0] + speed[1] * speed[1] > 400.0);
+        return 3;
+    }
+
     struct HeadRotationWriter
     {
         static constexpr int parameter_capacity = 512, parameter_alignment = 16;
@@ -2924,6 +2976,7 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishReadNativeLocalLean", read_local_lean);
         lua.register_function("SilverfishReadNativeRemoteAim", read_remote_aim);
         lua.register_function("SilverfishReadNativeAvatarSeconds", read_avatar_seconds);
+        lua.register_function("SilverfishReadNativeAvatarMotion", read_avatar_motion);
         lua.register_function("SilverfishWriteNativeRemoteHeadRotation", write_remote_head_rotation);
         lua.register_function("SilverfishReadNativeReadyRoster", read_ready_roster);
         lua.register_function("SilverfishReadNativeSwitchPower", read_switch_power);

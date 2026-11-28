@@ -176,9 +176,17 @@ local function sync_local_aim(state, phase)
     end
 end
 
-local function has_horizontal_motion(pawn)
+local function stock_motion(pawn)
     local velocity = pawn:GetVelocity()
-    return velocity.X^2 + velocity.Y^2 > 20^2
+    return pawn.Aiming == true, pawn.Sprinting == true, velocity.X^2 + velocity.Y^2 > 20^2
+end
+
+local function observe_motion(world_address, pawn, address)
+    if type(SilverfishReadNativeAvatarMotion) == "function" then
+        local aiming, sprinting, moving = SilverfishReadNativeAvatarMotion(world_address, address)
+        if aiming ~= nil then return aiming, sprinting, moving end
+    end
+    return stock_motion(pawn)
 end
 
 local function observe(state, phase)
@@ -191,6 +199,7 @@ local function observe(state, phase)
         observed_characters, observed_world = {}, state.world
     end
     local known, weapons, characters, player_ids = {}, {}, {}, {}
+    local world_address = valid(state.world) and state.world:GetAddress() or 0
     for _, details in ipairs(state.pawns) do
         local ok, id = pcall(player_id, details)
         if ok and id ~= nil then
@@ -199,16 +208,19 @@ local function observe(state, phase)
                 observations[id] = nil
             else
                 known[id] = true
-                local read, body, head, pawn, save = pcall(function()
+                local read, body, head, pawn, save, local_pawn = pcall(function()
                     local pawn, save = details.pawn
-                    if pawn:IsLocallyControlled() then
+                    local local_pawn = pawn:IsLocallyControlled()
+                    if local_pawn then
                         save = state.world.OwningGameInstance.SaveSlot_Ref
                         if not pawn:HasAuthority() or not valid(save) or not valid(pawn.Save)
                             or pawn.Save:GetAddress() ~= save:GetAddress() then return end
                     else
                         pawn, save = guest_save.observed_item_context(state, phase, details)
                     end
-                    if valid(pawn) and valid(save) then return worn(save.PlayerArmor), worn(save.PlayerHelmet), pawn, save end
+                    if valid(pawn) and valid(save) then
+                        return worn(save.PlayerArmor), worn(save.PlayerHelmet), pawn, save, local_pawn
+                    end
                 end)
                 if read and body then
                     local address = pawn:GetAddress()
@@ -225,12 +237,13 @@ local function observe(state, phase)
                     local firearm = gun ~= "-" and cached.actor:GetClass():GetFullName():match("^BlueprintGeneratedClass (.+)$")
                     if not firearm or not firearm_path(firearm) then firearm = "-" end
                     local read_visor, powered = false, false
-                    if pawn:IsLocallyControlled() and head ~= "-" then
+                    if local_pawn and head ~= "-" then
                         read_visor, powered = pcall(visor.powered, pawn, state.world, false)
                     end
+                    local aiming, sprinting, moving = observe_motion(world_address, pawn, address)
                     observations[id] = { pawn = details.name, body = body, head = head, weapon = read_weapon and weapon or "-",
-                        appearance = read_appearance and appearance or "-", gun = gun, aim = pawn.Aiming and gun or "-",
-                        firearm = firearm, sprinting = pawn.Sprinting == true, moving = has_horizontal_motion(pawn),
+                        appearance = read_appearance and appearance or "-", gun = gun, aim = aiming and gun or "-",
+                        firearm = firearm, sprinting = sprinting, moving = moving,
                         visor = read_visor and powered == true }
                 end
             end

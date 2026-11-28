@@ -11,6 +11,7 @@ from .guest_request_scope import mark_effect
 STATUS_LIMIT = 2 * 1024 * 1024
 # Match the native FIFO and its largest accepted input record.
 INPUT_LIMIT = 1536
+CRATE_OUTCOME_INPUT_LIMIT = 4096
 INPUT_CAPACITY = 64
 ZONE_ROSTER_LIMIT = 8192
 WEAPON_CUES_LIMIT = 16 * 1024
@@ -87,6 +88,10 @@ class LocalBridge:
             self._input_lengths = (ctypes.c_uint16 * INPUT_CAPACITY)()
         else:
             self._input_buffer = ctypes.create_string_buffer(INPUT_LIMIT)
+        self._enable_crate_outcome_input = getattr(library, "SilverfishBridgeEnableCrateOutcomeInputV1", None)
+        if self._enable_crate_outcome_input is not None:
+            self._enable_crate_outcome_input.argtypes = [ctypes.c_uint32]
+            self._enable_crate_outcome_input.restype = ctypes.c_int
         self._native_events_heartbeat = getattr(library, "SilverfishBridgePublishNativeEventsHeartbeatV1", None)
         if self._native_events_heartbeat is not None:
             self._native_events_heartbeat.argtypes = [ctypes.c_int64]
@@ -186,7 +191,16 @@ class LocalBridge:
             return None
         bridge.enable_status()
         bridge.enable_local_weapon_cues()
+        bridge.enable_crate_outcome_input()
         return bridge
+
+    def enable_crate_outcome_input(self) -> None:
+        if self._enable_crate_outcome_input is None:
+            return
+        slots = INPUT_CAPACITY if self._read_input_batch is not None else 1
+        buffer = ctypes.create_string_buffer(CRATE_OUTCOME_INPUT_LIMIT * slots)
+        if self._enable_crate_outcome_input(CRATE_OUTCOME_INPUT_LIMIT):
+            self._input_buffer = buffer
 
     def enable_status(self) -> None:
         if self._enable_status is None or self._latest_status is None or self._copy_status is None:

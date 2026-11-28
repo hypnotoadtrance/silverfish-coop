@@ -37,6 +37,7 @@ namespace
     constexpr std::uint32_t reply_limit = 2 * 1024 * 1024;
     // Match the ctypes reader buffer in tools/silverfish/local_bridge.py.
     constexpr std::uint32_t input_limit = 1536;
+    constexpr std::uint32_t crate_outcome_input_limit = 4096;
     constexpr std::size_t input_capacity = 64;
     constexpr std::uint32_t prop_poses_limit = 4 * 257;
     constexpr std::uint32_t avatar_poses_limit = 512;
@@ -68,6 +69,7 @@ namespace
     std::shared_ptr<const std::string> status_frame;
     std::uint64_t status_revision{};
     std::deque<std::string> input;
+    bool crate_outcome_input_enabled{};
     std::string prop_poses;
     std::string local_prop_pose;
     std::string stock_loot_motion;
@@ -755,6 +757,7 @@ extern "C" __declspec(dllexport) void SilverfishBridgeCloseV1()
     status_enabled = false;
     status_frame.reset();
     input.clear();
+    crate_outcome_input_enabled = false;
     prop_poses.clear();
     local_prop_pose.clear();
     stock_loot_motion.clear();
@@ -810,6 +813,14 @@ extern "C" __declspec(dllexport) int SilverfishBridgeInputReadyV1()
     return !input.empty();
 }
 
+extern "C" __declspec(dllexport) int SilverfishBridgeEnableCrateOutcomeInputV1(std::uint32_t record_capacity)
+{
+    std::lock_guard lock(mutex);
+    if (!attached || record_capacity < crate_outcome_input_limit) return 0;
+    crate_outcome_input_enabled = true;
+    return 1;
+}
+
 extern "C" __declspec(dllexport) std::uint32_t SilverfishBridgeReadInputV1(char* buffer, std::uint32_t capacity)
 {
     std::lock_guard lock(mutex);
@@ -829,8 +840,10 @@ extern "C" __declspec(dllexport) std::uint32_t SilverfishBridgeReadInputBatchV1(
     std::uint32_t count{};
     {
         std::lock_guard lock(mutex);
-        while (count < limit && !input.empty())
+        std::size_t remaining = capacity;
+        while (count < limit && !input.empty() && input.front().size() <= remaining)
         {
+            remaining -= input.front().size();
             pending[count++] = std::move(input.front());
             input.pop_front();
         }
@@ -1037,7 +1050,9 @@ namespace silverfish::local_bridge
     bool queue_input(std::string record)
     {
         std::lock_guard lock(mutex);
-        if (!attached || record.empty() || record.size() > input_limit || input.size() >= input_capacity) return false;
+        const auto limit = crate_outcome_input_enabled && record.starts_with("loot-crate-open\t")
+            ? crate_outcome_input_limit : input_limit;
+        if (!attached || record.empty() || record.size() > limit || input.size() >= input_capacity) return false;
         input.emplace_back(std::move(record));
         return true;
     }
@@ -1088,6 +1103,7 @@ namespace silverfish::local_bridge
         status_enabled = false;
         status_frame.reset();
         input.clear();
+        crate_outcome_input_enabled = false;
         prop_poses.clear();
         local_prop_pose.clear();
         stock_loot_motion.clear();

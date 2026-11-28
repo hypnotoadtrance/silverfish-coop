@@ -540,6 +540,23 @@ def instrument_flashlight_scope(source):
 
 
 def instrument_avatar_observer(source):
+    front, boundary, rest = source.partition("local function observe(state, phase)\n")
+    observe, following, after = rest.partition("local function attach_component(")
+    if not boundary or not following:
+        raise ValueError("The host avatar observation timing anchors changed")
+    for label, call in (("outfit", "worn"), ("guest_context", "guest_save.observed_item_context"),
+                        ("observe_motion", "observe_motion")):
+        anchor = call + "("
+        if observe.count(anchor) != (2 if label == "outfit" else 1):
+            raise ValueError(f"The host avatar observation call changed: {call}")
+        observe = observe.replace(anchor, f'SilverfishProfileCrossroadsCall("avatar.{label}", {call}, ')
+    for label, call in (("observe_appearance", "character_view.observe"), ("observe_weapon", "weapon_view.observe")):
+        anchor = f"pcall({call}, "
+        if observe.count(anchor) != 1:
+            raise ValueError(f"The host avatar observation callback changed: {call}")
+        observe = observe.replace(anchor, f'pcall(SilverfishProfileCrossroadsCall, "avatar.{label}", {call}, ')
+    source = (front + "local avatar_motion_sample\n" + boundary
+              + '    avatar_motion_sample = phase == "hosting" and state or nil\n' + observe + following + after)
     start, boundary, rest = source.partition("function avatar.animate_head(")
     observer, end, after = rest.partition("local function create(entry)")
     if not boundary or not end:
@@ -562,6 +579,44 @@ def instrument_avatar_observer(source):
         sync = sync.replace(anchor, f'SilverfishProfileCrossroadsCall("avatar.{call}", {call}, ')
     source = start + boundary + sync + end + after
     return source.replace("\nreturn avatar\n", """
+function SilverfishProfileAvatarMotion()
+    local native, stamp = SilverfishReadNativeAvatarMotion, SilverfishBridgeProfileStamp
+    local state = avatar_motion_sample
+    if not state or #state.pawns < 2 or type(native) ~= "function" then return "unavailable" end
+    local world = state.world:GetAddress()
+    local function measure(reader)
+        local heap, started = collectgarbage("count"), stamp()
+        for _ = 1, 128 do reader() end
+        return (stamp() - started) / 1000, collectgarbage("count") - heap
+    end
+    local function compare(pawn)
+        local address = pawn:GetAddress()
+        local function stock() return stock_motion(pawn) end
+        local function sample() return native(world, address) end
+        local aiming, sprinting, moving = stock()
+        local observed_aim, observed_sprint, observed_move = sample()
+        assert(aiming == observed_aim and sprinting == observed_sprint and moving == observed_move,
+            "avatar motion differed from stock")
+        assert(native(world + 1, address) == nil and native(world, address + 1) == nil,
+            "avatar motion accepted the wrong scope")
+        local native_ms, native_kib = measure(sample)
+        local lua_ms, lua_kib = measure(stock)
+        local seat = pawn:IsLocallyControlled() and "host" or "guest"
+        return ("%s,%.3f,%.3f,%.3f,%.3f,%d,%d,%d"):format(seat, native_ms, lua_ms, native_kib, lua_kib,
+            aiming and 1 or 0, sprinting and 1 or 0, moving and 1 or 0)
+    end
+    local running = collectgarbage("isrunning")
+    collectgarbage("stop")
+    local ok, result = pcall(function()
+        local rows = {}
+        for _, detail in ipairs(state.pawns) do rows[#rows + 1] = compare(detail.pawn) end
+        return table.concat(rows, ";")
+    end)
+    if running then collectgarbage("restart") end
+    assert(ok, result)
+    return result
+end
+
 function SilverfishProfileAvatarClock()
     local native, stamp = SilverfishReadNativeAvatarSeconds, SilverfishBridgeProfileStamp
     if type(native) ~= "function" then return "unavailable" end
@@ -1346,7 +1401,17 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     controller_inspection = {}
     remote_head_rotation = {}
     avatar_clock = {}
+    avatar_motion = {}
     if area == CROSSROADS:
+        motion = await command(host, "avatarmotion")
+        assert motion != "unavailable" and not motion.startswith("avatar motion comparison failed"), motion
+        for row in motion.split(";"):
+            seat, native_ms, lua_ms, native_kib, lua_kib, aiming, sprinting, moving = row.split(",")
+            avatar_motion[seat] = {"reads_per_path": 128, "native_ms": float(native_ms), "lua_ms": float(lua_ms),
+                                   "native_heap_growth_kib": float(native_kib), "lua_heap_growth_kib": float(lua_kib),
+                                   "aiming": aiming == "1", "sprinting": sprinting == "1", "moving": moving == "1",
+                                   "stock_values_matched": True, "wrong_scope_refused": True}
+        assert set(avatar_motion) == {"host", "guest"}, avatar_motion
         clock_replies = await asyncio.gather(*(command(seat, "avatarclock") for seat in seats.values()))
         for seat, reply in zip(seats, clock_replies, strict=True):
             assert reply != "unavailable" and not reply.startswith("avatar clock comparison failed"), reply
@@ -1415,4 +1480,5 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             **coarse, **journal, **anomaly_samples, **electrode_samples, **dynamic_acid_samples, **ready_roster,
             "controller_inspection_comparison": controller_inspection,
             "avatar_clock_comparison": avatar_clock,
+            "avatar_motion_comparison": avatar_motion,
             "remote_head_rotation_comparison": remote_head_rotation}

@@ -9,9 +9,10 @@ import unittest
 import uuid
 from unittest.mock import AsyncMock, Mock, patch
 
-from tools.silverfish import guest_request_scope, runtime, service
-from tools.silverfish.local_bridge import INPUT_LIMIT, LocalBridge, LocalCommandNotSubmitted
+from tools.silverfish import guest_request_scope, native_loot, runtime, service
+from tools.silverfish.local_bridge import CRATE_OUTCOME_INPUT_LIMIT, INPUT_LIMIT, LocalBridge, LocalCommandNotSubmitted
 from tools.silverfish.control import Control
+from tools.silverfish.travel import OBSERVATORY
 
 
 class LocalBridgeInputTests(unittest.TestCase):
@@ -78,16 +79,65 @@ class LocalBridgeInputTests(unittest.TestCase):
     def test_older_native_bridge_can_still_read_one_record_at_a_time(self):
         library = Mock()
         del library.SilverfishBridgeReadInputBatchV1
+        del library.SilverfishBridgeEnableCrateOutcomeInputV1
         bridge = LocalBridge(library)
         rows = iter([b"interact\t1\n", b""])
 
         def read(buffer, capacity):
+            self.assertEqual(capacity, INPUT_LIMIT)
             row = next(rows)
             ctypes.memmove(buffer, row, len(row))
             return len(row)
 
         library.SilverfishBridgeReadInputV1.side_effect = read
+        bridge.enable_crate_outcome_input()
         self.assertEqual(bridge.read_input(), [b"interact\t1"])
+
+    def test_extended_input_keeps_two_full_typed_crate_items_with_their_press(self):
+        library = Mock()
+        library.SilverfishBridgeEnableCrateOutcomeInputV1.return_value = 1
+        bridge = LocalBridge(library)
+        bridge.enable_crate_outcome_input()
+        library.SilverfishBridgeEnableCrateOutcomeInputV1.assert_called_once_with(CRATE_OUTCOME_INPUT_LIMIT)
+
+        crate = native_loot.default_crate(OBSERVATORY)
+        level = f"{OBSERVATORY}.Observitory_P:PersistentLevel"
+        pawn = f"Player_FP_C {level}.Player_FP_C_2147480900"
+        press = f"loot-crate-open\t{OBSERVATORY}\t{crate}\t{pawn}\t7"
+        rows = [press, f"native-loot-outcome-reply\t1\t7\tconnected\t{OBSERVATORY}\t{crate}\t7\taccepted\trolled",
+                "loot-traits\t0\tnone\t0"]
+        typed = []
+        for index, (name, count) in enumerate((("Item_MRE", 1), ("Ammo_Pistol_BP", 9))):
+            guid = f"{index + 1:032X}"
+            item = f"{name}_C {level}.{name}_C_{2147480800 + index}"
+            item_class = f"/Game/Classes/Items/{name}.{name}_C"
+            text = (f"(Item_Class_3_2813641E42AA35FC0693029E4EE49F81=BlueprintGeneratedClass'\"{item_class}\"',"
+                    f"Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788={count},"
+                    "Weight_12_11AB9ED547504E78A849A692A36DC938=0.500000,"
+                    "Value_15_5D96101F4BADB44D9DC5F0BD5F8A35C9=10,"
+                    f"GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A=(A=0,B=0,C=0,D={index + 1}))")
+            rows.extend((f"native-loot-item\t{item}\t{item_class}\t{guid}\t{count}\t"
+                         "-1590.0228\t435.3765\t-1697.3687\t0\t-26.4637\t0\t1\t1\t1",
+                         f"loot-typed\t{guid}\t{text}"))
+            typed.append(text)
+        outcome = ("\n".join(rows) + "\n").encode("ascii")
+        unrelated = b"interact\t8\n"
+        self.assertGreater(len(outcome), INPUT_LIMIT)
+        self.assertLessEqual(len(outcome), CRATE_OUTCOME_INPUT_LIMIT)
+
+        def read(buffer, capacity, lengths, limit):
+            self.assertGreaterEqual(capacity, CRATE_OUTCOME_INPUT_LIMIT * limit)
+            ctypes.memmove(buffer, outcome + unrelated, len(outcome) + len(unrelated))
+            lengths[0], lengths[1] = len(outcome), len(unrelated)
+            return 2
+
+        library.SilverfishBridgeReadInputBatchV1.side_effect = read
+        game = {"map": OBSERVATORY, "state": "connected", "pawns": {"local": {"name": pawn}}}
+        presses, outcomes = runtime.split_crate_input_outcomes(game, bridge.read_input(2))
+        self.assertEqual(presses, [press.encode("ascii"), unrelated.rstrip(b"\n")])
+        decoded = outcomes[7, crate]["outcome"]
+        self.assertEqual([item["ammo"] for item in decoded["items"]], [1, 9])
+        self.assertEqual(decoded["typed"], typed)
 
 
 class LocalBridgeCommandTests(unittest.IsolatedAsyncioTestCase):
