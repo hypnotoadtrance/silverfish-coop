@@ -330,10 +330,10 @@ local function read_switch(entry, name, state, phase, row, native_world_address)
         end
     elseif entry.power then
         local actor = entry.actor
-        local powered, broken
+        local powered, broken, overlap
         if native_world_address then
-            powered, broken = SilverfishReadNativeSwitchPower(native_world_address, entry.address, entry.path,
-                entry.power, entry.lantern == true)
+            powered, broken, overlap = SilverfishReadNativeSwitchPower(native_world_address, entry.address, entry.path,
+                entry.power, entry.lantern == true, phase == "connected" and entry.candle == true)
         end
         if powered == nil and not level_visible(entry.level, state.world) then
             release_lamp_surface(entry, state.world)
@@ -359,7 +359,9 @@ local function read_switch(entry, name, state, phase, row, native_world_address)
             if entry.lantern then broken = actor.Broken_0 == true end
         end
         if type(powered) == "boolean" then
-            if entry.candle and phase == "connected" then
+            -- Native proof of a disabled overlap avoids a repeated component lookup.
+            -- A changed or unqualified sphere still uses the stock overlap check.
+            if entry.candle and phase == "connected" and overlap ~= false then
                 local sphere = actor.Sphere
                 if valid(sphere) and same(sphere:GetOwner(), actor) then suppress_candle_overlap(name, sphere) end
             end

@@ -24,6 +24,139 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(client.cancel_gameplay_snapshot)
         return client
 
+    async def test_cooked_meals_retry_in_order_without_holding_inventory_or_snapshot_work(self):
+        action = service.native_guest_consumable.COOKED_MEAL
+        session, epoch, pawn = "a" * 32, "b" * 32, "Player_FP_C guest"
+        stock_inputs = [f"{action}\t{serial}\t{OBSERVATORY}\t{pawn}\t{food},0,0,0,0\n".encode()
+                        for serial, food in ((2, 7), (1, 20), (1, 20))]
+        attempts = asyncio.Queue()
+        send_first, retry_first, send_second, old_snapshot_started = (asyncio.Event() for _ in range(4))
+        inventory_started = asyncio.Event()
+        snapshot_count = 0
+        meal_count = 0
+
+        async def request(payload, *, timeout):
+            nonlocal meal_count, snapshot_count
+            if payload["action"] == "snapshot":
+                snapshot_count += 1
+                if snapshot_count == 1:
+                    old_snapshot_started.set()
+                    await asyncio.Future()
+                return {"ok": True, "gameplay": {"players": {}}, "zone": OBSERVATORY, "zone_epoch": epoch}
+            self.assertEqual(payload["action"], action)
+            meal_count += 1
+            attempts.put_nowait(payload)
+            if meal_count == 1:
+                await send_first.wait()
+                raise ConnectionError("meal reply lost")
+            await (retry_first if meal_count == 2 else send_second).wait()
+            return {"ok": True, "cooked_meal": {"food": 75}}
+
+        async def inventory(*_args, **_kwargs):
+            inventory_started.set()
+
+        client = self.guest(AsyncMock(side_effect=request))
+        client.host_session, client.zone_epoch, client.expected_zone = session, epoch, OBSERVATORY
+        client.transport.connected = client.transport.game_access = True
+        client.last_game = {"state": "connected", "map": OBSERVATORY, "pawns": {"local": {"name": pawn}}}
+        client.bridge.input_namespace = uuid.NAMESPACE_OID
+        client.bridge.native_cooked_meals.side_effect = [stock_inputs, *([[]] * 8)]
+        client.bridge.native_inventory_view_requests.return_value = [(1, "open", OBSERVATORY, pawn)]
+        client.service_inventory_view = AsyncMock(side_effect=inventory)
+        meals = client.cooked_meals
+        self.addAsyncCleanup(meals.close)
+
+        self.assertTrue(await meals.sync(client, True))
+        first = await asyncio.wait_for(attempts.get(), .5)
+        self.assertEqual(first["target"], f"{epoch}@20,0,0,0,0")
+        self.assertEqual(first["operation_id"], uuid.uuid5(uuid.NAMESPACE_OID, f"{session}:{epoch}:{action}:1").hex)
+        await client.refresh_gameplay(project=False, wait=False)
+        await asyncio.wait_for(old_snapshot_started.wait(), .5)
+        obsolete = client.snapshot_request
+        await client.poll_stock_inventory(True)
+        await asyncio.wait_for(inventory_started.wait(), .5)
+        await client.cancel_stock_inventory()
+        self.assertFalse(meals.request.done())
+
+        send_first.set()
+        self.assertTrue((await asyncio.wait((meals.request,), timeout=.5))[0])
+        self.assertTrue(await meals.sync(client, True))
+        self.assertTrue(attempts.empty())
+        meals.retry_after = 0.0
+        self.assertTrue(await meals.sync(client, True))
+        self.assertEqual(await asyncio.wait_for(attempts.get(), .5), first)
+        retry_first.set()
+        self.assertTrue((await asyncio.wait((meals.request,), timeout=.5))[0])
+        self.assertTrue(await meals.sync(client, True))
+        self.assertTrue(obsolete.cancelled())
+        self.assertEqual((await asyncio.wait_for(attempts.get(), .5))["target"], f"{epoch}@7,0,0,0,0")
+
+        send_second.set()
+        self.assertTrue((await asyncio.wait((meals.request,), timeout=.5))[0])
+        self.assertTrue(await meals.sync(client, True))
+        self.assertEqual(client.next_snapshot, 0)
+        await client.refresh_gameplay(project=False)
+        self.assertFalse(await meals.sync(client, True))
+        self.assertEqual((meal_count, snapshot_count), (3, 2))
+
+    async def test_cooked_meal_disconnect_preserves_retry_and_a_new_visit_cancels_it(self):
+        action = service.native_guest_consumable.COOKED_MEAL
+        epoch, pawn = "a" * 32, "Player_FP_C guest"
+        raw = f"{action}\t1\t{OBSERVATORY}\t{pawn}\t20,0,0,0,0\n".encode()
+        attempts = asyncio.Queue()
+
+        async def request(payload, *, timeout):
+            attempts.put_nowait(payload)
+            await asyncio.Future()
+
+        client = self.guest(AsyncMock(side_effect=request))
+        client.host_session, client.zone_epoch, client.expected_zone = "session", epoch, OBSERVATORY
+        client.transport.connected = client.transport.game_access = True
+        client.last_game = {"state": "connected", "map": OBSERVATORY, "pawns": {"local": {"name": pawn}}}
+        client.bridge.input_namespace = uuid.NAMESPACE_OID
+        client.bridge.native_cooked_meals.side_effect = [[raw], [raw], []]
+        meals = client.cooked_meals
+        self.addAsyncCleanup(meals.close)
+        self.assertTrue(await meals.sync(client, True))
+        first = await asyncio.wait_for(attempts.get(), .5)
+        initial = meals.request
+        client.transport.connected = False
+        self.assertTrue(await meals.sync(client, False))
+        self.assertTrue(initial.cancelled())
+        client.transport.connected = True
+        self.assertTrue(await meals.sync(client, True))
+        self.assertEqual(await asyncio.wait_for(attempts.get(), .5), first)
+        retry = meals.request
+        client.zone_epoch = "b" * 32
+        self.assertFalse(await meals.sync(client, True))
+        self.assertTrue(retry.cancelled())
+        self.assertTrue(attempts.empty())
+
+    async def test_settled_cooked_meal_does_not_change_the_next_visits_snapshot_schedule(self):
+        action = service.native_guest_consumable.COOKED_MEAL
+        epoch, pawn = "a" * 32, "Player_FP_C guest"
+        raw = f"{action}\t1\t{OBSERVATORY}\t{pawn}\t20,0,0,0,0\n".encode()
+        client = self.guest(AsyncMock(return_value={"ok": True, "cooked_meal": {"food": 75}}))
+        client.host_session, client.zone_epoch, client.expected_zone = "session", epoch, OBSERVATORY
+        client.transport.connected = client.transport.game_access = True
+        client.last_game = {"state": "connected", "map": OBSERVATORY, "pawns": {"local": {"name": pawn}}}
+        client.bridge.input_namespace = uuid.NAMESPACE_OID
+        client.bridge.native_cooked_meals.side_effect = [[raw], []]
+        meals = client.cooked_meals
+        self.addAsyncCleanup(meals.close)
+        self.assertTrue(await meals.sync(client, True))
+        await asyncio.wait_for(meals.request, .5)
+
+        async def cancel_then_travel():
+            await asyncio.sleep(0)
+            client.zone_epoch = "b" * 32
+            client.next_snapshot = 42.0
+
+        with patch.object(client, "cancel_gameplay_snapshot", AsyncMock(side_effect=cancel_then_travel)):
+            self.assertTrue(await meals.sync(client, True))
+        self.assertEqual(client.next_snapshot, 42.0)
+        self.assertFalse(await meals.sync(client, True))
+
     async def test_container_lockpick_feedback_uses_the_local_stock_result_once(self):
         for hinged, unlocked, error in ((False, True, None), (False, False, None),
                                         (False, True, ValueError("interaction_refused")),

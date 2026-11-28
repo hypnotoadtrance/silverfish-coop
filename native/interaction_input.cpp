@@ -1890,21 +1890,27 @@ namespace
 
     int read_switch_power(const Lua& lua)
     {
-        if (!available() || lua.get_stack_size() != 5 || !lua.is_integer(1) || !lua.is_integer(2) ||
-            !lua.is_string(3) || !lua.is_string(4) || !lua.is_bool(5)) return 0;
-        // LuaMadeSimple removes each argument when it reads it.
-        const auto lantern = lua.get_bool(5);
-        const auto power = lua.get_string(4);
-        const auto path = lua.get_string(3);
-        const auto expected = lua.get_integer(2);
-        const auto world_address = lua.get_integer(1);
+        auto* stack = lua.get_lua_state();
+        const auto count = lua_gettop(stack);
+        if (!available() || (count != 5 && count != 6) || !lua_isinteger(stack, 1) || !lua_isinteger(stack, 2) ||
+            lua_type(stack, 3) != LUA_TSTRING || lua_type(stack, 4) != LUA_TSTRING || !lua_isboolean(stack, 5) ||
+            (count == 6 && !lua_isboolean(stack, 6))) return 0;
+        const auto world_address = lua_tointeger(stack, 1);
+        const auto expected = lua_tointeger(stack, 2);
+        std::size_t path_size{}, power_size{};
+        const auto* path_text = lua_tolstring(stack, 3, &path_size);
+        const auto* power_text = lua_tolstring(stack, 4, &power_size);
+        const std::string_view path{path_text, path_size};
+        const std::string_view power{power_text, power_size};
+        const bool lantern = lua_toboolean(stack, 5);
+        const bool candle_overlap = count == 6 && lua_toboolean(stack, 6);
         auto* world = scope.world.Get();
         if (!live(world) || address(world) != world_address ||
             scope.generation != generation.load(std::memory_order_acquire) || Clock::now() >= scope.expires)
             return 0;
         const auto* property_name = power == "Lit" ? STR("Lit") :
             power == "Powered" ? STR("Powered") : power == "Power" ? STR("Power") : nullptr;
-        if (!property_name || expected <= 0) return 0;
+        if (!property_name || expected <= 0 || (candle_overlap && (scope.host || power != "Lit"))) return 0;
 
         struct SwitchReader
         {
@@ -1926,7 +1932,7 @@ namespace
         if (actor && entry->second.path != path) return 0;
         if (!actor)
         {
-            if (path.empty() || path.size() > 384) return 0;
+            if (path.empty() || path.size() > 384 || path.find('\0') != std::string_view::npos) return 0;
             actor = find<Unreal::AActor>(RC::to_wstring(path).c_str());
             if (address(actor) != expected || !live(actor)) return 0;
             auto* actor_class = find<Unreal::UClass>(STR("/Script/Engine.Actor"));
@@ -1963,16 +1969,27 @@ namespace
         }
 
         auto* power_field = field<Unreal::FBoolProperty>(actor, property_name);
-        if (!power_field) return 0;
-        if (lantern)
+        auto* broken = lantern ? field<Unreal::FBoolProperty>(actor, STR("Broken_0")) : nullptr;
+        if (!power_field || (lantern && !broken)) return 0;
+        lua_pushboolean(stack, power_field->GetPropertyValueInContainer(actor));
+        if (candle_overlap)
         {
-            auto* broken = field<Unreal::FBoolProperty>(actor, STR("Broken_0"));
-            if (!broken) return 0;
-            lua.set_bool(power_field->GetPropertyValueInContainer(actor));
-            lua.set_bool(broken->GetPropertyValueInContainer(actor));
+            auto* member = field<Unreal::FObjectProperty>(actor, STR("Sphere"));
+            auto* sphere = member ? member->GetObjectPropertyValue(member->ContainerPtrToValuePtr<void>(actor)) : nullptr;
+            auto* type = member ? member->GetPropertyClass().Get() : nullptr;
+            auto* overlaps = live(sphere) && sphere->GetOuterPrivate() == actor && type && sphere->IsA(type)
+                ? field<Unreal::FBoolProperty>(sphere, STR("bGenerateOverlapEvents")) : nullptr;
+            if (broken) lua_pushboolean(stack, broken->GetPropertyValueInContainer(actor));
+            else lua_pushnil(stack);
+            if (!overlaps) return 2;
+            lua_pushboolean(stack, overlaps->GetPropertyValueInContainer(sphere));
+            return 3;
+        }
+        if (broken)
+        {
+            lua_pushboolean(stack, broken->GetPropertyValueInContainer(actor));
             return 2;
         }
-        lua.set_bool(power_field->GetPropertyValueInContainer(actor));
         return 1;
     }
 

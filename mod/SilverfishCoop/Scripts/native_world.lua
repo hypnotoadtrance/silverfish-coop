@@ -23,6 +23,8 @@ local gameplay_statics_path = "/Script/Engine.Default__GameplayStatics"
 local quest_library_path = "/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C"
 local quest_id = "Jmr_CrossRoads"
 local authored_routes = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
+local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+    and (os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1" or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1")
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local item_value = "Value_15_5D96101F4BADB44D9DC5F0BD5F8A35C9"
@@ -384,24 +386,29 @@ local function world_rows(state, phase, status_row)
     local now, world_address = os.time(), world:GetAddress()
     if cached_rows and cached_world == world_address and cached_time == now then return cached_rows end
     local rows = {}
-    local ok, actors = pcall(shop_actors, world)
-    for _, id in ipairs(shop_ids) do
-        local actor = ok and actors[id]
-        local reported, reason = false, actors
-        if ok then reported, reason = pcall(append_shop, rows, status_row, id, actor) end
-        if not reported then
-            local name = actor and actor:GetFullName() or "-"
-            rows[#rows + 1] = status_row("native-shop", id, name, "-", "-", "-", "-", "error", brief(reason))
+    local staged = fixtures or playtest_maps[state.map]
+    if staged then
+        local ok, actors = pcall(shop_actors, world)
+        for _, id in ipairs(shop_ids) do
+            local actor = ok and actors[id]
+            local reported, reason = false, actors
+            if ok then reported, reason = pcall(append_shop, rows, status_row, id, actor) end
+            if not reported then
+                local name = actor and actor:GetFullName() or "-"
+                rows[#rows + 1] = status_row("native-shop", id, name, "-", "-", "-", "-", "error", brief(reason))
+            end
         end
     end
     local loaded, instance = pcall(game_instance, pawn)
-    local read, quest = false, instance
-    if loaded then read, quest = pcall(live_quest, instance, FName(quest_id)) end
-    if read then
-        rows[#rows + 1] = status_row("native-quest", quest_id, quest.state, quest.step or "-",
-            quest.final_step or "-", quest.reward or "-", "")
-    else
-        rows[#rows + 1] = status_row("native-quest", quest_id, "error", "-", "-", "-", brief(quest))
+    if staged then
+        local read, quest = false, instance
+        if loaded then read, quest = pcall(live_quest, instance, FName(quest_id)) end
+        if read then
+            rows[#rows + 1] = status_row("native-quest", quest_id, quest.state, quest.step or "-",
+                quest.final_step or "-", quest.reward or "-", "")
+        else
+            rows[#rows + 1] = status_row("native-quest", quest_id, "error", "-", "-", "-", brief(quest))
+        end
     end
     local scene_read, scene_error = false, instance
     if loaded then

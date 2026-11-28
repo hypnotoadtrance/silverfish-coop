@@ -1,6 +1,8 @@
 local lantern = {}
 local carry = require("native_prop_carry")
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
+local fixture_status = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+    and (os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1" or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1")
 local map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local world_path = map .. ".Observitory_P"
 local path = world_path .. ":PersistentLevel.Prop_Lantern_01_C_1"
@@ -109,6 +111,7 @@ function lantern.command(fields, state, phase)
 end
 
 function lantern.status(state, phase, row)
+    if not fixture_status then return end
     local ok, actor = pcall(scene, state, phase)
     local current = phase == "hosting" and host or phase == "connected" and guest
     if not ok or not current or not same(current.actor, actor)

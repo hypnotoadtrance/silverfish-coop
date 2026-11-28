@@ -6,10 +6,9 @@ package.loaded.native_prop_carry = {enroll = function()
 end}
 package.loaded.guest_save = {}
 
-local getenv = os.getenv
+local environment = {SILVERFISH_COOP_NATIVE_ZONE = "1"}
 os.getenv = function(name)
-    if name == "SILVERFISH_COOP_NATIVE_ZONE" then return "1" end
-    return getenv(name)
+    return environment[name]
 end
 
 local function object(fields)
@@ -28,8 +27,12 @@ local classes = {
     ["/Script/Engine.StaticMeshComponent"] = mesh_type,
     ["/Script/Engine.SphereComponent"] = sphere_type,
 }
-local active
-function StaticFindObject(argument) return argument == path and active or classes[argument] end
+local active, scene_reads = nil, 0
+function StaticFindObject(argument)
+    if argument ~= path then return classes[argument] end
+    scene_reads = scene_reads + 1
+    return active
+end
 
 local function make_scene(server)
     local world, driver, actor = object({PersistentLevel = object()}), object(), object()
@@ -77,8 +80,8 @@ assert(host_actor.updates == 1, "steady stock physics must use Unreal's normal m
 assert(enrolled == 1)
 host_actor.Lit, host_actor.BeingHeld, host_actor.x = true, true, 99
 lantern.sync(host_state, "hosting")
-local observed = lantern.status(host_state, "hosting", row)
-assert(observed[4] == 1 and observed[5] == 1 and observed[6] == 1 and observed[7] == "99.00")
+local before = scene_reads
+assert(not lantern.status(host_state, "hosting", row) and scene_reads == before)
 assert(host_actor.updates == 2, "a host grab should wake movement replication")
 host_actor.BeingHeld = false
 lantern.sync(host_state, "hosting")
@@ -91,3 +94,17 @@ guest_state.listening = false
 lantern.sync(guest_state, "standalone")
 assert(guest_actor.Sphere.overlaps, "singleplayer must retain its stock fire overlaps")
 assert(not guest_actor.bReplicates and not guest_actor.bReplicateMovement, "guests must never start prop replication")
+
+environment.SILVERFISH_COOP_HEADLESS = "1"
+for _, flag in ipairs({"SILVERFISH_COOP_NATIVE_FIXTURES", "SILVERFISH_COOP_TITLE_FIXTURES"}) do
+    environment[flag] = "1"
+    local diagnostic = assert(loadfile("mod/SilverfishCoop/Scripts/native_lantern.lua"))()
+    for _, seat in ipairs({{false, "hosting"}, {true, "connected"}}) do
+        local state, actor = make_scene(seat[1])
+        actor.Lit, actor.BeingHeld, actor.x = true, true, 99
+        diagnostic.sync(state, seat[2])
+        local observed = diagnostic.status(state, seat[2], row)
+        assert(observed[4] == 1 and observed[5] == 1 and observed[6] == (seat[1] and 0 or 1) and observed[7] == "99.00")
+    end
+    environment[flag] = nil
+end

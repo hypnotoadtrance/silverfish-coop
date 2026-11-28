@@ -410,6 +410,7 @@ class Host:
         self.runtime_crate_sweep = (self.zone_epoch, ())
         self.gameplay_snapshots = gameplay_snapshot.HostSnapshots()
         self.guest_wallet_receipts = {}
+        self.cooked_meal_outcomes = self.zone_epoch, {}
         self.guest_inventory_grants = {}
         self.guest_pickup_revisions = {}
         self.transitioning = False
@@ -5582,6 +5583,7 @@ class Client:
         self.last_equipment_selection = None
         self.equipment_selection_retry = None, 0.0
         self.last_flare_intent = 0
+        self.cooked_meals = native_guest_consumable.GuestCookedMeals()
         self.guest_primary_input = guest_primary_input
         self.guest_held_input = native_smg_hold.GuestInput(self) if invite.get("native_guest_held_fire") else None
         self.melee_input = native_guest_melee.GuestInput(self) if guest_primary_input else None
@@ -7794,6 +7796,7 @@ class Client:
                         await task
             await self.cancel_gameplay_snapshot()
             await self.cancel_stock_inventory()
+            await self.cooked_meals.close()
             await self.guest_ui.close()
             await self.guest_wallet.close()
             await self.guest_grants.close()
@@ -7848,7 +7851,7 @@ class Client:
                 self.world_loot_wake.set()
             else:
                 await self.project_world_loot()
-            if not await native_guest_consumable.service_cooked_meals(self, active):
+            if not await self.cooked_meals.sync(self, active):
                 await self.guest_ui.sync_health(self, active)
             if active and self.last_game.get("map") == self.expected_zone and time.monotonic() - self.gameplay_seen < 2:
                 self.last_game = await self.hurt_playback.sync(

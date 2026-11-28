@@ -212,15 +212,24 @@ local function compare_switch_reads()
     local state = inspect()
     local seat = phase(state)
     assert(seat == "hosting" or seat == "connected")
-    local switched, streamed, first = 0, 0, nil
-    SilverfishReadNativeSwitchPower = function(world_address, actor, path, field, lantern)
-        local powered, broken = native(world_address, actor, path, field, lantern)
+    local switched, streamed, candle_samples, candle_requests, first = 0, 0, 0, 0, nil
+    SilverfishReadNativeSwitchPower = function(world_address, actor, path, field, lantern, candle_overlap)
+        local powered, broken, overlap = native(world_address, actor, path, field, lantern, candle_overlap == true)
         if powered ~= nil then
             switched = switched + 1
             if path:match("^([^%.]+)%.") ~= state.map then streamed = streamed + 1 end
             first = first or {world_address, actor, path, field, lantern}
+            if candle_overlap then
+                candle_requests = candle_requests + 1
+                if overlap ~= nil then
+                    local device = StaticFindObject(path)
+                    assert(device.Sphere:GetGenerateOverlapEvents() == overlap,
+                        "native candle overlap differed from the stock component")
+                    candle_samples = candle_samples + 1
+                end
+            end
         end
-        return powered, broken
+        return powered, broken, overlap
     end
     local read = native_stock_switch.rows
     local function sorted_rows()
@@ -234,18 +243,29 @@ local function compare_switch_reads()
         for _ = 1, 32 do read(state, seat, status_row) end
         return (stamp() - start) / 1000, collectgarbage("count") - heap
     end
+    local function with_candle_overlap(enabled)
+        return function(world, actor, path, field, lantern, requested)
+            return native(world, actor, path, field, lantern, enabled and requested == true)
+        end
+    end
     local running = collectgarbage("isrunning")
     local ok, result = pcall(function()
         local fast = sorted_rows()
         SilverfishReadNativeSwitchPower = nil
         assert(switched > 0 and fast == sorted_rows(), "native switch status did not match Lua")
+        assert(candle_requests == 0 or candle_samples > 0, "no guest candle overlap was read natively")
         assert(native(0, first[2], first[3], first[4], first[5]) == nil, "native switch accepted a different world")
         assert(native(first[1], 1, first[3], first[4], first[5]) == nil, "native switch accepted a different actor")
         assert(native(first[1], first[2], first[3], true, first[5]) == nil, "native switch accepted a non-string field")
         collectgarbage("stop")
-        local native_ms, native_kib = trial(native)
+        local native_ms, native_kib = trial(candle_samples > 0 and with_candle_overlap(true) or native)
         local lua_ms, lua_kib = trial(nil)
-        return ("%d,%d,%.3f,%.3f,%.3f,%.3f"):format(switched, streamed, native_ms, lua_ms, native_kib, lua_kib)
+        local candle_control_ms, candle_control_kib = 0, 0
+        if candle_samples > 0 then
+            candle_control_ms, candle_control_kib = trial(with_candle_overlap(false))
+        end
+        return ("%d,%d,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f"):format(switched, streamed, native_ms, lua_ms,
+            native_kib, lua_kib, candle_samples, candle_control_ms, candle_control_kib)
     end)
     SilverfishReadNativeSwitchPower = native
     if running then collectgarbage("restart") end

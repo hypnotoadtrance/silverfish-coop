@@ -228,6 +228,30 @@ assert(lamp.PropMesh.response == 1, "The hidden streamed lamp releases its colli
 level.bIsVisible = true
 print("Inherited oil lantern collision follows the stock light, broken state, and stream visibility")
 
+switches.rows(state, "connected", row)
+local overlap, native_overlap, stock_overlap_reads = true, true, 0
+lamp.Sphere.GetGenerateOverlapEvents = function()
+    stock_overlap_reads = stock_overlap_reads + 1
+    return overlap
+end
+lamp.Sphere.SetGenerateOverlapEvents = function(_, value) overlap = value end
+SilverfishReadNativeSwitchPower = function(scope, actor, _, field, lantern, want_overlap)
+    if actor ~= lamp then return end
+    assert(scope == state.world and field == "Lit" and lantern and want_overlap)
+    return lamp.Lit, lamp.Broken_0, native_overlap
+end
+switches.rows(state, "connected", row)
+assert(not overlap and stock_overlap_reads == 1, "A native enabled overlap still runs stock suppression")
+native_overlap = false
+switches.rows(state, "connected", row)
+assert(stock_overlap_reads == 1, "A native disabled overlap skips the reflected component")
+native_overlap, overlap = nil, true
+switches.rows(state, "connected", row)
+assert(not overlap and stock_overlap_reads == 2, "An unqualified component retains the stock fallback")
+switches.release_candles(state, "ready")
+assert(overlap, "Fixture exit restores the overlap through the original stock component")
+SilverfishReadNativeSwitchPower = nil
+
 local bulb_class = object({})
 paths["/Game/Classes/DynamicLights/DynamicLight_Master_BP.DynamicLight_Master_BP_C"] = bulb_class
 local light_prefix = "DynamicLight_Master_BP_C " .. state.map .. ".Depot:PersistentLevel.Lamp_"

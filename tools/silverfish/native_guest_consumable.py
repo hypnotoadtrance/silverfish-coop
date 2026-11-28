@@ -1,6 +1,7 @@
 """Settle stock and personal consumable use in an authenticated guest's own save."""
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass
 import math
 import re
@@ -8,6 +9,7 @@ import time
 import uuid
 
 from . import party
+from .local_bridge import LocalCommandNotSubmitted
 from .native_gold import valid_guid
 from .native_host_dig import PACKAGE_CLASS as MISSING_CONTACT_CLASS
 
@@ -183,25 +185,101 @@ def _cooking_effect(value):
     return effect
 
 
-async def service_cooked_meals(client, active):
-    applied = False
-    for raw in client.bridge.native_cooked_meals():
-        if not active or not client.host_session or not client.zone_epoch:
-            continue
-        try:
-            label, sequence, area, pawn, effect = raw.decode().rstrip("\n").split("\t")
-            if (label != COOKED_MEAL or not 1 <= int(sequence) < 2**53 or area != client.expected_zone
-                    or pawn != client.last_game.get("pawns", {}).get("local", {}).get("name")):
+class GuestCookedMeals:
+    def __init__(self):
+        self.scope = None
+        self.pending = deque()
+        self.request = None
+        self.last_sequence = 0
+        self.retry_after = 0.0
+        self.health_seen = None
+
+    async def _cancel_request(self):
+        if self.request is not None:
+            request, self.request = self.request, None
+            request.cancel()
+            await asyncio.gather(request, return_exceptions=True)
+
+    async def close(self):
+        await self._cancel_request()
+        self.scope = None
+        self.pending.clear()
+        self.last_sequence = 0
+        self.retry_after = 0.0
+        self.health_seen = None
+
+    def _collect(self, client, scope):
+        session, epoch, area, pawn = scope
+        outcomes = {}
+        for raw in client.bridge.native_cooked_meals():
+            try:
+                label, serial, reported_area, owner, effect = raw.decode().rstrip("\n").split("\t")
+                sequence = int(serial)
+                if (label != COOKED_MEAL or (reported_area, owner) != (area, pawn)
+                        or not self.last_sequence < sequence < 2**53):
+                    continue
+                _cooking_effect(effect)
+                outcomes.setdefault(sequence, (serial, effect))
+            except ValueError as error:
+                client.control.event("native_guest_cooked_meal_rejected", reason=str(error))
+        for sequence, (serial, effect) in sorted(outcomes.items()):
+            self.last_sequence = sequence
+            if len(self.pending) >= 16:
+                client.control.event("native_guest_cooked_meal_rejected", reason="cooked_meal_backlog_full")
                 continue
-            _cooking_effect(effect)
-            operation = uuid.uuid5(client.bridge.input_namespace,
-                                   f"{client.host_session}:{client.zone_epoch}:{COOKED_MEAL}:{sequence}").hex
-            result = await client.gameplay_action(COOKED_MEAL, operation, f"{client.zone_epoch}@{effect}")
-            client.control.event("native_guest_cooked_meal", operation_id=operation, **result)
-            applied = True
-        except (OSError, RuntimeError, ValueError) as error:
-            client.control.event("native_guest_cooked_meal_rejected", reason=str(error))
-    return applied
+            operation = uuid.uuid5(client.bridge.input_namespace, f"{session}:{epoch}:{COOKED_MEAL}:{serial}").hex
+            self.pending.append((operation, f"{epoch}@{effect}"))
+
+    @staticmethod
+    async def _send(client, scope, operation, target):
+        if client.suspended or not client.transport.game_access or client.stock_interaction_scope() != scope:
+            raise OSError("game_connection_unavailable")
+        return await client.gameplay_action(COOKED_MEAL, operation, target)
+
+    async def sync(self, client, active):
+        """Report local meals in order. Keep older host vitals off the acting guest."""
+        scope = client.stock_interaction_scope() if active and not client.suspended and client.transport.game_access else None
+        visit = client.host_session, client.zone_epoch, client.expected_zone
+        if self.scope is not None and (self.scope[:3] != visit or scope is not None and self.scope != scope):
+            await self.close()
+            scope = client.stock_interaction_scope() if active and not client.suspended and client.transport.game_access else None
+        if scope is None:
+            await self._cancel_request()
+            return bool(self.pending or self.health_seen is not None)
+        self.scope = scope
+        if self.request is not None and self.request.done():
+            request, self.request = self.request, None
+            operation, _ = self.pending[0]
+            settled = True
+            try:
+                result = request.result()
+            except OSError:
+                # The host may already have applied the delta before the reply was lost.
+                settled = False
+                self.retry_after = time.monotonic() + .8
+            except (RuntimeError, ValueError) as error:
+                if str(error) in {"native_actions_busy", "game_connection_unavailable"}:
+                    settled = False
+                    self.retry_after = time.monotonic() + .8
+                else:
+                    client.control.event("native_guest_cooked_meal_rejected", operation_id=operation, reason=str(error))
+            else:
+                client.control.event("native_guest_cooked_meal", operation_id=operation, **result)
+            if settled:
+                self.pending.popleft()
+                # A snapshot already requested could contain vitals from before the host applied the meal.
+                await client.cancel_gameplay_snapshot()
+                self.health_seen = client.gameplay_seen
+                if client.stock_interaction_scope() != scope:
+                    return True
+                client.next_snapshot = 0.0
+        self._collect(client, scope)
+        if self.pending and self.request is None and time.monotonic() >= self.retry_after:
+            self.request = asyncio.create_task(self._send(client, scope, *self.pending[0]))
+            self.request.add_done_callback(lambda _: client.bridge.wake_guest_update())
+        if self.health_seen is not None and client.gameplay_seen > self.health_seen:
+            self.health_seen = None
+        return bool(self.pending or self.health_seen is not None)
 
 
 async def use_cooked_meal(host, bridge, character, target, operation):
@@ -221,6 +299,18 @@ async def use_cooked_meal(host, bridge, character, target, operation):
             or game.get("state") != "hosting" or time.monotonic() - host.last_seen > 3):
         raise party.RuleError("guest_cooked_meal_unavailable")
     request = [COOKED_MEAL, target, None]
+    outcome_epoch, outcomes = host.cooked_meal_outcomes
+    if outcome_epoch != epoch:
+        outcomes = {}
+        host.cooked_meal_outcomes = epoch, outcomes
+    key = character, operation
+    if key in outcomes:
+        original, outcome = outcomes[key]
+        if original != target:
+            raise party.RuleError("operation_id_conflict")
+        if isinstance(outcome, str):
+            raise RuntimeError(outcome)
+        return outcome
     for receipt in host.party["receipts"].get(character, ()):
         if receipt["id"] == operation:
             if receipt["request"] != request:
@@ -235,17 +325,31 @@ async def use_cooked_meal(host, bridge, character, target, operation):
         raise party.RuleError("guest_cooked_meal_working_save_unavailable")
     if epoch != host.zone_epoch or host.native_recipients().get(character, {}).get("pawn") != pawn:
         raise party.RuleError("guest_cooked_meal_visit_changed")
-    snapshot = await bridge.command(COOKED_MEAL, pawn, *map(str, amounts), timeout=4)
-    message = snapshot.get("ack", {}).get("message", "").split()
-    if (snapshot.get("state") != "hosting" or snapshot.get("map") != game.get("map")
-            or len(message) != 7 or message[:2] != ["cooked", "meal"]):
-        raise RuntimeError("The guest cooked meal could not be verified")
-    food, health, regen, fatigue, intox = map(float, message[2:])
-    if not (0 <= food <= 200 and 0 <= health <= 1_000_000 and 0 <= regen <= 1_000_000
-            and 0 <= fatigue <= 100 and 0 <= intox <= 100):
-        raise RuntimeError("The guest cooked meal has invalid readback")
+    # If the local command executes and loses its reply, retrying the delta is unsafe.
+    unknown = "guest_cooked_meal_outcome_unavailable"
+    outcomes[key] = target, unknown
+    try:
+        snapshot = await bridge.command(COOKED_MEAL, pawn, *map(str, amounts), timeout=4)
+        message = snapshot.get("ack", {}).get("message", "").split()
+        if (snapshot.get("state") != "hosting" or snapshot.get("map") != game.get("map")
+                or len(message) != 7 or message[:2] != ["cooked", "meal"]):
+            raise RuntimeError("The guest cooked meal could not be verified")
+        food, health, regen, fatigue, intox = map(float, message[2:])
+        if not (0 <= food <= 200 and 0 <= health <= 1_000_000 and 0 <= regen <= 1_000_000
+                and 0 <= fatigue <= 100 and 0 <= intox <= 100):
+            raise RuntimeError("The guest cooked meal has invalid readback")
+    except LocalCommandNotSubmitted as error:
+        del outcomes[key]
+        raise party.RuleError("native_actions_busy") from error
+    except (OSError, RuntimeError, ValueError) as error:
+        if str(error) == "guest_cooked_meal_refused_scope":
+            outcomes[key] = target, str(error)
+            raise
+        host.control.event("host_guest_cooked_meal_outcome_uncertain", operation_id=operation, reason=str(error))
+        raise RuntimeError(unknown) from error
     host.last_game, host.last_seen = snapshot, time.monotonic()
     result = {"cooked_meal": dict(food=food, health=health, regen=regen, fatigue=int(fatigue), intox=int(intox))}
+    outcomes[key] = target, result
     recent = host.party["receipts"].setdefault(character, [])
     recent.append({"id": operation, "request": request, "result": result})
     del recent[:-party.RECENT_ACTIONS]

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish import native_guest_consumable as consumable, native_guest_drop_record, native_inventory, party
+from tools.silverfish.local_bridge import LocalCommandNotSubmitted
 from tools.silverfish.travel import OBSERVATORY
 
 
@@ -58,7 +59,45 @@ class PersonalConsumableTests(unittest.IsolatedAsyncioTestCase):
                                stopping=False, transitioning=False, native_checkpoint_unsafe=False,
                                last_game={"state": "hosting", "map": OBSERVATORY}, last_seen=time.monotonic(),
                                native_recipients=lambda: {CHARACTER: {"connected": True, "pawn": PAWN}},
-                               party=state, native_pickup=Mock(), control=Mock(), checkpoint_native=AsyncMock())
+                               cooked_meal_outcomes=(EPOCH, {}), party=state, native_pickup=Mock(),
+                               control=Mock(), checkpoint_native=AsyncMock())
+
+    async def test_cooked_meal_replays_after_the_general_receipt_rotates_out(self):
+        host = self.host()
+        target = f"{EPOCH}@20,0,0,0,0"
+        reply = {**host.last_game, "ack": {"message": "cooked meal 75 100 100 40 0"}}
+        bridge = SimpleNamespace(command=AsyncMock(return_value=reply))
+        with patch.object(native_inventory, "retain_guest_save", new_callable=AsyncMock, return_value=True):
+            original = await consumable.use_cooked_meal(host, bridge, CHARACTER, target, OPERATION)
+            host.party["receipts"].clear()
+            self.assertEqual(await consumable.use_cooked_meal(host, bridge, CHARACTER, target, OPERATION), original)
+            with self.assertRaisesRegex(party.RuleError, "operation_id_conflict"):
+                await consumable.use_cooked_meal(host, bridge, CHARACTER, target.replace("@20", "@21"), OPERATION)
+        bridge.command.assert_awaited_once()
+        host.checkpoint_native.assert_not_awaited()
+
+    async def test_cooked_meal_does_not_reapply_an_uncertain_or_refused_local_command(self):
+        for error, outcome in ((TimeoutError(), "guest_cooked_meal_outcome_unavailable"),
+                               (RuntimeError("guest_cooked_meal_refused_scope"), "guest_cooked_meal_refused_scope"),
+                               (LocalCommandNotSubmitted(), "native_actions_busy")):
+            with self.subTest(outcome=outcome):
+                host = self.host()
+                target = f"{EPOCH}@20,0,0,0,0"
+                reply = {**host.last_game, "ack": {"message": "cooked meal 75 100 100 40 0"}}
+                bridge = SimpleNamespace(command=AsyncMock(side_effect=[error, reply]))
+                with patch.object(native_inventory, "retain_guest_save", new_callable=AsyncMock, return_value=True):
+                    error_type = party.RuleError if outcome == "native_actions_busy" else RuntimeError
+                    with self.assertRaisesRegex(error_type, outcome):
+                        await consumable.use_cooked_meal(host, bridge, CHARACTER, target, OPERATION)
+                    if outcome == "native_actions_busy":
+                        self.assertEqual((await consumable.use_cooked_meal(host, bridge, CHARACTER, target, OPERATION))
+                                         ["cooked_meal"]["food"], 75)
+                        self.assertEqual(bridge.command.await_count, 2)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, outcome):
+                            await consumable.use_cooked_meal(host, bridge, CHARACTER, target, OPERATION)
+                        bridge.command.assert_awaited_once()
+                host.checkpoint_native.assert_not_awaited()
 
     async def test_receipt_replay_applies_only_once_and_keeps_checkpoint_deferred(self):
         host = self.host()

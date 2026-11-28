@@ -613,6 +613,18 @@ return avatar
 """, 1)
 
 
+def instrument_switch_reads(source):
+    read = "    local encoded = read_switch(entry, name, state, phase, row, native_world_address)\n"
+    census = "    local discovered = census(state, phase)\n"
+    if source.count(read) != 1 or source.count(census) != 1:
+        raise ValueError("The stock switch timing anchors changed")
+    return source.replace(read, """    local category = entry.latch and "switches.latch" or entry.candle and "switches.candle"
+        or entry.power and "switches.powered_prop" or "switches.linked"
+    local encoded = SilverfishProfileCrossroadsCall(category, read_switch, entry, name, state, phase, row,
+        native_world_address)
+""").replace(census, '    local discovered = SilverfishProfileCrossroadsCall("switches.census", census, state, phase)\n')
+
+
 def instrument_anomaly_work(source):
     calls = (
         "pyrogeist.apply", "shadows.project", "lamps.project", "observers.target", "observers.publish_rewards",
@@ -1008,11 +1020,13 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
         if reply == "unavailable":
             return None
         assert not reply.startswith("switch comparison failed"), reply
-        switches, streamed, native_ms, lua_ms, native_kib, lua_kib = map(float, reply.split(","))
+        switches, streamed, native_ms, lua_ms, native_kib, lua_kib, candle_reads, candle_ms, candle_kib = map(
+            float, reply.split(","))
         return {"fast_reads_per_pass": int(switches), "streamed_fast_reads_per_pass": int(streamed),
                 "passes_per_reader": 32, "all_rows_matched": True,
                 "native_ms": native_ms, "lua_ms": lua_ms, "native_heap_growth_kib": native_kib,
-                "lua_heap_growth_kib": lua_kib}
+                "lua_heap_growth_kib": lua_kib, "native_candle_reads_per_pass": int(candle_reads),
+                "without_native_candle_ms": candle_ms, "without_native_candle_heap_growth_kib": candle_kib}
 
     def position(status):
         return status.get("game", {}).get("pawns", {}).get("local", {}).get("location")
