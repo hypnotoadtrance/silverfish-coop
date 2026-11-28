@@ -5492,6 +5492,7 @@ class Client:
         self.weather_sirens = native_weather_view.SirenPlayback()
         self.weather_lightning = native_weather_view.LightningPlayback()
         self.storm_ambience = native_storm_ambience.Projection()
+        self.world_view_cursor = None
         self.anomaly_playback = native_anomaly_effects.Playback()
         self.acid_pool_playback = native_anomaly_effects.AcidPoolPlayback()
         self.destructible_playback = native_destructibles.Playback()
@@ -5734,6 +5735,7 @@ class Client:
 
     def _complete_game_link(self, connected: dict) -> None:
         self.last_game = connected
+        self.world_view_cursor = None
         self.needs_travel = False
         self.loading_zone = None
         self.source_fade = None
@@ -6832,7 +6834,10 @@ class Client:
             await self.crate_lids.sync(self)
 
     async def project_world_view(self) -> None:
-        area = self.last_game.get("map")
+        scope = self.stock_interaction_scope()
+        if scope is None:
+            return
+        _, epoch, area, _ = scope
         expected_actor = WORLD_VIEW_ACTORS.get(area)
         if time.monotonic() - self.gameplay_seen >= 2 or not expected_actor:
             return
@@ -6840,11 +6845,15 @@ class Client:
         if (not isinstance(frame, dict) or frame.get("map") != area or frame.get("mode") != "sample"
                 or frame.get("actor") != expected_actor):
             return
-        if not self.zone_epoch or type(frame.get("sequence")) is not int or not 0 < frame["sequence"] < 2**53:
+        sequence = frame.get("sequence")
+        if type(sequence) is not int or not 0 < sequence < 2**53:
+            return
+        if self.world_view_cursor and self.world_view_cursor[0] == scope and self.world_view_cursor[1] >= sequence:
             return
         prior = self.last_game.get("native_world_view", {})
         if (prior.get("map") == area and prior.get("actor") == expected_actor
-                and prior.get("epoch") == self.zone_epoch and prior.get("sequence", 0) >= frame["sequence"]):
+                and prior.get("epoch") == epoch and prior.get("sequence", 0) >= sequence):
+            self.world_view_cursor = scope, prior["sequence"]
             return
         keys = ("game_seconds", "pitch", "yaw", "roll", "sun_x", "sun_y", "sun_z", "sun_intensity")
         numeric = [frame.get(key) for key in keys]
@@ -6865,20 +6874,32 @@ class Client:
         rain_args = tuple(map(str, rain)) if rain_present else ()
         action = (native_weather_view.LOCAL_APPLY if self.last_game.get(native_weather_view.LOCAL_CAPABILITY) is True
                   else "native-world-view-apply")
-        snapshot = await self.bridge.command(
-            action, self.zone_epoch, str(frame["sequence"]), area, expected_actor,
-            *(str(value) for value in numeric[:-1]), "1" if frame["sun_visible"] else "0", str(numeric[-1]),
-            *("-" if value is None else str(value) for value in sky), *weather_args, *rain_args, timeout=3,
-        )
+        try:
+            snapshot = await self.bridge.command(
+                action, epoch, str(sequence), area, expected_actor,
+                *(str(value) for value in numeric[:-1]), "1" if frame["sun_visible"] else "0", str(numeric[-1]),
+                *("-" if value is None else str(value) for value in sky), *weather_args, *rain_args, timeout=3,
+            )
+        except RuntimeError as error:
+            if str(error) != native_weather_view.ALREADY_OBSERVED:
+                raise
+            if self.stock_interaction_scope() == scope:
+                # The local weather lease may already have expired. Remember
+                # the ordering without rekindling it or projecting old weather.
+                self.world_view_cursor = scope, sequence
+            return
+        if self.stock_interaction_scope() != scope:
+            return
         proof = snapshot.get("native_world_view", {})
         rain_skipped = (rain_present and rain[0] > 0 and proof.get("rain_verified") is False
                         and proof.get("rain_skipped_nullrhi") is True)
         if (proof.get("map") != area or proof.get("actor") != expected_actor
-                or proof.get("mode") != "applied" or proof.get("epoch") != self.zone_epoch
-                or proof.get("sequence") != frame["sequence"] or proof.get("save_unchanged") is not True
+                or proof.get("mode") != "applied" or proof.get("epoch") != epoch
+                or proof.get("sequence") != sequence or proof.get("save_unchanged") is not True
                 or weather_present and proof.get("weather_verified") is not True
                 or rain_present and not (proof.get("rain_verified") is True or rain_skipped)):
             raise RuntimeError("The connected guest did not verify the host's rendered world frame")
+        self.world_view_cursor = scope, sequence
         self.last_game = (self.bridge.remember_local_world_view(self.last_game, snapshot)
                           if "native_world_view_local_scope" in snapshot else snapshot)
 

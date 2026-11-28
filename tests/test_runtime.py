@@ -667,6 +667,16 @@ class GameplayStatusTests(unittest.TestCase):
 
 
 class WorldWeatherTests(unittest.IsolatedAsyncioTestCase):
+    def client(self, bridge, area, epoch, source, game=None):
+        transport = SimpleNamespace(address=("127.0.0.1", 17777), connected=True)
+        client = service.Client(Mock(), transport, {"character_id": "guest"}, bridge)
+        client.host_session = uuid.uuid4().hex
+        client.zone_epoch, client.expected_zone = epoch, area
+        client.last_game = game or {"state": "connected", "map": area, "pawns": {"local": {"name": "guest pawn"}}}
+        client.gameplay_seen = service.time.monotonic()
+        client.gameplay = {"host_world": {"native_world_view": source}}
+        return client
+
     async def test_the_fog_density_survives_the_snapshot_and_guest_bridge(self):
         area = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
         actor = service.WORLD_VIEW_ACTORS[area]
@@ -697,8 +707,7 @@ class WorldWeatherTests(unittest.IsolatedAsyncioTestCase):
 
         bridge.local_bridge = AsyncMock()
         bridge.local_bridge.command.side_effect = reply
-        client = SimpleNamespace(bridge=bridge, zone_epoch=epoch, last_game={"state": "connected", "map": area},
-                                 gameplay_seen=service.time.monotonic(), gameplay={"host_world": {"native_world_view": source}})
+        client = self.client(bridge, area, epoch, source)
         await service.Client.project_world_view(client)
         applied = client.last_game["native_world_view"]
         self.assertTrue(applied["weather_verified"])
@@ -732,9 +741,8 @@ class WorldWeatherTests(unittest.IsolatedAsyncioTestCase):
                 proof = reply["native_world_view"]
                 self.assertEqual(proof["rain_verified"], marker == "1")
                 self.assertEqual(proof.get("rain_skipped_nullrhi", False), wet and marker == "nullrhi")
-                client = SimpleNamespace(bridge=SimpleNamespace(command=AsyncMock(return_value=reply)), zone_epoch=epoch,
-                                         last_game={"state": "connected", "map": area}, gameplay_seen=service.time.monotonic(),
-                                         gameplay={"host_world": {"native_world_view": {**source, "rain_intensity": intensity}}})
+                client = self.client(SimpleNamespace(command=AsyncMock(return_value=reply)), area, epoch,
+                                     {**source, "rain_intensity": intensity})
                 if accepted:
                     await service.Client.project_world_view(client)
                     applied = client.last_game["native_world_view"]
@@ -769,8 +777,7 @@ class WorldWeatherTests(unittest.IsolatedAsyncioTestCase):
         bridge.local_bridge.read_status.return_value = full(9)
         initial = bridge.snapshot()
         source = dict(runtime._parse_world_view(world_view.rstrip("\n").split("\t"), "hosting"), mode="sample")
-        client = SimpleNamespace(bridge=bridge, zone_epoch=epoch, last_game=initial,
-                                 gameplay_seen=service.time.monotonic(), gameplay={"host_world": {"native_world_view": source}})
+        client = self.client(bridge, area, epoch, source, initial)
         await service.Client.project_world_view(client)
         proof = client.last_game["native_world_view"]
         self.assertTrue(proof["weather_verified"] and proof["rain_verified"] and proof["save_unchanged"])
@@ -779,6 +786,13 @@ class WorldWeatherTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("native_world_view", initial)
         self.assertEqual(bridge.snapshot(), client.last_game)
         await service.Client.project_world_view(client)
+        bridge.local_bridge.command.assert_awaited_once()
+
+        # The Lua lease can expire while the host's last sample is still on the wire.
+        bridge.local_bridge.read_status.return_value = full(10)
+        client.last_game = bridge.snapshot()
+        self.assertNotIn("native_world_view", client.last_game)
+        await client.project_world_view()
         bridge.local_bridge.command.assert_awaited_once()
 
         # A full successor or a different local pawn must supersede the transient receipt.
@@ -796,7 +810,7 @@ class WorldWeatherTests(unittest.IsolatedAsyncioTestCase):
             nonce = request.decode().split("\t", 1)[0]
             return full(11, readback=world_view, ack=nonce)
 
-        client.last_game = initial
+        client = self.client(bridge, area, epoch, source, initial)
         bridge.local_bridge.command.side_effect = full_reply
         await service.Client.project_world_view(client)
         self.assertEqual(client.last_game["sequence"], 11)
@@ -815,11 +829,35 @@ class WorldWeatherTests(unittest.IsolatedAsyncioTestCase):
                         return "\n".join(message.splitlines()[:2]).replace("accepted\tapplied", "error\tweather restored") + "\n"
                     return message.removesuffix("1\n") + "0\n"
 
-                client.last_game = initial
+                client = self.client(bridge, area, epoch, source, initial)
                 bridge.local_bridge.command.side_effect = altered
                 with self.assertRaisesRegex(RuntimeError, error):
                     await service.Client.project_world_view(client)
                 self.assertIsNone(bridge._local_world_view)
+
+    async def test_repeated_world_sample_after_missing_reply_allows_the_next_sample_and_a_new_binding(self):
+        area = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+        actor = service.WORLD_VIEW_ACTORS[area]
+        epoch = uuid.uuid4().hex
+        source = dict(map=area, actor=actor, mode="sample", sequence=14, game_seconds=1000, pitch=20, yaw=40, roll=0,
+                      sun_x=0, sun_y=0, sun_z=1, sun_intensity=5, sun_visible=True)
+        command = AsyncMock(side_effect=RuntimeError(service.native_weather_view.ALREADY_OBSERVED))
+        client = self.client(SimpleNamespace(command=command), area, epoch, source)
+        await client.project_world_view()
+        await client.project_world_view()
+        command.assert_awaited_once()
+        self.assertNotIn("native_world_view", client.last_game)
+
+        source["sequence"] = 15
+        proof = dict(source, mode="applied", epoch=epoch, save_unchanged=True)
+        command.side_effect = None
+        command.return_value = {**client.last_game, "native_world_view": proof}
+        await client.project_world_view()
+        self.assertEqual(client.last_game["native_world_view"], proof)
+
+        client._complete_game_link({key: value for key, value in client.last_game.items() if key != "native_world_view"})
+        await client.project_world_view()
+        self.assertEqual(command.await_count, 3)
 
 
 class SharedStockStageTests(unittest.TestCase):

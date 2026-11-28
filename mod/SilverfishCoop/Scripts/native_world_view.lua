@@ -461,9 +461,11 @@ function view.apply(state, phase, frame)
     local cleared, clear_error = view.sync(state, phase)
     if not cleared then error(clear_error, 0) end
     local current = context(state, phase)
-    if receipt and same(receipt.world, current.world) and same(receipt.connection, current.connection)
-        and (receipt.epoch ~= frame.epoch or frame.sequence <= receipt.sequence) then
-        error("native_world_snapshot_stale_or_wrong_epoch", 0)
+    if receipt and same(receipt.world, current.world) and same(receipt.connection, current.connection) then
+        if receipt.epoch ~= frame.epoch then error("native_world_snapshot_wrong_epoch", 0) end
+        if same(receipt.pawn, current.pawn) and frame.sequence <= receipt.sequence then
+            error("native_world_snapshot_already_observed", 0)
+        end
     end
     local saved_seconds = game_seconds(current.save)
     local now = real_time(current)
@@ -511,7 +513,8 @@ function view.apply(state, phase, frame)
         error(restored and report or "native_world_projection_restore_unverified", 0)
     end
     lease.status_report, lease.status_recheck = report, now + status_recheck_seconds
-    receipt = {world = current.world, connection = current.connection, epoch = frame.epoch, sequence = frame.sequence}
+    receipt = {world = current.world, connection = current.connection, pawn = current.pawn,
+        epoch = frame.epoch, sequence = frame.sequence}
     return report
 end
 

@@ -23,6 +23,7 @@ LIGHTNING_LIFETIME = 3.0
 LIGHTNING_MIN_LIFE = 0.08
 LOCAL_APPLY = "native-world-view-apply-local"
 LOCAL_CAPABILITY = "native_world_view_apply_local"
+ALREADY_OBSERVED = "native_world_snapshot_already_observed"
 RAIN_FIELDS = ("rain_intensity", "rain_x", "rain_y", "rain_z")
 MAX_SIRENS = 4
 _SOURCE = re.compile(r"/Game/[A-Za-z0-9_/.:]{1,378}")
