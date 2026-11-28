@@ -7,13 +7,14 @@ local container_path = "/Game/Classes/Actors/Lootables/LootContainer_Master_BP.L
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local world, phase, container_class, marker_class, installed, censused
 local queued, entries, serial = {}, {}, 0
+local ended = {}
 
 local function valid(object) return object and object:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
 
 local function runtime_container(actor)
     return valid(container_class) and valid(actor) and actor:IsA(container_class)
-        and not actor:HasAnyFlags(0x00080000) -- RF_WasLoaded
+        and not actor:HasAnyFlags(EObjectFlags.RF_WasLoaded)
         and world_path.visible_actor_level(actor, world) and same(actor:GetOuter(), world.PersistentLevel)
 end
 
@@ -46,11 +47,12 @@ local function register(state, entry)
         if not actor.bReplicates then return end
         local marker = reference.spawn(world, marker_class, "crate", actor, entry.number)
         if not valid(marker) then return end
-        if not loot.profile_at(state.map, index) then
+        local profile = loot.profile_at(state.map, index)
+        if not profile then
             marker:K2_DestroyActor()
             return
         end
-        entries[address] = {actor = actor, marker = marker}
+        entries[address] = {actor = actor, marker = marker, profile = profile}
         return true
     end
     local marker = actor
@@ -68,7 +70,7 @@ local function install()
     RegisterBeginPlayPostHook(function(context)
         local actor = context:get()
         if phase == "hosting" and valid(container_class) and valid(actor) and actor:IsA(container_class)
-            and not actor:HasAnyFlags(0x00080000) and same(actor:GetWorld(), world) then
+            and not actor:HasAnyFlags(EObjectFlags.RF_WasLoaded) and same(actor:GetWorld(), world) then
             queue(actor)
         elseif phase == "connected" and valid(actor) and same(actor:GetClass(), marker_class) then
             queue(actor)
@@ -84,8 +86,10 @@ local function install()
         local address = actor:GetAddress()
         local entry = entries[address]
         queued[address], entries[address] = nil, nil
-        if phase == "hosting" and entry and valid(entry.marker) and not entry.marker:IsActorBeingDestroyed() then
-            entry.marker:K2_DestroyActor()
+        if phase == "hosting" and entry then
+            ended[#ended + 1] = entry.profile.name
+            if #ended > 128 then table.remove(ended, 1) end
+            if valid(entry.marker) and not entry.marker:IsActorBeingDestroyed() then entry.marker:K2_DestroyActor() end
         end
     end)
     installed = true
@@ -100,7 +104,7 @@ function crates.sync(state, seat)
     install()
     if not installed then return end
     if not same(world, state.world) or phase ~= seat then
-        world, phase, queued, entries, censused = state.world, seat, {}, {}, false
+        world, phase, queued, entries, ended, censused = state.world, seat, {}, {}, {}, false
     end
     if not censused then
         container_class, marker_class = StaticFindObject(container_path), StaticFindObject(reference.class)
@@ -123,6 +127,13 @@ function crates.sync(state, seat)
             attempts = attempts + 1
             if attempts >= 4 then break end
         end
+    end
+end
+
+function crates.append_ended(rows, state, status_row)
+    if phase ~= "hosting" or not same(world, state.world) then return end
+    for _, name in ipairs(ended) do
+        rows[#rows + 1] = status_row("native-runtime-crate-ended", state.map, name)
     end
 end
 

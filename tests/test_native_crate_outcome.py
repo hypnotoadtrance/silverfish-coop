@@ -19,6 +19,7 @@ class CrateOutcomeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.host = SimpleNamespace(
             last_game={"state": "hosting", "map": OBSERVATORY}, zone_epoch=self.epoch,
+            runtime_crate_sweep=(self.epoch, ()),
             native_loot_input=True, native_profile=object(), stopping=False, transitioning=False,
             native_checkpoint_unsafe=False, party=party.new_party(), control=MagicMock(),
             native_recipients=lambda: {"guest": {"connected": True, "pawn": "guest pawn"},
@@ -146,6 +147,7 @@ class CrateOutcomeTests(unittest.IsolatedAsyncioTestCase):
             self.crate: accepted["native_loot_roll"],
         })
         self.assertNotIn(self.crate, native_loot.checkpoint_party(state)[native_loot.STATE_KEY])
+        self.assertEqual(native_loot.checkpoint_party(state)["receipts"]["guest"], [])
         self.assertIn(self.crate, state[native_loot.STATE_KEY])
         self.bridge.command.reset_mock()
         pending, saves = await native_loot.flush_pending_escrows(self.host, self.bridge, state)
@@ -153,3 +155,35 @@ class CrateOutcomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saves, {})
         self.bridge.command.assert_not_awaited()
         self.assertIsNone(native_loot.crate_area(self.crate.rsplit(":", 1)[0] + ":65536"))
+
+    async def test_runtime_retirement_requires_destruction_or_a_new_visit(self):
+        actor_class = "/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C"
+        for serial, end_play in ((3, True), (4, False)):
+            with self.subTest(end_play=end_play):
+                self.crate = f"LootCrate_Small_BP_C {actor_class} runtime:{OBSERVATORY}:{serial}"
+                operation = f"{serial:032x}"
+                body = transfer.report_body(self.host.zone_epoch, self.crate, self.outcome)
+                await transfer.accept(self.host, self.bridge, "guest", body, operation)
+                state = self.host.party
+                roll = state[native_loot.STATE_KEY][self.crate]
+                claim = {"id": "c" * 32, "request": ["native-loot-claim", self.item["guid"], self.crate],
+                         "result": {"native_loot_claim": self.item, "native_loot_crate": self.crate}}
+                state["receipts"]["friend"] = [claim]
+                self.bridge.command.reset_mock()
+                await native_loot.retire_runtime_crates(self.host, self.bridge)
+                self.bridge.command.assert_not_awaited()
+                self.assertIs(self.host.party, state)
+                if end_play:
+                    self.host.last_game[native_loot.RUNTIME_ENDED] = {self.crate: True}
+                    with self.assertRaisesRegex(party.RuleError, "runtime_crate_ended"):
+                        await transfer.accept(self.host, self.bridge, "guest", body, operation)
+                else:
+                    self.host.zone_epoch = "f" * 32
+                self.bridge.command.side_effect = None
+                await native_loot.retire_runtime_crates(self.host, self.bridge)
+                self.bridge.command.assert_awaited_once_with("native-loot-retire-runtime-escrows",
+                                                             roll["escrow"]["slot"], update_status=False)
+                self.assertNotIn(self.crate, self.host.party[native_loot.STATE_KEY])
+                self.assertEqual(self.host.party["receipts"]["guest"], [])
+                self.assertEqual(self.host.party["receipts"]["friend"], [claim])
+                self.bridge.command.side_effect = self.adopt

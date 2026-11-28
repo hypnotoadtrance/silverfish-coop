@@ -23,6 +23,11 @@
         if mode == "observe" then
             return table.concat({crate:GetFullName(), tostring(crate:HasAuthority()), tostring(crate.Looted)}, ";")
         end
+        if mode == "destroy" then
+            assert(phase == "hosting" and crate:HasAuthority() and crate.Looted == true)
+            crate:K2_DestroyActor()
+            return "destroyed"
+        end
         assert(mode == "interact" and phase == "connected" and not crate:HasAuthority() and crate.Looted == false)
         assert(require("native_loot_crate_input").stock_focus(state.local_pawn.pawn, crate.Box))
         return "pressed"

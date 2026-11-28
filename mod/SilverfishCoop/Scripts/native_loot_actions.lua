@@ -244,6 +244,16 @@ function actions.release_pending()
 end
 
 function actions.command(fields, state, phase, status_row)
+    if fields[2] == "native-loot-retire-runtime-escrows" then
+        if not enabled or phase ~= "hosting" or #fields < 3 or #fields > 18 then
+            error("native_loot_escrow_save_scope_unavailable", 0)
+        end
+        for index = 3, #fields do
+            if not valid_slot(fields[index]) then error("native_loot_escrow_save_slot_invalid", 0) end
+        end
+        for index = 3, #fields do actions.retire_pending_escrow(fields[index]) end
+        return "runtime loot escrows retired"
+    end
     if fields[2] == "native-loot-flush-escrows" or fields[2] == "native-loot-release-escrows" then
         if not enabled or phase ~= "hosting" or #fields < 3 or #fields > 18 then
             error("native_loot_escrow_save_scope_unavailable", 0)

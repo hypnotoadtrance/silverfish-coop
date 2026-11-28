@@ -18,6 +18,7 @@ ROLL_REVISION = "native_loot_roll_revision"
 CRATE_DIAGNOSTIC = "native-loot-crate-diagnostic"
 CRATE_DIAGNOSTICS = "native_loot_crate_diagnostics"
 RETIRED = "native_loot_retired_rolls"
+RUNTIME_ENDED = "native_runtime_crates_ended"
 REPLENISHED = "native_replenished_crates"
 VEHICLE_LOCKS = "native_loot_vehicle_locks"
 STOCK_ALARMS = "native_loot_stock_alarms"
@@ -76,7 +77,7 @@ async def submit_loot_command(host, bridge, action, operation_id, *arguments, ti
 
 
 def public_roll(roll: dict) -> dict:
-    return {key: value for key, value in roll.items() if key != "escrow"}
+    return {key: value for key, value in roll.items() if key not in {"escrow", "runtime_visit"}}
 
 
 def remember_claim_snapshot(host, bridge, snapshot):
@@ -131,8 +132,46 @@ def checkpoint_party(state):
     if not any(runtime_crate(crate) for crate in state.get(STATE_KEY, {})) and not any(
             runtime_crate(crate) for crate in state.get(RETIRED, {}).values()):
         return state
-    return {**state, STATE_KEY: {crate: roll for crate, roll in state.get(STATE_KEY, {}).items() if not runtime_crate(crate)},
+    receipts = {character: [receipt for receipt in entries
+                            if not runtime_crate(receipt["result"].get("native_loot_roll", {}).get("crate"))]
+                for character, entries in state["receipts"].items()}
+    return {**state, "receipts": receipts,
+            STATE_KEY: {crate: roll for crate, roll in state.get(STATE_KEY, {}).items() if not runtime_crate(crate)},
             RETIRED: {key: crate for key, crate in state.get(RETIRED, {}).items() if not runtime_crate(crate)}}
+
+
+def runtime_ended(host, crate, roll):
+    return runtime_crate(crate) and (crate in host.last_game.get(RUNTIME_ENDED, {})
+                                    or bool(roll and roll.get("runtime_visit") != host.zone_epoch))
+
+
+async def retire_runtime_crates(host, bridge):
+    game = host.last_game
+    if (game.get("state") != "hosting" or host.stopping or host.transitioning
+            or host.native_checkpoint_unsafe or host.party.get("wipe")):
+        return
+    observed = (host.zone_epoch, tuple(game.get(RUNTIME_ENDED, {})))
+    if observed == host.runtime_crate_sweep:
+        return
+    rolls = host.party.get(STATE_KEY, {})
+    retired = {crate: roll for crate, roll in rolls.items() if runtime_ended(host, crate, roll)}
+    if not retired:
+        host.runtime_crate_sweep = observed
+        return
+    slots = [roll["escrow"]["slot"] for roll in retired.values()]
+    for start in range(0, len(slots), 16):
+        await bridge.command("native-loot-retire-runtime-escrows", *slots[start:start + 16], update_status=False)
+    candidate = copy_pending_loot(host.party, STATE_KEY)
+    candidate["receipts"] = {
+        character: [receipt for receipt in entries
+                    if receipt["result"].get("native_loot_roll", {}).get("crate") not in retired]
+        for character, entries in candidate["receipts"].items()
+    }
+    for crate, roll in retired.items():
+        del candidate[STATE_KEY][crate]
+        host.control.event("native_runtime_loot_retired", crate=crate, roll_id=roll["id"])
+    host.party = candidate
+    host.runtime_crate_sweep = observed
 
 
 def pry_defers_unlock(crate: str) -> bool:
@@ -932,6 +971,8 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
         if crate in host.party.get(KEY_UNLOCKS, {}) and host.last_game.get(VEHICLE_LOCKS, {}).get(crate) is not False:
             raise party.RuleError("native_loot_key_unlock_restoring")
     saved = rolls.get(crate)
+    if action == "open" and runtime_ended(host, crate, saved):
+        raise party.RuleError("native_loot_runtime_crate_ended")
     if saved and action in ("open", "inspect"):
         if crate in _replenished(host.last_game, rolls):
             raise party.RuleError("native_loot_replenishment_pending")
@@ -948,7 +989,8 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
                 raise party.RuleError("operation_id_conflict")
             return receipt["result"]
         item = next((row for row in saved.get("items", ()) if row.get("guid") == guid), None) if saved else None
-        if not item or not saved.get("escrow") or crate in _replenished(host.last_game, rolls):
+        if (not item or not saved.get("escrow") or crate in _replenished(host.last_game, rolls)
+                or runtime_ended(host, crate, saved)):
             raise party.RuleError("native_loot_item_unavailable")
         if item.get("claimed_by"):
             raise party.RuleError("native_loot_already_claimed")
@@ -1047,6 +1089,8 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             roll = {"id": operation_id, "map": area, "crate": crate, "opener": character,
                     "lucky_looter": proof["lucky_looter"], "trait_source": proof["trait_source"],
                     "trait_calls": proof["trait_calls"], "items": items, "escrow": frame}
+            if runtime_crate(crate):
+                roll["runtime_visit"] = host.zone_epoch
             if lid := random_lid(crate):
                 settled = await _settled_native_lid(bridge, snapshot, crate, lid)
                 roll[lid[0]] = settled["native_loot_crates"][crate][lid[0]]

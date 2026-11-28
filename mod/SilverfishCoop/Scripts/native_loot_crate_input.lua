@@ -5,6 +5,7 @@ local lid_preview = require("native_loot_crate_preview")
 local stock_door = require("native_stock_door")
 local stock_alert = require("native_cash_popup")
 local guest_save = require("guest_save")
+local runtime_crates = require("native_runtime_crates")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_LOOT") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
@@ -1021,6 +1022,7 @@ function input.rows(state, phase, status_row, fields, separate_details, requeste
     end
     local rows = {}
     if gameplay then rows[#rows + 1] = gameplay end
+    if phase == "hosting" then runtime_crates.append_ended(rows, state, status_row) end
     if details and not separate_details then
         rows[#rows + 1] = details
         details = nil

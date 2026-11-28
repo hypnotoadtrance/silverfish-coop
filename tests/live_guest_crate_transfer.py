@@ -166,8 +166,17 @@ async def verify_runtime_transfer(host, guest, pawn):
     checkpoint = json.loads((host.campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
     assert crate not in checkpoint["world"]["party"].get(native_loot.STATE_KEY, {})
     assert (await command(guest, "observe", crate)).endswith(";false;true")
+    saved_hashes = suite.campaign_save_hashes(host.campaign)
+    assert await command(host, "destroy", crate) == "destroyed"
+    gone = await asyncio.gather(*(suite.wait(run, lambda frame:
+        crate not in frame["game"].get("native_loot_crates", {})
+        and crate not in frame.get("gameplay", {}).get(native_loot.STATE_KEY, {})) for run in (host_run, guest_run)))
+    events = await suite.resident_events(host_run, gone[0])
+    assert any(row["event"] == "native_runtime_loot_retired" and row["roll_id"] == roll["id"] for row in events)
+    assert suite.campaign_save_hashes(host.campaign) == saved_hashes
     return {"crate": crate, "host_actor": host_name, "guest_actor": guest_name, "items": len(roll["items"]),
-            "pickup": pickup, "checkpoint_unchanged_before_save": True, "runtime_roll_excluded_from_checkpoint": True}
+            "pickup": pickup, "checkpoint_unchanged_before_save": True, "runtime_roll_excluded_from_checkpoint": True,
+            "destroyed_on_both_seats": True, "destroyed_roll_released_without_save": True}
 
 
 async def exercise(work, first, second, saved):

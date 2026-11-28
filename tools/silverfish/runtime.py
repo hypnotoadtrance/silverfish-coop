@@ -73,7 +73,7 @@ from . import native_host_dig, native_host_dig_live, native_package_handoff_jour
 from . import native_title_entry
 from .native_host_landmine import parse as parse_host_landmine
 from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
-from .authored_loot import (CRATES as AUTHORED_CRATES, CRATE_NAMES_BY_INDEX, crate_area, loot_capacity, random_lid,
+from .authored_loot import (CRATES as AUTHORED_CRATES, CRATE_NAMES_BY_INDEX, crate_area, loot_capacity, random_lid, runtime_crate,
                             valid_item_transform, valid_lid_angle, lockable_container)
 from .native_matrix import MatrixRequest, parse_report as parse_matrix_report, parse_request as parse_matrix_request
 from .native_quest_catalog import parse as parse_quest_catalog
@@ -2642,6 +2642,10 @@ class Bridge:
                         data["native_wipe_view"]["screen"] = fields[13]
                 elif fields[0] == "native-loot-crate-state":
                     _read_crate_state(data, fields)
+                elif (fields[0] == "native-runtime-crate-ended" and len(fields) == 3
+                        and data.get("state") == "hosting" and runtime_crate(fields[2])
+                        and crate_area(fields[2]) == fields[1] == data.get("map")):
+                    data.setdefault(native_loot.RUNTIME_ENDED, {})[fields[2]] = True
                 elif (fields[0] == "native-loot-crate-input" and len(fields) in (4, 5)
                       and AUTHORED_CRATES.get(fields[2]) == fields[1] and fields[3] in ("ready", "exhausted")):
                     _store_crate_state(data, *fields[1:])

@@ -91,12 +91,14 @@ async def accept(host, bridge, character, target, operation):
             or host.party["players"].get(character, {}).get("downed") is not False):
         raise party.RuleError("native_loot_outcome_scope_unavailable")
     fingerprint = [REPORT, crate, sha256(target.encode("utf-8")).hexdigest()]
+    rolls = host.party.get(native_loot.STATE_KEY, {})
+    if native_loot.runtime_ended(host, crate, rolls.get(crate)):
+        raise party.RuleError("native_loot_runtime_crate_ended")
     for receipt in host.party["receipts"].get(character, ()):
         if receipt["id"] == operation:
             if receipt["request"] != fingerprint:
                 raise party.RuleError("operation_id_conflict")
             return receipt["result"]
-    rolls = host.party.get(native_loot.STATE_KEY, {})
     if operation in host.party.get(native_loot.RETIRED, {}):
         raise party.RuleError("native_loot_roll_replenished")
     if any(roll["id"] == operation and key != crate for key, roll in rolls.items()):
@@ -123,7 +125,10 @@ async def accept(host, bridge, character, target, operation):
         raise RuntimeError("The stock crate outcome adoption did not verify")
     roll = observed_roll(crate, area, character, operation, outcome)
     candidate = native_loot.copy_pending_loot(host.party, native_loot.STATE_KEY, character=character)
-    candidate.setdefault(native_loot.STATE_KEY, {})[crate] = {**roll, "escrow": {"slot": slot, "map": area, "pending": True}}
+    retained = {**roll, "escrow": {"slot": slot, "map": area, "pending": True}}
+    if native_loot.runtime_crate(crate):
+        retained["runtime_visit"] = host.zone_epoch
+    candidate.setdefault(native_loot.STATE_KEY, {})[crate] = retained
     result = {"native_loot_roll": roll}
     receipts = candidate["receipts"][character]
     receipts.append({"id": operation, "request": fingerprint, "result": result})

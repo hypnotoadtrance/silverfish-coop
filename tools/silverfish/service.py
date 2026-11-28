@@ -403,6 +403,7 @@ class Host:
         self.marker_ready = False
         self.next_projection = 0.0
         self.zone_epoch = uuid.uuid4().hex
+        self.runtime_crate_sweep = (self.zone_epoch, ())
         self.gameplay_snapshots = gameplay_snapshot.HostSnapshots()
         self.guest_wallet_receipts = {}
         self.guest_inventory_grants = {}
@@ -4578,6 +4579,7 @@ class Host:
                     await self.advance_dream(bridge, transport)
             if self.native_loot_input:
                 try:
+                    await native_loot.retire_runtime_crates(self, bridge)
                     await native_loot.retire_replenished(self, bridge)
                 except (OSError, ValueError, RuntimeError) as error:
                     self.control.event("native_loot_replenishment_unavailable", reason=str(error))
