@@ -63,6 +63,17 @@ end
         status_publication.mirror = window.mirror
         probe.title_status_window = nil
         message = tostring(window.status_file_attempts)
+    elseif action == "pausescope" and not capture then
+        local sample = SilverfishProfilePauseScope
+        if type(sample) == "function" then
+            local ok, result = pcall(function()
+                local state = inspect()
+                return sample(state, phase(state))
+            end)
+            message = ok and result or ("pause scope comparison failed: " .. tostring(result))
+        else
+            message = "unavailable"
+        end
     elseif (action == "hostweather" or action == "hostwet") and not capture then
         local sample = SilverfishProfileHostWeather
         if type(sample) == "function" then
@@ -1628,6 +1639,84 @@ async def read_world_scene(command, host):
 
 
 
+def instrument_pause_scope(source):
+    if "SilverfishReadNativePauseDriver" not in source:
+        return source
+    declaration = "\nlocal function context(state, phase)\n"
+    call = "\nfunction pause.sync(state, phase)\n    local scene = context(state, phase)\n"
+    success = """            if driver then
+                return {world = world, driver = driver, controller = controller, pawn = pawn, role = role,
+                    world_id = world_id, controller_id = controller_id, pawn_id = pawn_id}
+            end
+"""
+    stop = "\nreturn pause\n"
+    assert all(source.count(anchor) == 1 for anchor in (declaration, call, success, stop))
+    source = source.replace(declaration, "\nlocal observed_native_pause\nlocal function context(state, phase, from_sync)\n")
+    source = source.replace(call, call.replace("context(state, phase)", "context(state, phase, true)"))
+    source = source.replace(success, """            if driver then
+                local scene = {world = world, driver = driver, controller = controller, pawn = pawn, role = role,
+                    world_id = world_id, controller_id = controller_id, pawn_id = pawn_id}
+                if from_sync then observed_native_pause = scene end
+                return scene
+            end
+""")
+    return source.replace(stop, r"""
+
+function SilverfishProfilePauseScope(state, phase)
+    local read = assert(SilverfishReadNativePauseDriver, "native pause reader is unavailable")
+    local stock = assert(context_lua(state, phase), "stock pause scope unavailable")
+    local world, controller, pawn, map = stock.world_id, stock.controller_id, stock.pawn_id, state.map
+    local guest = stock.role == "guest"
+    local driver = read(world, controller, pawn, map, guest)
+    assert(same(driver, stock.driver), "native pause driver differs from the qualified stock driver")
+    local observed = observed_native_pause
+    if not observed or observed ~= active_scene or not observed.generation
+        or not same(observed.driver, driver) or observed.world_id ~= world
+        or observed.controller_id ~= controller or observed.pawn_id ~= pawn then return "pending" end
+    local compact = context(state, phase)
+    assert(compact and compact.role == stock.role and same(compact.world, stock.world)
+        and same(compact.controller, stock.controller) and same(compact.pawn, stock.pawn)
+        and same(compact.driver, stock.driver), "native pause scene differs from stock")
+    assert(read(world + 1, controller, pawn, map, guest) == nil
+        and read(world, controller + 1, pawn, map, guest) == nil
+        and read(world, controller, pawn + 1, map, guest) == nil
+        and read(world, controller, pawn, map .. "_Missing", guest) == nil
+        and read(world, controller, pawn, map, not guest) == nil,
+        "native pause reader accepted another world, player, or role")
+    local count = 32
+    local native_ms, lua_ms, native_kib, lua_kib = SilverfishProfileCrossroadsCompare(
+        count, function() return context(state, phase) end, function() return context_lua(state, phase) end)
+    return ("%s,%s,%d,%.3f,%.3f,%.3f,%.3f"):format(stock.role, observed.generation,
+        count, native_ms, lua_ms, native_kib, lua_kib)
+end
+
+return pause
+""")
+
+
+async def read_pause_scope(command, seats):
+    async def sample(seat, role):
+        deadline = time.monotonic() + 8
+        while (reply := await command(seat, "pausescope")) == "pending":
+            assert time.monotonic() < deadline, f"No ordinary native pause scope for {role}"
+            await asyncio.sleep(.15)
+        if reply == "unavailable":
+            return None
+        assert not reply.startswith("pause scope comparison failed"), (role, reply)
+        owner, generation, count, native_ms, lua_ms, native_kib, lua_kib = reply.split(",")
+        assert owner == role and TOKEN.fullmatch(generation) and generation != "0" * 32 and int(count) == 32, reply
+        return {"native_pause_generation": generation, "normal_native_scope_armed": True,
+                "matched_stock_driver_and_seat": True, "wrong_world_player_map_and_role_refused": True,
+                "passes_per_reader": int(count), "native_ms": float(native_ms), "lua_ms": float(lua_ms),
+                "native_heap_growth_kib": float(native_kib), "lua_heap_growth_kib": float(lua_kib)}
+
+    replies = await asyncio.gather(*(sample(seat, role) for role, seat in seats.items()))
+    if all(reply is None for reply in replies):
+        return {}
+    assert all(replies), replies
+    return dict(zip(seats, replies, strict=True))
+
+
 def instrument_host_weather(source):
     if "SilverfishReadNativeHostWeather" not in source:
         return source
@@ -2875,6 +2964,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     session_census = await read_session_census(host, guest, probe, area)
     world_scene = await read_world_scene(command, host)
     native_host_weather = await read_host_weather_observation(host, probe, area)
+    pause_scope = await read_pause_scope(command, seats) if area == CROSSROADS else {}
     if area == CROSSROADS and session_census:
         assert all(sample["prior_travel_map_refused"] for sample in session_census.values()), session_census
     scheduler = {}
@@ -3407,6 +3497,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             "native_session_census": session_census,
             "world_scene_comparison": world_scene,
             "native_host_weather_comparison": native_host_weather,
+            "native_pause_scope_comparison": pause_scope,
             "idle": idle, "guest_walking": moving,
             "guest_max_displacement_cm": displacement,
             "transport_idle": traffic(before, after_idle), "transport_guest_walking": traffic(before_movement, after_movement),

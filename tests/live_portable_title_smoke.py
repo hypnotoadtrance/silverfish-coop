@@ -714,6 +714,82 @@ def launch_portable(game: Path, profile: Path, *, rendered: bool = False) -> Gam
     return GameProcess(arguments, executable=image, cwd=image.parent, env=env, startupinfo=info)
 
 
+async def native_startup_receipt(mailbox, process, *, ordinary_after=None):
+    receipt_path = mailbox / "native-title-startup-fixture.json"
+    async with asyncio.timeout(15):
+        while process.poll() is None:
+            try:
+                receipt = runtime.read_json(receipt_path, limit=2048)
+            except (FileNotFoundError, PermissionError):
+                pass
+            else:
+                first, sequence = receipt.get("first_sequence"), receipt.get("sequence")
+                assert receipt.get("pid") == process.pid and type(first) is type(sequence) is int and 0 < first < sequence, receipt
+                assert "bridge_sequence" in receipt, receipt
+                baseline = receipt["bridge_sequence"]
+                if ordinary_after is None:
+                    assert baseline is None, receipt
+                    return receipt
+                if type(baseline) is int and baseline > ordinary_after:
+                    return receipt
+            await asyncio.sleep(.1)
+    raise RuntimeError("The isolated game exited before the native title startup receipt")
+
+
+async def verify_cold_native_title(game, work, release, stock_slots, proof, *, rendered):
+    mods = game / runtime.SHIPPING.parent / "ue4ss/Mods"
+    mods_list = mods / "mods.txt"
+    enabled = mods / "SilverfishCoop/enabled.txt"
+    suspended = enabled.with_name(f"enabled.cold-title-{uuid.uuid4().hex}.txt")
+    assert not os.path.lexists(mods_list) and not os.path.lexists(suspended)
+    native_enabled = mods / runtime.CPP_MOD_NAME / "enabled.txt"
+    runtime_enabled = mods / install_stage.MOD / "enabled.txt"
+    for marker in (enabled, native_enabled, runtime_enabled):
+        install_stage._ordinary(marker)
+    log = mods.parent / "UE4SS.log"
+    prior_log = log.read_bytes() if log.is_file() else b""
+    title = work / release.title_directory
+    profile, mailbox_root = title / "game-user", title / "run/game-bridge"
+    stock = profile / "Saved/SaveGames"
+    stock.mkdir(parents=True)
+    for source in stock_slots:
+        shutil.copy2(source, stock / source.name)
+    process = None
+    created_activation = False
+
+    enabled.rename(suspended)
+    try:
+        with mods_list.open("x", encoding="ascii") as activation:
+            created_activation = True
+            activation.write("SilverfishCoop : 0\n")
+        try:
+            assert not enabled.exists() and native_enabled.is_file() and runtime_enabled.is_file()
+            process = launch_portable(game, profile, rendered=rendered)
+            proof.update(launches=1, pid=process.pid)
+            mailbox = await discover_mailbox(mailbox_root, process)
+            assert runtime.read_json(mailbox / embedded_startup.UNIFIED_FILE) == release.selection
+            receipt = await native_startup_receipt(mailbox, process)
+            raw = log.read_bytes()
+            current_log = raw[len(prior_log):] if prior_log and raw.startswith(prior_log) else raw
+            assert b"Mod 'SilverfishCoop' disabled in mods.txt." in current_log, "UE4SS did not report disabling the Lua module"
+            assert b"Starting Lua mod 'SilverfishCoop'" not in current_log and not enabled.exists()
+            absent = ("status.tsv", "status.tsv.tmp", "command-reply.tsv", "title-handoff-session.tsv")
+            assert not any(os.path.lexists(mailbox / name) for name in absent), "The Lua-disabled startup wrote a Lua status or offer"
+            assert process.poll() is None
+            proof.update(startup=receipt, bridge=mailbox.name, lua_module_disabled=True,
+                         no_lua_status_or_offer=True, verified=True)
+        finally:
+            if process is not None and process.poll() is None:
+                await runtime.stop_game(process)
+            proof["process_closed"] = process is not None and process.poll() is not None
+            proof["verified"] = proof.get("verified", False) and proof["process_closed"]
+    finally:
+        if created_activation:
+            mods_list.unlink()
+        suspended.rename(enabled)
+    assert proof["process_closed"]
+
+
 def fingerprint(path: Path) -> str | None:
     if not os.path.lexists(path):
         return None
@@ -1620,8 +1696,14 @@ async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict)
         assert await command(host, f"dock-aim\t{target}") == "ready"
         async def shoot_guest(remaining):
             started = time.time()
-            tap = await submit(guest_run, "native-guest-primary-input-fixture")
-            assert tap["ok"], tap
+            async with asyncio.timeout(5):
+                while True:
+                    tap = await submit(guest_run, "native-guest-primary-input-fixture")
+                    if tap["ok"]:
+                        break
+                    # This refusal precedes stock dispatch. Other failures still fail the test.
+                    assert tap["error"] == "Stock primary input is temporarily blocked by the equipped player's state", tap
+                    await asyncio.sleep(.15)
             sequence = tap["native_guest_primary_fixture"]["sequence"]
             async with asyncio.timeout(8):
                 while True:
@@ -8603,6 +8685,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  missing_contact_open_check=None,
                  missing_contact_untracked_check=None,
                  zone_lease_preflight: bool = False,
+                 cold_native_title: bool = False,
                  resident_cabinet_archive: Path | None = None,
                  resident_cabinet_checkpoint: Path | None = None,
                  resident_cabinet_candidate_sha256: str | None = None) -> None:
@@ -8886,6 +8969,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                        or guest_stash_memory or nonmirrored_startup or stock_unequip or stock_fire_mode_reopen or manage_saves
                        or resident_cabinet_archive is not None)
     try:
+        if cold_native_title:
+            startup = proof["cold_native_title"] = {"verified": False, "launches": 0}
+            await verify_cold_native_title(first_game, case / "native-title-cold", qualified[0], stock_slots,
+                                           startup, rendered=rendered)
         if manage_saves:
             for game in games:
                 probes.enter_context(portable_script_overlay(game, "native_title_surface.lua", with_test_profile_photo))
@@ -8921,7 +9008,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 instrument_host_stash_status,
                 instrument_inline_crate_scan,
                 instrument_input_mappings, instrument_journal_context,
-                instrument_loose_discovery, instrument_npc_class_discovery, instrument_profile,
+                instrument_loose_discovery, instrument_npc_class_discovery, instrument_pause_scope, instrument_profile,
                 instrument_ready_roster, instrument_shop_discovery, instrument_spawn_context, instrument_stash_binding,
                 instrument_switch_reads, instrument_title_rows, instrument_vital_reads, instrument_weather_status,
                 instrument_world_scene,
@@ -9009,6 +9096,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(portable_script_overlay(game, name, instrument))
                 for game in games
                 for name, instrument in (
+                    ("native_coop_pause.lua", instrument_pause_scope),
                     ("native_title_entry.lua", instrument_title_rows),
                     ("native_world.lua", instrument_world_scene),
                     ("native_world_view.lua", instrument_weather_status),
@@ -9373,10 +9461,31 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
 
         first, second = seats
         proof["boot_seconds"] = round(time.perf_counter() - boot_started, 3)
+        native_startup_baselines = {}
+        if cold_native_title:
+            receipts = await asyncio.gather(*(native_startup_receipt(seat.bridge.directory, seat.bridge.process)
+                                              for seat in seats))
+            proof["initial_independent_native_title"] = dict(zip(("host", "guest"), receipts, strict=True))
+            native_startup_baselines = {seat.bridge.process.pid: 0 for seat in seats}
+
+        async def selected_native_title(host, guest):
+            receipts = await asyncio.gather(*(native_startup_receipt(
+                seat.bridge.directory, seat.bridge.process,
+                ordinary_after=native_startup_baselines[seat.bridge.process.pid]) for seat in (host, guest)))
+            ready = await asyncio.gather(*(
+                wait_resident_status(run, lambda frame, floor=receipt["bridge_sequence"], pid=receipt["pid"]:
+                    frame.get("pid") == pid and frame.get("game", {}).get("sequence", 0) >= floor)
+                for run, receipt in zip((host.campaign / "run", guest.client / "run"), receipts, strict=True)))
+            for receipt in receipts:
+                native_startup_baselines[receipt["pid"]] = receipt["bridge_sequence"]
+            return {role: {**receipt, "gameplay_sequence": frame["game"]["sequence"]}
+                    for role, receipt, frame in zip(("host", "guest"), receipts, ready, strict=True)}
 
         async def check_gameplay(host, guest, pawn):
             evidence = await verify_gameplay(host, guest, pawn, stock_drop=stock_drop, stock_split=stock_split,
                                              stock_equip=stock_equip, stock_nearby=stock_nearby, projected_nearby=projected_nearby)
+            if cold_native_title:
+                evidence["independent_native_title_startup"] = await selected_native_title(host, guest)
             if stock_use:
                 evidence["guest_stock_use"] = await verify_stock_use(host, guest, pawn, starter=guest is second)
             if memory_bridge:
@@ -9456,6 +9565,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 async def run_checks(host, guest, _pawn):
                     gameplay["join_seconds"] = round(time.perf_counter() - campaign_started, 3)
                     proof.setdefault("join_seconds", gameplay["join_seconds"])
+                    if cold_native_title:
+                        gameplay["independent_native_title_startup"] = await selected_native_title(host, guest)
                     gameplay.update(await run_resident_checks(checks, host, guest, finish_check, skip_check))
                     if crossroads_profile and ((campaign == "crossroads" and stock_crossroads_door)
                                                or (campaign == "tutorial_dock" and stock_warehouse_switch)
@@ -9765,7 +9876,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["stock_travel_failure"] = str(error)
         raise
     finally:
-        proof["game_executable_launches"] = len(processes)
+        proof["game_executable_launches"] = len(processes) + proof.get("cold_native_title", {}).get("launches", 0)
         proof["native_boot_states"] = {str(game): boot_states(game) for game, _ in processes}
         for _, process in reversed(processes):
             if process.poll() is None:
@@ -9794,6 +9905,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True, help="Existing private parent for new evidence and profile directories")
     parser.add_argument("--first-game", type=Path, required=True, help="Clean replica with the release ZIP applied and no mods.txt")
+    parser.add_argument("--cold-native-title", action="store_true",
+                        help="verify one extra cold preattach worker start with the co-op Lua module disabled")
     parser.add_argument("--second-game", type=Path, required=True, help="Separate replica with the same release ZIP applied")
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--stock-pause-exit", action="store_true",
@@ -10117,7 +10230,7 @@ if __name__ == "__main__":
         parser.error("--crossroads-gc-trial stopped requires --rendered")
     if args.crossroads_host_maintenance_trial and not (args.crossroads_profile and args.rendered):
         parser.error("--crossroads-host-maintenance-trial requires --crossroads-profile and --rendered")
-    resident_check_options.update(("guest_stash_memory", "guest_stash_large_memory"))
+    resident_check_options.update(("guest_stash_memory", "guest_stash_large_memory", "cold_native_title"))
     if args.crossroads_profile:
         resident_check_options.add("stock_crate_ring")
     if any((args.stock_food, args.stock_cooked_meal, args.stock_personal_consumable, args.stock_wipe_chooser,
@@ -10242,5 +10355,6 @@ if __name__ == "__main__":
                        guest_shop_lease=args.guest_shop_lease, guest_stash_memory=args.guest_stash_memory,
                        guest_stash_large_memory=args.guest_stash_large_memory,
                        zone_lease_preflight=args.zone_lease_preflight,
+                       cold_native_title=args.cold_native_title,
                        resident_cabinet_archive=cabinet_archive, resident_cabinet_checkpoint=cabinet_checkpoint,
                        resident_cabinet_candidate_sha256=args.resident_cabinet_candidate_sha256))

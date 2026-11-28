@@ -74,6 +74,8 @@ The target is a shipped co-op runtime that does all game-thread work through the
 3. Move the remaining stock UI and gameplay callbacks by feature. Remove each retired Lua callback and its dispatch entries once the C++ path passes the stock entry point, shared result, and recovery checks.
 4. Move any data the production path still loads from Lua into ordinary data files or native tables. Replace capability checks based on script presence with an explicit native capability report and build fingerprint. Verify a package with the co-op Lua module disabled. Run normal singleplayer, host and guest startup, Steam and Direct IP joining, travel, pickup and inventory, combat, reconnect, and stock save boundaries before removing the Lua module from the release bundle.
 
+The title worker now requires two fresh native startup samples. When a session starts, it matches that title to the ordinary bridge and uses the ordinary sequence for command acknowledgments. The native sequence tracks only the startup samples. [Native startup proof](../native/title_startup.cpp) · [Worker qualification](../tools/silverfish/embedded_engine.py)
+
 UE4SS still supplies access to the shipped game's reflected objects and functions. The transport and campaign worker can have its own C++ migration based on background CPU, queue, and network measurements. Foreground frame captures will still include Unreal and the game's stock Blueprint work. [UE4SS C++ mod guide](https://docs.ue4ss.com/guides/creating-a-c%2B%2B-mod.html)
 
 ## Gameplay path audit
