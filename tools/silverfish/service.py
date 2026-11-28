@@ -7379,23 +7379,41 @@ class Client:
             self.control.event("local_interaction", operation_id=operation,
                                elapsed_ms=round((time.monotonic() - started) * 1000, 1), **result)
 
+    async def claim_world_loot(self, scope, operation, loot, action, claim):
+        target = claim
+        settlement = origin = None
+        if action == native_loot.CLAIM:
+            guid, _, crate = claim.partition("@")
+            pending = self.provisional_crate_rolls.get(crate)
+            if pending and pending[0] == scope:
+                _, local_roll, acknowledgement = pending
+                roll_id = local_roll["id"]
+                if native_world_loot.crate_identity(roll_id, guid) == loot[1]:
+                    settlement, origin = acknowledgement, roll_id
+                    target = f"{claim}@{origin}@{scope[1]}"
+
+        async def send():
+            async with self.stock_pickup_slots:
+                if self.stock_interaction_scope() != scope:
+                    raise ValueError("The stock pickup visit changed")
+                return await self.gameplay_action(action, operation, target, defer_pickup_cue=True)
+
+        try:
+            return await send()
+        except ValueError as error:
+            if settlement is None or str(error) != native_loot.CLAIM_ORIGIN_PENDING:
+                raise
+        # Independent QUIC streams can deliver the shorter claim first. Free
+        # its request slot while waiting and retry the exact claim only once.
+        if await asyncio.shield(settlement) != origin:
+            raise ValueError("The party accepted a different stock crate roll")
+        return await send()
+
     async def apply_stock_interaction(self, scope, operation, target):
         if loot := native_world_loot.target_parts(target):
             action, claim = self.world_loot.claim_target(self.last_game, loot)
             source = self.world_loot.items.get(loot[1])
-            if action == native_loot.CLAIM:
-                crate = claim.partition("@")[2]
-                pending = self.provisional_crate_rolls.get(crate)
-                if pending and pending[0] == scope:
-                    _, local_roll, settlement = pending
-                    if await asyncio.shield(settlement) != local_roll["id"] or self.stock_interaction_scope() != scope:
-                        raise ValueError("The party accepted a different stock crate roll")
-            # A local crate can be visible before the host adopts its roll.
-            # Wait for that dependency before taking a network request slot.
-            async with self.stock_pickup_slots:
-                if self.stock_interaction_scope() != scope:
-                    raise ValueError("The stock pickup visit changed")
-                result = await self.gameplay_action(action, operation, claim, defer_pickup_cue=True)
+            result = await self.claim_world_loot(scope, operation, loot, action, claim)
             cue = result.pop(native_pickup_audio.KEY, None)
             if self.stock_interaction_scope() == scope:
                 inventory = result.pop(native_inventory_grant.PICKUP, None)

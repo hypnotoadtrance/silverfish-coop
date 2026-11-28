@@ -150,6 +150,11 @@ async def verify_runtime_transfer(host, guest, pawn):
     guest_name, authority, opened = (await command(guest, "observe", crate)).split(";")
     assert authority == opened == "false"
     assert await command(host, "observe", crate) == f"{host_name};true;false"
+    visit = (await suite.wait(guest_run, lambda frame: bool(frame.get("zone_epoch"))))["zone_epoch"]
+    probe_origin = "9" * 32
+    early_claim = await suite.submit(guest_run, native_loot.CLAIM,
+                                     target=f"{'A' * 32}@{crate}@{probe_origin}@{visit}")
+    assert early_claim.get("ok") is False and early_claim.get("error") == native_loot.CLAIM_ORIGIN_PENDING, early_claim
     assert await command(guest, "interact", crate) == "pressed"
     frames = await asyncio.gather(*(suite.wait(run, lambda frame:
         frame["game"].get("native_loot_crates", {}).get(crate, {}).get("state") == "exhausted"
@@ -159,6 +164,9 @@ async def verify_runtime_transfer(host, guest, pawn):
     accepted = [row for row in await suite.resident_events(host_run, frames[0])
                 if row["event"] == "native_loot_roll_accepted" and row["id"] == roll["id"]]
     assert len(accepted) == 1 and accepted[0].get("origin") == "player", accepted
+    losing_claim = await suite.submit(guest_run, native_loot.CLAIM,
+                                       target=f"{'A' * 32}@{crate}@{probe_origin}@{visit}")
+    assert losing_claim.get("ok") is False and losing_claim.get("error") == "native_loot_origin_changed", losing_claim
     pickup = await suite.claim_stock_crate_item(host, guest, pawn, crate, roll, *frames) if roll["items"] else None
     assert suite.campaign_save_hashes(host.campaign) == before
     saved = await suite.submit(host_run, "checkpoint")
@@ -176,7 +184,8 @@ async def verify_runtime_transfer(host, guest, pawn):
     assert suite.campaign_save_hashes(host.campaign) == saved_hashes
     return {"crate": crate, "host_actor": host_name, "guest_actor": guest_name, "items": len(roll["items"]),
             "pickup": pickup, "checkpoint_unchanged_before_save": True, "runtime_roll_excluded_from_checkpoint": True,
-            "destroyed_on_both_seats": True, "destroyed_roll_released_without_save": True}
+            "destroyed_on_both_seats": True, "destroyed_roll_released_without_save": True,
+            "early_claim_waits_for_its_origin": True, "competing_roll_claim_refused": True}
 
 
 async def exercise(work, first, second, saved):

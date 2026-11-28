@@ -953,6 +953,34 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
             await native_loot.perform(host, bridge, "host", "claim", f"{guid}@{LEGACY_CRATE}", OPERATION)
         bridge.command.assert_awaited_once_with("native-loot-claim", PAWN, OTHER_CRATE, guid, slot, timeout=6)
 
+    async def test_claim_with_opening_dependency_settles_the_exact_roll_and_visit_once(self):
+        origin, epoch = "1" * 32, "e" * 32
+        host = self.host(CROSSROADS, {})
+        host.zone_epoch = epoch
+        guid = ITEM["guid"]
+        target = f"{guid}@{OTHER_CRATE}@{origin}@{epoch}"
+        roll = dict(self.roll(CROSSROADS, OTHER_CRATE, origin), opener="host")
+        slot = roll["escrow"]["slot"]
+        proof = {"action": "claim", "map": CROSSROADS, "pawn": PAWN, "crate": OTHER_CRATE, "escrow_slot": slot,
+                 "ok": True, "invoked": True, "status": "claimed"}
+        bridge = SimpleNamespace(command=AsyncMock(return_value=self.game(CROSSROADS, native_loot=proof)))
+        with self.assertRaisesRegex(party.RuleError, native_loot.CLAIM_ORIGIN_PENDING):
+            await native_loot.perform(host, bridge, "host", "claim", target, OPERATION)
+        host.party[native_loot.STATE_KEY][OTHER_CRATE] = dict(roll, id="2" * 32)
+        with self.assertRaisesRegex(party.RuleError, "native_loot_origin_changed"):
+            await native_loot.perform(host, bridge, "host", "claim", target, OPERATION)
+        host.party[native_loot.STATE_KEY][OTHER_CRATE] = roll
+        with self.assertRaisesRegex(party.RuleError, "native_loot_claim_visit_unavailable"):
+            await native_loot.perform(host, bridge, "host", "claim", target[:-32] + "a" * 32, OPERATION)
+        bridge.command.assert_not_awaited()
+
+        result = await native_loot.perform(host, bridge, "host", "claim", target, OPERATION)
+        self.assertEqual(result["native_loot_claim"]["claimed_by"], "host")
+        self.assertEqual(await native_loot.perform(host, bridge, "host", "claim", target, OPERATION), result)
+        with self.assertRaisesRegex(party.RuleError, "operation_id_conflict"):
+            await native_loot.perform(host, bridge, "host", "claim", f"{guid}@{OTHER_CRATE}", OPERATION)
+        bridge.command.assert_awaited_once()
+
     def test_escrow_merge_frames_bind_distinct_exact_guids_and_quantities(self):
         guid, destination, slot = ITEM["guid"], "B" * 32, native_host_save.new_slot()
         base = f"schema\t1\nsession\thost\thosting\t{CROSSROADS}\t0\t1\n"

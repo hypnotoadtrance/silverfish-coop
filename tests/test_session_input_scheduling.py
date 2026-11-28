@@ -712,9 +712,10 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         projection = client.world_loot
         projection.epoch, projection.seat = epoch, ("connected", OBSERVATORY, scope[3])
         projection.retire_claim = AsyncMock(return_value=client.last_game)
-        crate = "pending crate"
+        crate = native_loot.default_crate(OBSERVATORY)
+        origin = "b" * 32
         adoption = asyncio.get_running_loop().create_future()
-        client.provisional_crate_rolls[crate] = scope, {"id": "local roll"}, adoption
+        client.provisional_crate_rolls[crate] = scope, {"id": origin}, adoption
 
         inputs = []
         for index in range(6):
@@ -724,9 +725,10 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
                 if index == 3:
                     inputs.append(("repeat-press-3", target))
                 continue
-            item = str(index) * 32
+            guid = str(index + 1) * 32
+            item = native_world_loot.crate_identity(origin, guid) if index < 3 else guid
             action = native_world_loot.CRATE_CLAIM if index < 3 else native_world_loot.ENEMY_CLAIM
-            target = f"{item}@{crate}" if index < 3 else item
+            target = f"{guid}@{crate}" if index < 3 else guid
             projection.items[item] = native_world_loot.Item(item, "stock item", {}, action, target, 1)
             inputs.append((f"press-{index}", f"world-loot:{epoch}:{item}:{index + 1}"))
         inputs.insert(1, ("repeat-press-0", inputs[0][1].rsplit(":", 1)[0] + ":9"))
@@ -742,9 +744,15 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         both_outcomes = {f"press-{index}" for index in range(6)}
         finished = asyncio.Event()
         operations = []
+        early = []
 
-        async def send(action, operation, _target, *, defer_pickup_cue):
+        async def send(action, operation, target, *, defer_pickup_cue):
             self.assertTrue(defer_pickup_cue)
+            if action == native_loot.CLAIM:
+                self.assertTrue(target.endswith(f"@{crate}@{origin}@{epoch}"))
+                if not adoption.done():
+                    early.append(operation)
+                    raise ValueError(native_loot.CLAIM_ORIGIN_PENDING)
             if operation in ("press-3", "press-5"):
                 self.assertEqual(action, service.native_loose_pickup.CLAIM)
             operations.append(operation)
@@ -762,18 +770,46 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         task = asyncio.create_task(client.run_stock_interactions())
         try:
             await asyncio.wait_for(second_sent.wait(), 1)
+            self.assertEqual(early, ["press-0", "press-1", "press-2"])
             self.assertEqual(operations, ["press-3", "press-4"])
             self.assertFalse(third_sent.is_set())
             release.set()
             await asyncio.wait_for(third_sent.wait(), 1)
             self.assertFalse(adoption.done())
-            adoption.set_result("local roll")
+            adoption.set_result(origin)
             await asyncio.wait_for(finished.wait(), 1)
             self.assertEqual(operations, ["press-3", "press-4", "press-5", "press-0", "press-1", "press-2"])
         finally:
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await task
+
+    async def test_claim_can_finish_before_the_opening_reply_and_rejects_a_losing_roll(self):
+        client = self.guest(AsyncMock())
+        epoch, origin, guid = "a" * 32, "b" * 32, "C" * 32
+        scope = ("session", epoch, OBSERVATORY, "guest pawn")
+        client.stock_interaction_scope = Mock(return_value=scope)
+        crate = native_loot.default_crate(OBSERVATORY)
+        target = f"{guid}@{crate}"
+        identity = native_world_loot.crate_identity(origin, guid)
+        settlement = asyncio.get_running_loop().create_future()
+        client.provisional_crate_rolls[crate] = (scope, {"id": origin}, settlement)
+        client.gameplay_action = AsyncMock(return_value={"picked": guid})
+        self.assertEqual(await client.claim_world_loot(scope, "claim", (epoch, identity), native_loot.CLAIM, target),
+                         {"picked": guid})
+        self.assertFalse(settlement.done())
+        client.gameplay_action.assert_awaited_once_with(native_loot.CLAIM, "claim", f"{target}@{origin}@{epoch}",
+                                                       defer_pickup_cue=True)
+
+        client.gameplay_action.reset_mock()
+        client.gameplay_action.side_effect = ValueError(native_loot.CLAIM_ORIGIN_PENDING)
+        task = asyncio.create_task(client.claim_world_loot(scope, "losing claim", (epoch, identity),
+                                                          native_loot.CLAIM, target))
+        await asyncio.sleep(0)
+        settlement.set_result(None)
+        with self.assertRaisesRegex(ValueError, "accepted a different stock crate roll"):
+            await task
+        self.assertEqual(client.gameplay_action.await_count, 1)
 
     async def test_pickup_waiting_for_a_request_slot_drops_input_after_travel(self):
         client = self.guest(AsyncMock())

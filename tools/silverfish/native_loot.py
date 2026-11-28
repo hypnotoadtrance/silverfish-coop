@@ -42,6 +42,7 @@ SPECIAL_MEMORY_CAPABILITY = "native_loot_special_memory"
 INSPECTION_BYTES = "native_loot_inspection_reply_bytes"
 OPEN_REPLY_BYTES = "native_loot_open_reply_bytes"
 CLAIM = "native-loot-claim"
+CLAIM_ORIGIN_PENDING = "native_loot_origin_pending"
 CLAIM_REPLY_HEADER = "native-pickup-claim-reply\t1\n"
 CLAIM_REPLY_BYTES = "native_pickup_claim_reply_bytes"
 
@@ -921,10 +922,19 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
         raise party.RuleError("native_loot_opener_unavailable")
     rolls = rolls_in_area(host.party.get(STATE_KEY, {}), area)
     crate = target
+    origin = None
     if action == "claim":
         guid, separator, crate = target.partition("@")
         if not valid_guid(guid):
             raise party.RuleError("native_loot_requires_exact_crate_and_operation")
+        crate, dependent, origin = crate.partition("@")
+        if dependent:
+            origin, visit_separator, visit = origin.partition("@")
+            if (not visit_separator or not party.REQUEST_ID.fullmatch(origin)
+                    or visit != epoch or not party.REQUEST_ID.fullmatch(visit)):
+                raise party.RuleError("native_loot_claim_visit_unavailable")
+        else:
+            origin = None
         receipt = next((entry for entry in host.party["receipts"].get(character, []) if entry["id"] == operation_id), None)
         if receipt and not separator:
             request = receipt["request"]
@@ -984,10 +994,18 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
     memory_escrow = False
     if action == "claim":
         fingerprint = ["native-loot-claim", guid, crate]
+        if origin is not None:
+            fingerprint.extend((origin, visit))
         if receipt:
             if receipt["request"] != fingerprint:
                 raise party.RuleError("operation_id_conflict")
             return receipt["result"]
+        if origin is not None:
+            if (origin in retired or runtime_ended(host, crate, saved)
+                    or saved and (saved["id"], saved.get("opener")) != (origin, character)):
+                raise party.RuleError("native_loot_origin_changed")
+            if not saved:
+                raise party.RuleError(CLAIM_ORIGIN_PENDING)
         item = next((row for row in saved.get("items", ()) if row.get("guid") == guid), None) if saved else None
         if (not item or not saved.get("escrow") or crate in _replenished(host.last_game, rolls)
                 or runtime_ended(host, crate, saved)):
