@@ -201,7 +201,7 @@ local profiles = {
         authority_sight = true,
     },
 }
-local map_profiles, empty_map, cash_limits = {}, {}, {}
+local map_profiles, map_sources, empty_map, cash_limits = {}, {}, {}, {}
 for _, profile in ipairs(require("authored_cash_catalog")) do
     cash_limits[profile.class] = {profile.cash_min, profile.cash_max}
     profiles[#profiles + 1] = profile
@@ -212,9 +212,13 @@ end
 for _, profile in ipairs(profiles) do
     if not profile.fixture_only or (os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") == "1"
         and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1" and os.getenv("SILVERFISH_COOP_HEADLESS") == "1") then
+        profile.actor_name = profile.name .. " " .. profile.path
         local entries = map_profiles[profile.map] or {}
+        local sources = map_sources[profile.map] or {}
         entries[#entries + 1] = profile
+        sources[#sources + 1] = profile.source
         map_profiles[profile.map] = entries
+        map_sources[profile.map] = sources
     end
 end
 
@@ -985,7 +989,7 @@ local function append_authored_row(rows, state, row, profile, active, claimed, s
         if not valid(actor) or actor.bHidden ~= false or actor:GetActorEnableCollision() ~= true then return end
     end
     rows[#rows + 1] = row("native-authored-pickup", profile.source, state.map,
-        profile.name .. " " .. profile.path, profile.class, claimed and "claimed" or "available",
+        profile.actor_name, profile.class, claimed and "claimed" or "available",
         published_cash(profile, amount))
     if sequence > 0 then
         rows[#rows + 1] = row("native-authored-pickup-interaction", profile.source, state.map,
@@ -997,10 +1001,14 @@ local function sample_authored_rows(rows, state, phase, row)
     local sample = SilverfishSampleNativeAuthoredPickups
     if type(sample) ~= "function" or not bind_pickup_seat(state, phase) then return false end
     local current = binding
-    local sources, eligible = {}, {}
-    for _, profile in ipairs(current.placements) do
-        if profile ~= gold_bag or not current.host or gold_bag_step(current.pawn.Save) == 1 then
-            sources[#sources + 1], eligible[#eligible + 1] = profile.source, profile
+    if #current.placements == 0 then return true end
+    local sources, eligible = map_sources[current.map] or empty_map, current.placements
+    if current.host and current.map == gold_bag.map and gold_bag_step(current.pawn.Save) ~= 1 then
+        sources, eligible = {}, {}
+        for _, profile in ipairs(current.placements) do
+            if profile ~= gold_bag then
+                sources[#sources + 1], eligible[#eligible + 1] = profile.source, profile
+            end
         end
     end
     local result = {sample(current.pawn:GetAddress(), current.host, table.unpack(sources))}
@@ -1099,7 +1107,7 @@ local function dead_drop_row(state, phase, status_row)
     local shown, epoch, x, y, z, pitch, yaw, roll, sx, sy, sz = observe(detail.pawn:GetAddress(), host)
     if shown == "diagnostic" then return nil, x end
     if not shown then return end
-    local name = dead_drop.name .. " " .. dead_drop.path
+    local name = dead_drop.actor_name
     if shown == "stock-active" or shown == "projected" then
         return status_row("native-dead-drop", shown, state.map, name, detail.name, epoch,
             x, y, z, pitch, yaw, roll, sx, sy, sz)
@@ -1146,6 +1154,7 @@ function pickup.rows(state, phase, status_row)
         end
     end
     if binding.loose_count then
+        local pawn_address = binding.pawn:GetAddress()
         rows[#rows + 1] = status_row("native-loose-pickup-capability", 1, binding.loose_count)
         if phase == "hosting" and type(SilverfishReadHostLooseRespawnHidden) == "function" then
             local hidden = SilverfishReadHostLooseRespawnHidden()
@@ -1159,14 +1168,15 @@ function pickup.rows(state, phase, status_row)
             rows[#rows + 1] = status_row("native-loose-pickup-view-scope", binding.loose_generation)
         end
         if binding.host and type(SilverfishReadNativeAuthoredQuestPlacements) == "function" then
-            local quest_rows = SilverfishReadNativeAuthoredQuestPlacements(binding.pawn:GetAddress())
+            local quest_rows = SilverfishReadNativeAuthoredQuestPlacements(pawn_address)
             if type(quest_rows) == "string" then
                 rows[#rows + 1] = status_row("native-authored-quest-sources", 1)
                 if quest_rows ~= "" then rows[#rows + 1] = quest_rows:sub(1, -2) end
             end
         end
         local publish = SilverfishNearbyLoosePickupStatusRows
-        local nearby = type(publish) == "function" and publish(state.map)
+        local nearby = type(publish) == "function" and binding.loose_generation
+            and publish(state.map, pawn_address, binding.loose_generation)
         if type(nearby) == "string" and nearby ~= "" then rows[#rows + 1] = nearby end
     end
     if loose_check and phase == "hosting" then

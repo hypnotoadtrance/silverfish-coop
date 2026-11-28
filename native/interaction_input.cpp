@@ -1699,7 +1699,7 @@ namespace
             }
         }
 
-        // Simmi's stock dialogue powers its own board without pressing Interact on a box.
+        // Stock dialogue and authored triggers can open a board without a box interaction.
         const auto now = Clock::now();
         auto* pawn = scope.pawn.Get();
         if (!pawn || pawn != wire_board.pawn.Get() || address(pawn) != requested || now >= scope.expires ||
@@ -1708,7 +1708,7 @@ namespace
         if (!live(menu) || menu == stock_board_menu.menu.Get() ||
             menu->GetClassPrivate() != find<Unreal::UClass>(quest_log)) return 0;
         board = stock_menu_board(menu);
-        if (!board || board->GetPathName() != observatory_jammer_board || !stock_board_policy(board)) return 0;
+        if (!board || !stock_board_policy(board)) return 0;
 
         wire_board.actor = board;
         wire_board.component = object_field(board, STR("Box"));

@@ -39,6 +39,16 @@ local function distance(a, b) return (a.X-b.X)^2 + (a.Y-b.Y)^2 + (a.Z-b.Z)^2 end
 local function text(value) return type(value) == "userdata" and value:ToString() or value end
 local function set_name(value) value = text(value); return value ~= "" and value ~= "None" end
 
+local function stock_menu(pawn, board)
+    local stack = pawn.Controller.MenuStack
+    local count = stack:GetArrayNum()
+    local panel = count > 0 and stack[count]
+    if panel and type(panel.type) == "function" and panel:type() == "RemoteUnrealParam" then panel = panel:get() end
+    assert(valid(panel) and same(panel:GetClass(), StaticFindObject(menu_class)) and same(panel.BountyBoard_Ref, board),
+        "The requested stock Observatory board is not open")
+    return panel
+end
+
 local function approach(pawn, other, board)
     local wall = board.Box:K2_GetComponentLocation()
     local origin = board:K2_GetActorLocation()
@@ -130,6 +140,19 @@ local function run(action, quest)
         return "stream:" .. selected:GetFullName()
     elseif action == "stream-visible" then
         return tostring(valid(streamed.level) and streamed.level:IsLevelVisible())
+    elseif action == "stream-stock-open" then
+        assert(streamed and same(streamed.world, world) and valid(streamed.board)
+            and valid(streamed.level) and streamed.level:IsLevelVisible()
+            and pawn:HasAuthority() == false and pawn.Controller.MenuStack:GetArrayNum() == 0,
+            "The streamed board and guest menu were not ready")
+        streamed.board:Send_PowerSignal(true, pawn)
+        streamed.stock_menu = stock_menu(pawn, streamed.board)
+        assert(streamed.stock_menu.BountyBoard == true, "Stock power did not open a bounty board")
+        return "stock power opened board"
+    elseif action == "stream-stock-adopted" then
+        assert(streamed and valid(streamed.board) and same(stock_menu(pawn, streamed.board), streamed.stock_menu),
+            "Host options did not retain the original stock board widget")
+        return "original stock widget retained"
     elseif action == "stream-modded-offers" then
         assert(streamed and same(streamed.world, world) and valid(streamed.board))
         local quest_table = StaticFindObject("/Game/Classes/Libraries/DataTables/Quests_DT.Quests_DT")
@@ -290,13 +313,8 @@ local function run(action, quest)
         return table.concat(offered,",") .. ";" .. table.concat(extended,",")
     end
     if action == "menu" or action == "stream-menu" then
-        local stack = pawn.Controller.MenuStack
-        local panel = stack[stack:GetArrayNum()]
-        if panel and type(panel.type) == "function" and panel:type() == "RemoteUnrealParam" then panel = panel:get() end
         local expected = action == "stream-menu" and streamed.board or board
-        assert(valid(panel) and same(panel:GetClass(), StaticFindObject(menu_class)) and same(panel.BountyBoard_Ref, expected),
-            "The stock Observatory board is not open")
-        local list = panel.VerticalBox_ContractsList
+        local list = stock_menu(pawn, expected).VerticalBox_ContractsList
         local visible = {}
         for index=0,list:GetChildrenCount()-1 do
             visible[#visible+1] = list:GetChildAt(index).Quest_IDTag:ToString()

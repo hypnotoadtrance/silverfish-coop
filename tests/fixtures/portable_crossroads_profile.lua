@@ -882,6 +882,13 @@ LoopInGameThreadWithDelay(50, function()
             return SilverfishProfileCrossroadsWallSources(state.world, state.map)
         end)
         if ok then message = value else message = "zone wall comparison failed: " .. tostring(value) end
+    elseif action == "nearbypickupscope" and not capture then
+        if type(SilverfishProfileCrossroadsNearbyPickupScope) == "function" then
+            local ok, reply = pcall(function() return SilverfishProfileCrossroadsNearbyPickupScope(inspect()) end)
+            if ok then message = reply else message = "nearby pickup scope failed: " .. tostring(reply) end
+        else
+            message = "unavailable"
+        end
     elseif action == "killvolumevisit" and not capture then
         local ok, value = pcall(compare_kill_volume_visit)
         if ok then message = value else message = "kill-volume visit comparison failed: " .. tostring(value) end

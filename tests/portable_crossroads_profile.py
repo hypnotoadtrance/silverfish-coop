@@ -9,7 +9,7 @@ import time
 
 from portable_guest_world_start import wait_resident_status
 from tools.silverfish import native_downed_markers, native_kill_volume, native_loot, native_package_handoff_journal
-from tools.silverfish import native_stash
+from tools.silverfish import native_loose_pickup, native_stash
 from tools.silverfish.authored_loot import full_name
 from tools.silverfish.control import current_status, submit
 from tools.silverfish.travel import CROSSROADS
@@ -908,7 +908,46 @@ def instrument_loose_discovery(source):
         assert source.count(fallback) == 1
         source = source.replace(fallback, 'local qualified = SilverfishProfileCrossroadsCall('
                                 '"authored_pickup_scalar_fallback", refresh_authored_sources, state, phase)')
-    return source
+    scoped_status = "and publish(state.map, binding.pawn:GetAddress(), binding.loose_generation)"
+    prior_status = "and publish(state.map)"
+    if scoped_status not in source:
+        return source.replace(prior_status, 'and SilverfishProfileCrossroadsCall("nearby_loose_status_rows", publish, state.map)')
+    assert source.count(scoped_status) == 1
+    end = "\nreturn pickup\n"
+    assert source.count(end) == 1
+    source = source.replace(scoped_status, "and profile_nearby_rows(publish, state.map, binding.pawn:GetAddress(), binding.loose_generation)")
+    return r"""
+local profile_nearby_map, profile_nearby_pawn, profile_nearby_generation, profile_nearby_output
+
+local function profile_nearby_rows(publish, map, pawn, generation)
+    local output = SilverfishProfileCrossroadsCall("nearby_loose_status_rows", publish, map, pawn, generation)
+    profile_nearby_map, profile_nearby_pawn, profile_nearby_generation, profile_nearby_output = map, pawn, generation, output
+    return output
+end
+""" + source.replace(end, r"""
+function SilverfishProfileCrossroadsNearbyPickupScope(state)
+    local publish = SilverfishNearbyLoosePickupStatusRows
+    local pawn = state.local_pawn and state.local_pawn.pawn
+    assert(type(publish) == "function" and valid(pawn) and binding and binding.loose_generation
+        and state.map == profile_nearby_map and pawn:GetAddress() == profile_nearby_pawn
+        and binding.loose_generation == profile_nearby_generation and type(profile_nearby_output) == "string",
+        "nearby pickup rows not accepted for the active native scope")
+    local map, address, generation = profile_nearby_map, profile_nearby_pawn, profile_nearby_generation
+    assert(publish(map, 0, generation) == nil and publish(map, address, generation + 1) == nil
+        and publish(map .. "_missing", address, generation) == nil,
+        "nearby rows accepted another pawn, generation, or map")
+    local count = 0
+    local tag = "native-loose-pickup\t" .. map .. "\t"
+    for line in profile_nearby_output:gmatch("[^\n]+") do
+        assert(line:find(tag, 1, true) == 1, "native nearby pickup row scope differs from its visit")
+        count = count + 1
+    end
+    assert(count <= 48, "nearby pickup status exceeded its existing row bound")
+    return ("%d,%d"):format(generation, count)
+end
+
+return pickup
+""", 1)
 
 
 def instrument_npc_class_discovery(source):
@@ -2389,6 +2428,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     save_clock_continuity = {}
     weather_lease = None
     kill_volume_visits = {}
+    nearby_pickup_scopes = {}
     host_stash = None
     avatar_clock = {}
     avatar_motion = {}
@@ -2397,6 +2437,19 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     avatar_gait = None
     standing_mapping = {}
     if area == CROSSROADS:
+        nearby_replies = await asyncio.gather(*(command(seat, "nearbypickupscope") for seat in seats.values()))
+        for seat, reply in zip(seats, nearby_replies, strict=True):
+            if reply == "unavailable":
+                continue
+            assert not reply.startswith("nearby pickup scope failed"), (seat, reply)
+            generation, rows = map(int, reply.split(","))
+            frame = await wait_resident_status(runs[seat], lambda snapshot:
+                snapshot.get("game", {}).get("map") == area
+                and snapshot["game"].get(native_loose_pickup.VIEW_SCOPE) == generation, timeout=8)
+            nearby_pickup_scopes[seat] = {"generation": generation, "nearby_rows": rows,
+                                          "published_status_sequence": frame["game"]["sequence"],
+                                          "wrong_map_pawn_and_generation_refused": True}
+        assert not nearby_pickup_scopes or set(nearby_pickup_scopes) == set(seats)
         visit_replies = await asyncio.gather(*(command(seat, "killvolumevisit") for seat in seats.values()))
         for seat, reply in zip(seats, visit_replies, strict=True):
             if reply == "unavailable":
@@ -2630,4 +2683,5 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             "save_game_clock_continuity": save_clock_continuity,
             "guest_weather_lease_comparison": weather_lease,
             "kill_volume_visit_comparison": kill_volume_visits,
+            "nearby_pickup_scope": nearby_pickup_scopes,
             "host_stash_status_comparison": host_stash}

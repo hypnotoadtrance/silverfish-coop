@@ -4858,12 +4858,15 @@ async def verify_streamed_stock_board(host: Seat, guest: Seat, pawn: str) -> dic
     async def catalog():
         return await submit(guest_run, native_board_contract.CATALOG, target=board)
 
-    async def open_board():
-        result = await submit(guest_run, "native-wire-board-stock-f-fixture", target=board)
-        assert result["ok"], result
+    async def visible_board():
         return await wait_resident_status(guest_run, lambda frame:
             (menu := frame.get("game", {}).get(native_board_contract.MENU_KEY))
             and menu["board"] == board and menu["state"] == "visible")
+
+    async def open_board():
+        result = await submit(guest_run, "native-wire-board-stock-f-fixture", target=board)
+        assert result["ok"], result
+        return await visible_board()
 
     async def choose(quest, action):
         result = await submit(guest_run, "native-wire-board-stock-fixture", target=f"{quest}|{action}")
@@ -4889,8 +4892,12 @@ async def verify_streamed_stock_board(host: Seat, guest: Seat, pawn: str) -> dic
     photo = "Photo_BrnzQuarry"
     assert dynamic in offers and "CoopProbe.Local-Only" not in offers, offers
     accepted = min(offers - {photo, dynamic})
-    frame = await open_board()
+    assert await command(guest, "stream-stock-open") == "stock power opened board"
+    frame = await visible_board()
+    assert await command(guest, "stream-stock-adopted") == "original stock widget retained"
     assert set(filter(None, (await command(guest, "stream-menu")).split(","))) == offers
+    stock_adoption = {"stock_widget_reused": True, "host_offers_matched": True,
+                      "sequence": frame["game"][native_board_contract.MENU_KEY]["sequence"]}
     await choose(accepted, "start")
     started = await journals(accepted)
     assert started > 0
@@ -4949,6 +4956,7 @@ async def verify_streamed_stock_board(host: Seat, guest: Seat, pawn: str) -> dic
                 if entry["board"] == board]
     assert len(receipts) == 4 and all(0 < size < 1024 for size in receipts), receipts
     return {"board": board, "offers": sorted(offers), "accepted": accepted, "journal_step": started,
+            "direct_stock_menu_adoption": stock_adoption,
             "host_quest_journal_entries": journal_size,
             "turnin": payout, "off_table_quest": dynamic, "off_table_cash": 137, "off_table_bandages": 1,
             "off_table_followup": {"id": followup, "step": 2}, "off_table_completion_flag": 1,

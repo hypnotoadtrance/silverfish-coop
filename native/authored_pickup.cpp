@@ -520,6 +520,17 @@ namespace
         return server_prop && (state.host ? !server && role(controller) == 3 : connection(driver, server));
     }
 
+    bool same_pickup_seat(const Scope& state, const Scope& seat)
+    {
+        // The caller has already resolved the current seat. Match both parts
+        // of each saved weak handle without repeating the object lookups.
+        const auto same = [](const U::FWeakObjectPtr& a, const U::FWeakObjectPtr& b) {
+            return a.ObjectIndex == b.ObjectIndex && a.ObjectSerialNumber == b.ObjectSerialNumber;
+        };
+        return state.host == seat.host && same(state.world, seat.world) && same(state.pawn, seat.pawn) &&
+            same(state.controller, seat.controller) && same(state.driver, seat.driver);
+    }
+
     Scope* select_source(std::string_view source, bool authored_only = false)
     {
         if (source == "crossroads-old-pipe" && !(env("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") &&
@@ -1096,13 +1107,18 @@ namespace
             same_placement_pose(read_drop_pose(static_cast<U::AActor*>(scope.actor.Get())), *view->applied);
     }
 
-    bool available(const Scope& scope)
+    bool available_source(const Scope& scope)
     {
         auto* actor = scope.actor.Get();
-        return !scope.claimed && local_scope(scope) && drop_gate(scope) && quest_placement_active(scope) &&
+        return drop_gate(scope) && quest_placement_active(scope) &&
             (!scope.profile->dead_drop || present_drop(scope)) && exact_source(actor, scope.world.Get(), *scope.profile) &&
             source_box(actor) == scope.box.Get() && static_cast<U::AActor*>(actor)->GetActorEnableCollision() &&
             boolean(actor, STR("bHidden"), false);
+    }
+
+    bool available(const Scope& scope)
+    {
+        return !scope.claimed && local_scope(scope) && available_source(scope);
     }
 
     bool restore_loose_location(Scope& scope, U::AActor* actor)
@@ -2695,7 +2711,8 @@ namespace
         {
             auto* loose = enrolled_loose_actor(candidate.Get());
             if (!loose || loose->profile.quest_id.empty() || loose_hidden.contains(loose->profile.source) ||
-                !available(loose->scope)) continue;
+                loose->scope.claimed || !same_pickup_seat(loose->scope, seat) ||
+                !available_source(loose->scope)) continue;
             // An incomplete census would retire still-active placements on the guest.
             if (++published > quest_placement_snapshot_limit) return 0;
             const auto pose = read_drop_pose(static_cast<U::AActor*>(loose->scope.actor.Get()));
@@ -2777,9 +2794,21 @@ namespace
 
     int nearby_loose_status_rows(const Lua& lua)
     {
-        auto* pawn = loose_pawn.Get();
-        if (!ready() || !live(pawn) || lua.get_stack_size() != 1 || !lua.is_string()) return 0;
+        if (!ready() || lua.get_stack_size() != 3 || !lua.is_string(1) ||
+            !lua.is_integer(2) || !lua.is_integer(3)) return 0;
         const auto map = lua.get_string();
+        const auto requested_pawn = static_cast<Address>(lua.get_integer());
+        const auto generation = lua.get_integer();
+        auto* pawn = loose_pawn.Get();
+        auto* world = loose_world.Get();
+        if (!live(pawn) || address(pawn) != requested_pawn || !live(world) || generation <= 0 ||
+            static_cast<std::uint64_t>(generation) != loose_generation || !silverfish::world_path::package(map)) return 0;
+        const auto expected = RC::to_wstring(std::string{map} + '.' + std::string{map.substr(map.rfind('/') + 1)});
+        const Profile seat_profile{.world = expected.c_str()};
+        const Scope seat{world, pawn, nullptr, nullptr, object(pawn, STR("Controller")),
+            object(world, STR("NetDriver")), &seat_profile, loose_host};
+        if (!local_scope(seat)) return 0;
+
         auto center = static_cast<U::AActor*>(pawn)->K2_GetActorLocation();
         struct Nearby
         {
@@ -2792,7 +2821,8 @@ namespace
         {
             auto& scope = loose.scope;
             auto* actor = static_cast<U::AActor*>(scope.actor.Get());
-            if (!live(actor) || (path.contains('|') && !boolean(actor->GetLevel(), STR("bIsVisible"), true))) continue;
+            if (!live(actor) || !same_pickup_seat(scope, seat) ||
+                (path.contains('|') && !boolean(actor->GetLevel(), STR("bIsVisible"), true))) continue;
             // The ledger stays active even when the source is outside the reported nearby list.
             apply_loose_view(path, scope);
             auto at = scope.hidden_at ? *scope.hidden_at :
@@ -2815,7 +2845,7 @@ namespace
             // Unreal can deliver the host's hidden flag ahead of the pickup ledger.
             // Keep the registered replica eligible for the local visibility update.
             const bool awaiting_claim = !scope.host && remotely_hidden_loose(actor);
-            if (!scope.claimed && !available(scope) && !awaiting_claim) continue;
+            if (!scope.claimed && !available_source(scope) && !awaiting_claim) continue;
             // Dormant or unavailable actors do not use the published row budget.
             --remaining;
             if (!rows.empty()) rows.push_back('\n');

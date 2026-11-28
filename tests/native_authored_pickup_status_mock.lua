@@ -85,7 +85,40 @@ assert(batched["native-authored-pickup-interaction"][5] == 7 and batched["native
 env.SilverfishSetNativeAuthoredPickupScope, env.SilverfishReadNativeAuthoredPickup = bind_source, read_source
 env.SilverfishSampleNativeAuthoredPickups = function() return "incomplete" end
 assert(hosting()["native-authored-pickup"][6] == "available", "A refused batch must fall back to live scalar status")
+
+-- A cached catalog still filters the host's gold bag on each quest change.
+state.map = "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P"
+local gold_step = 1
+env.EFindName = {FNAME_Find = 0}
+env.FName = function(name)
+    assert(name == "Trans_Gold_BigIron")
+    return {GetComparisonIndex = function() return 1 end}
+end
+pawn.Save = {IsValid = function() return true end, ActiveQuests = {
+    Contains = function() return true end,
+    Find = function()
+        return {get = function() return {Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A = gold_step} end}
+    end,
+}}
+env.SilverfishSampleNativeAuthoredPickups = function(address, host, ...)
+    assert(address == pawn:GetAddress() and host)
+    local result, found = {}, false
+    for _, id in ipairs({...}) do
+        found = found or id == "scav-bar-gold-bag"
+        for _, field in ipairs({"stock actor unavailable", false, false, 0, false, 0}) do
+            result[#result + 1] = field
+        end
+    end
+    assert(found == (gold_step == 1))
+    return table.unpack(result)
+end
+for _, step in ipairs({1, 2, 1}) do
+    gold_step = step
+    hosting()
+end
 env.SilverfishSampleNativeAuthoredPickups = nil
+state.map = city
+hosting()
 
 local projected_path = city .. ".City_01_P:PersistentLevel.ProjectedLoot_1"
 local actor_name = "Item_Master_BP_C " .. projected_path
@@ -113,15 +146,19 @@ env.StaticFindObject = function(name)
 end
 local target = "world-loot:" .. ("a"):rep(32) .. ":" .. ("b"):rep(32) .. ":pickup"
 pickup.preview_input(pawn, target, actor_name)
-assert(mesh_visible, "A host preview cannot hide a replicated actor")
+assert(mesh_visible, "The host's shared pickup preview belongs to the native actor path")
 projected.bReplicates = false
 pickup.preview_input(pawn, target, actor_name)
-assert(not mesh_visible, "A host preview should hide a projected loot mesh")
-local cancel = {"test", "native-pickup-cancel-preview", target}
-assert(not pcall(pickup.command, cancel, state, "connected") and not mesh_visible)
-assert(pickup.command(cancel, state, "hosting") == "pickup preview released" and mesh_visible)
-
+assert(mesh_visible, "A projected item must not fall back to a Lua preview")
 state.server = true
+observe("connected")
+target = "loose:" .. projected_path
+pickup.preview_input(pawn, target, actor_name)
+assert(not mesh_visible, "A guest can still preview the placed item's own mesh")
+local cancel = {"test", "native-pickup-cancel-preview", target}
+assert(not pcall(pickup.command, cancel, state, "hosting") and not mesh_visible)
+assert(pickup.command(cancel, state, "connected") == "pickup preview released" and mesh_visible)
+
 local epoch = string.rep("1", 32)
 reporting_drop("projected", epoch)
 local guest = observe("connected")
@@ -141,8 +178,8 @@ end
 pickup.refresh_loose(function() return world end)
 local nearby = table.concat({"native-loose-pickup", city, path, "Stock item", "2", "available",
     "10.000", "20.000", "30.000"}, "\t")
-env.SilverfishNearbyLoosePickupStatusRows = function(map)
-    assert(map == city)
+env.SilverfishNearbyLoosePickupStatusRows = function(map, pawn_address, generation)
+    assert(map == city and pawn_address == pawn:GetAddress() and generation == 5)
     return nearby
 end
 env.SilverfishSetNativeAuthoredPickupScope = function() return false end
