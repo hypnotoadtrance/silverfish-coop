@@ -1043,6 +1043,31 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.client.gameplay_changed(visit))
         await self.exchange(1200)
 
+    async def test_gameplay_change_notice_can_target_one_of_three_guests(self):
+        requests = (self.request, self.guest_request("second"), self.guest_request("third"))
+        await self.host_for_guests(*requests, max_game_guests=3)
+        second_client, third_client = await start_client(), await start_client()
+        self.addAsyncCleanup(second_client.close)
+        self.addAsyncCleanup(third_client.close)
+        clients = (self.client, second_client, third_client)
+        arrivals = [asyncio.Event() for _ in clients]
+        for request, client, arrived in zip(requests, clients, arrivals):
+            self.assertTrue((await self.connect_guest(request, client=client))["accepted"])
+            client.set_gameplay_change_handler(arrived.set)
+
+        guest_id = requests[1]["guest_id"]
+        private_visit, shared_visit = "a" * 32, "b" * 32
+        self.host.send_gameplay_change(private_visit, allowed=lambda peer: peer == guest_id)
+        await asyncio.wait_for(arrivals[1].wait(), 1)
+        self.assertEqual([client.gameplay_changed(private_visit) for client in clients], [False, True, False])
+        for client, arrived in zip(clients, arrivals):
+            client.consume_gameplay_change()
+            arrived.clear()
+
+        self.host.send_gameplay_change(shared_visit)
+        await asyncio.wait_for(asyncio.gather(*(arrived.wait() for arrived in arrivals)), 1)
+        self.assertTrue(all(client.gameplay_changed(shared_visit) for client in clients))
+
     async def test_prop_pose_reaches_only_the_current_authenticated_game_route(self):
         guest_id = self.request["guest_id"]
         received = asyncio.Queue()

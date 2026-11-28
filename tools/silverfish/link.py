@@ -1404,9 +1404,10 @@ class HostLink:
     def send_loot_motion(self, frames: Sequence[bytes], allowed: Callable[[str], bool]) -> None:
         self._send_presentation(_LOOT_MOTION_HEADER, frames, allowed)
 
-    def send_gameplay_change(self, epoch: str) -> None:
+    def send_gameplay_change(self, epoch: str, *, allowed: Callable[[str], bool] | None = None) -> None:
         """Hint that the current visit has newer authoritative snapshot state."""
-        self._send_presentation(_GAMEPLAY_CHANGE_HEADER, (bytes.fromhex(epoch),), lambda _: True)
+        self._send_presentation(_GAMEPLAY_CHANGE_HEADER, (bytes.fromhex(epoch),),
+                                allowed if allowed is not None else lambda _: True)
 
     def _send_presentation(self, header: bytes, frames: Sequence[bytes], allowed: Callable[[str], bool]) -> None:
         for guest_id, protocol in self._protocols.items():

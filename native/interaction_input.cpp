@@ -1906,24 +1906,52 @@ namespace
             power == "Powered" ? STR("Powered") : power == "Power" ? STR("Power") : nullptr;
         if (!property_name || expected <= 0) return 0;
 
+        struct SwitchReader
+        {
+            Unreal::FWeakObjectPtr actor, level;
+            std::string path;
+            bool streamed;
+        };
         static Unreal::FWeakObjectPtr last_world;
-        static std::unordered_map<Address, Unreal::FWeakObjectPtr> switches;
-        if (last_world.Get() != world)
+        static std::uint64_t last_generation{};
+        static std::unordered_map<Address, SwitchReader> switches;
+        if (last_world.Get() != world || last_generation != scope.generation)
         {
             switches.clear();
             last_world = world;
+            last_generation = scope.generation;
         }
-        const auto entry = switches.find(expected);
-        auto* actor = entry != switches.end() ? entry->second.Get() : nullptr;
+        auto entry = switches.find(expected);
+        auto* actor = entry != switches.end() ? entry->second.actor.Get() : nullptr;
+        if (actor && entry->second.path != path) return 0;
         if (!actor)
         {
             if (path.empty() || path.size() > 384) return 0;
             actor = find<Unreal::AActor>(RC::to_wstring(path).c_str());
-            if (address(actor) != expected || !live(actor) ||
-                actor->GetOuterPrivate() != object_field(world, STR("PersistentLevel"))) return 0;
-            switches[expected] = actor;
+            if (address(actor) != expected || !live(actor)) return 0;
+            auto* actor_class = find<Unreal::UClass>(STR("/Script/Engine.Actor"));
+            auto* level = actor->GetOuterPrivate();
+            if (!actor_class || !actor->IsA(actor_class) || !live(level)) return 0;
+            const bool streamed = level != object_field(world, STR("PersistentLevel"));
+            if (streamed && !silverfish::native_zone::visible_actor_level(static_cast<Unreal::AActor*>(actor),
+                                                                        static_cast<Unreal::UWorld*>(world)))
+                return 0;
+            entry = switches.insert_or_assign(expected, SwitchReader{actor, level, std::string{path}, streamed}).first;
         }
         if (!live(actor)) return 0;
+        if (entry->second.streamed)
+        {
+            // Enrollment resolves the exact loaded streaming level. On steady reads check that
+            // it is still owned by this world and visible, and requalify it after a hide.
+            auto* level = entry->second.level.Get();
+            auto* visible = field<Unreal::FBoolProperty>(level, STR("bIsVisible"));
+            if (!live(level) || actor->GetOuterPrivate() != level || object_field(level, STR("OwningWorld")) != world ||
+                !visible || !visible->GetPropertyValueInContainer(level))
+            {
+                switches.erase(entry);
+                return 0;
+            }
+        }
         if (scope.host)
         {
             if (!live_actor_role(actor, 3)) return 0;

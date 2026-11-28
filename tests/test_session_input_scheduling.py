@@ -1725,6 +1725,49 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         host.publish_gameplay_change(transport)
         self.assertEqual(transport.send_gameplay_change.call_count, 2)
 
+    def test_host_targets_private_receipt_wakeups_and_broadcasts_shared_changes(self):
+        host = service.Host.__new__(service.Host)
+        host.stopping = host.transitioning = host.native_checkpoint_unsafe = False
+        host.gameplay_change_scope = host.gameplay_change_state = None
+        host.game_link_connected = Mock(return_value=True)
+        identities = {"peer1": ("guest", "first"), "peer2": ("guest2", "second"),
+                      "peer3": ("guest3", "third")}
+        host.authenticated_guest = identities.get
+        host.zone_epoch = "a" * 32
+        host.stock_doors = native_stock_door.Interactions()
+        host.world_loot = service.native_world_loot.Projection()
+        host.guest_wallet_receipts = {"third": ["c" * 32, 3, 0]}
+        host.guest_pickup_revisions = {}
+        host.party = {}
+        host.last_game = {"state": "hosting", "map": OBSERVATORY, "native_wallet": 50}
+        transport = Mock(spec=service.link.HostLink)
+
+        host.publish_gameplay_change(transport)
+        transport.send_gameplay_change.assert_not_called()
+        host.guest_pickup_revisions["first"] = 1
+        host.guest_wallet_receipts["second"] = ["d" * 32, 1, 0]
+        host.publish_gameplay_change(transport)
+        transport.send_gameplay_change.assert_called_once()
+        self.assertEqual(transport.send_gameplay_change.call_args.args, (host.zone_epoch,))
+        allowed = transport.send_gameplay_change.call_args.kwargs["allowed"]
+        self.assertEqual({peer for peer in (*identities, "unknown") if allowed(peer)}, {"peer1", "peer2"})
+
+        transport.reset_mock()
+        host.publish_gameplay_change(transport)
+        transport.send_gameplay_change.assert_not_called()
+        host.guest_pickup_revisions["first"] = 2
+        host.last_game = {**host.last_game, "native_wallet": 55}
+        host.publish_gameplay_change(transport)
+        transport.send_gameplay_change.assert_called_once_with(host.zone_epoch)
+
+        transport.reset_mock()
+        host.publish_gameplay_change(transport)
+        transport.send_gameplay_change.assert_not_called()
+        host.guest_pickup_revisions["first"] = 3
+        host.zone_epoch = "b" * 32
+        host.publish_gameplay_change(transport)
+        transport.send_gameplay_change.assert_not_called()
+
     def test_host_notifies_for_loose_pickups_and_quest_visibility_edges(self):
         host = service.Host.__new__(service.Host)
         host.stopping = host.transitioning = host.native_checkpoint_unsafe = False

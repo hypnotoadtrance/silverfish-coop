@@ -695,7 +695,7 @@ end
 
 
 def read_comparison(raw):
-    raw, memory, sizes, commands = raw.split("|")
+    raw, memory, sizes, commands, intervals = raw.split("|")
     raw, status = raw.split("^")
     summary, slow_frame = raw.split("!")
     duration, *sections = summary.split(";")
@@ -738,7 +738,16 @@ def read_comparison(raw):
         name, ticks, snapshots = entry.split(",")
         tick_sources[name] = {"ticks": int(ticks), "snapshot_attempts": int(snapshots)}
     assert tick_sources
+    slow_intervals = []
+    for entry in intervals.split(";")[1:]:
+        elapsed_ms, cycles, heap_delta, tick, observers, status = entry.split(",")
+        slow_intervals.append({"elapsed_ms": float(elapsed_ms), "thread_cycles": int(cycles),
+                               "lua_heap_delta_kib": float(heap_delta), "tick_ms": float(tick),
+                               "delayed_observers_ms": float(observers), "status_in_tick_ms": float(status)})
+    assert len(slow_intervals) == min(5, totals.get("frame_over_16ms", {}).get("count", 0))
+    assert not slow_intervals or slow_intervals[0]["elapsed_ms"] == float(elapsed)
     return {"seconds": float(duration), "timings": totals, "status_sections": status_peaks,
+            "longest_intervals_over_16ms": slow_intervals,
             "max_status_bytes": int(max_bytes), "max_status_rows": int(max_rows), "lua_heap": heap,
             "heap_calls": heap_calls, "sample_status_bytes_by_tag": status_bytes_by_tag, "tick_sources": tick_sources,
             "slowest_interval": {"elapsed_ms": float(elapsed), "inclusive_calls_ms": slow_calls,
@@ -853,8 +862,9 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
         if reply == "unavailable":
             return None
         assert not reply.startswith("switch comparison failed"), reply
-        switches, native_ms, lua_ms, native_kib, lua_kib = map(float, reply.split(","))
-        return {"fast_reads_per_pass": int(switches), "passes_per_reader": 32, "all_rows_matched": True,
+        switches, streamed, native_ms, lua_ms, native_kib, lua_kib = map(float, reply.split(","))
+        return {"fast_reads_per_pass": int(switches), "streamed_fast_reads_per_pass": int(streamed),
+                "passes_per_reader": 32, "all_rows_matched": True,
                 "native_ms": native_ms, "lua_ms": lua_ms, "native_heap_growth_kib": native_kib,
                 "lua_heap_growth_kib": lua_kib}
 

@@ -283,6 +283,7 @@ async def verify_streamed_switch(host, guest, pawn):
     except RuntimeError as error:
         raise AssertionError(await probe(host, "diagnose", actor)) from error
     assert original["lights"], original
+    assert await probe(host, "reader", actor) == str(int(original["powered"]))
     assert await probe(host, "host", actor) == "host pressed"
     await suite.wait_resident_status(host_run, lambda frame:
         (found := row(frame, actor)) and found["powered"] != original["powered"])
@@ -296,14 +297,17 @@ async def verify_streamed_switch(host, guest, pawn):
         host_now = row(await suite.wait_resident_status(host_run, lambda frame: row(frame, actor)), actor)
         guest_now = row(await suite.wait_resident_status(guest_run, lambda frame: row(frame, actor)), actor)
         raise AssertionError(f"Late streamed switch expected {on_host}, host {host_now}, guest {guest_now}") from error
+    assert await probe(guest, "reader", actor) == str(int(on_host["powered"]))
 
     assert await probe(guest, "hide") == "hide"
     await suite.wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("map") == OBSERVATORY
                                      and row(frame, actor) is None)
+    assert await probe(guest, "reader", actor) == "refused"
     assert await probe(host, "host", actor) == "host pressed"
     restored = await observe(host_run, actor, equal=original)
     assert await probe(guest, "show") == "show"
     assert await observe(guest_run, actor, equal=restored) == restored
+    assert await probe(guest, "reader", actor) == str(int(restored["powered"]))
 
     position = tuple(map(float, (await probe(host, "stage", actor)).split(",")))
     await suite.wait_resident_status(guest_run, lambda frame: (
@@ -333,10 +337,12 @@ async def verify_streamed_switch(host, guest, pawn):
     for run in (guest_run, host_run):
         await suite.wait_resident_status(run, lambda frame: frame.get("game", {}).get("map") == OBSERVATORY
                                          and row(frame, actor) is None)
+    for seat in (host, guest):
+        assert await probe(seat, "reader", actor) == "refused"
     assert suite.campaign_save_hashes(host.campaign) == checkpoint
     return {"actor": actor, "linked_lights": len(original["lights"]), "late_load": on_host,
             "reshown": restored, "guest_input": guest_press, "guest_press": on_host,
-            "unloaded_on_both": True, "checkpoint_unchanged": True}
+            "native_reader_verified": True, "unloaded_on_both": True, "checkpoint_unchanged": True}
 
 
 async def exercise(work, first, second, saved, streamed_switch=False, crossroads_profile=False, playtest_batch=False,

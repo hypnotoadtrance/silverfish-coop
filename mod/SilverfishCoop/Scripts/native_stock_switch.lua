@@ -186,7 +186,10 @@ local function cache_entry(name, path, entry)
             path = path, candle = entry.candle, lantern = entry.lantern, gas_lamp = entry.gas_lamp,
             light = entry.light, mesh = entry.mesh}
     else
-        if not entry.latch then refresh_lights(entry, world, actor.Powered) end
+        if not entry.latch then
+            entry.address, entry.path = actor:GetAddress(), path
+            refresh_lights(entry, world, actor.Powered)
+        end
         entries[name] = entry
     end
 end
@@ -383,9 +386,17 @@ local function read_switch(entry, name, state, phase, row, native_world_address)
             end
             return entry.status_row
         end
-    elseif level_visible(entry.level, state.world) and valid(entry.actor) and not entry.actor:IsActorBeingDestroyed()
-        and valid(entry.lever) then
-        local powered = entry.actor.Powered
+    elseif valid(entry.lever) then
+        local powered
+        if native_world_address then
+            powered = SilverfishReadNativeSwitchPower(native_world_address, entry.address, entry.path,
+                "Powered", false)
+        end
+        if powered == nil then
+            if not level_visible(entry.level, state.world) or not valid(entry.actor)
+                or entry.actor:IsActorBeingDestroyed() then return end
+            powered = entry.actor.Powered
+        end
         refresh_lights(entry, state.world, powered)
         local angles = entry.lever.RelativeRotation
         local panel = entry.panel:GetMaterial(0)

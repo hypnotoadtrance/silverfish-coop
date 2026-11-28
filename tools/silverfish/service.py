@@ -381,6 +381,7 @@ class Host:
         self.stock_doors = native_stock_door.Interactions()
         self.gameplay_change_scope = None
         self.gameplay_change_state = None
+        self.gameplay_change_receipts: dict[str, tuple[tuple, int | None]] = {}
         self.gameplay_change_quest_sources = frozenset()
         self.prepared_guest_leaves: dict[str, GuestLeave] = {}
         self.confirmed_guest_leaves: set[str] = set()
@@ -4809,16 +4810,32 @@ class Host:
         visible_drops = frozenset(drop_id for drop_id, row in self.party.get(native_guest_drop_record.STATE, {}).items()
                                   if row["map"] == scope[0] and row["claim_id"] is None)
         state = (door_flags, switch_flags, self.party.get(native_loot.STATE_KEY, {}),
-                 game.get("native_wallet"), game.get(native_wallet.DEBT_STATUS), tuple(sorted(self.guest_wallet_receipts.items())),
-                 tuple(self.guest_pickup_revisions.items()),
+                 game.get("native_wallet"), game.get(native_wallet.DEBT_STATUS),
                  self.world_loot.moving_ids(*scope), self.party.get(native_loose_pickup.STATE, {}),
                  game.get(native_loose_pickup.RESPAWN_HIDDEN, ()), self.gameplay_change_quest_sources, visible_drops)
-        if scope == self.gameplay_change_scope and state != self.gameplay_change_state:
+        receipts = {
+            character: (tuple(self.guest_wallet_receipts.get(character, ())), self.guest_pickup_revisions.get(character))
+            for character in self.guest_wallet_receipts.keys() | self.guest_pickup_revisions.keys()
+        }
+        shared_changed = state != self.gameplay_change_state
+        if scope == self.gameplay_change_scope and (shared_changed or receipts != self.gameplay_change_receipts):
             # Guests still fetch the authorized snapshot. A lost notice only delays that fetch.
-            transport.send_gameplay_change(epoch)
+            if shared_changed:
+                transport.send_gameplay_change(epoch)
+            else:
+                previous = self.gameplay_change_receipts
+                changed_characters = {character for character in receipts.keys() | previous.keys()
+                                      if receipts.get(character) != previous.get(character)}
+
+                def owns_receipt(guest_id: str) -> bool:
+                    identity = self.authenticated_guest(guest_id)
+                    return identity is not None and identity[1] in changed_characters
+
+                transport.send_gameplay_change(epoch, allowed=owns_receipt)
             if _TIMED_INTERACTIONS:
                 self.control.event("host_gameplay_change_notice", zone_epoch=epoch)
         self.gameplay_change_scope, self.gameplay_change_state = scope, state
+        self.gameplay_change_receipts = receipts
 
     def publish_host_status(self, transport, bridge):
         linked = self.game_link_connected(transport)

@@ -7,6 +7,7 @@ local coarse_window_us = 5000000
 local gc_window_us = 12000000
 local gc_pause, gc_step_multiplier = 120, 160
 local stock_receipts = {}
+local long_interval_limit = 5
 
 local function record(active, tag, wall_ms, cycles)
     local rows = active.rows[tag]
@@ -183,8 +184,15 @@ local function result()
     for key, count in pairs(complete.tick_sources) do
         commands[#commands + 1] = (";%s,%d,%d"):format(key, count, complete.snapshot_sources[key] or 0)
     end
+    local intervals = {}
+    for _, interval in ipairs(complete.long_intervals) do
+        intervals[#intervals + 1] = (";%.4f,%d,%.3f,%.4f,%.4f,%.4f"):format(
+            interval.elapsed, interval.cycles, interval.heap_delta,
+            interval.tick, interval.observers, interval.status)
+    end
     return ("%.5f"):format(complete.elapsed) .. table.concat(rows) .. table.concat(peak) .. table.concat(status)
         .. "|" .. table.concat(memory) .. "|" .. table.concat(sizes) .. "|" .. table.concat(commands)
+        .. "|" .. table.concat(intervals)
 end
 
 local function compare_switch_reads()
@@ -193,12 +201,13 @@ local function compare_switch_reads()
     local state = inspect()
     local seat = phase(state)
     assert(seat == "hosting" or seat == "connected")
-    local switched, first = 0, nil
-    SilverfishReadNativeSwitchPower = function(...)
-        local powered, broken = native(...)
+    local switched, streamed, first = 0, 0, nil
+    SilverfishReadNativeSwitchPower = function(world_address, actor, path, field, lantern)
+        local powered, broken = native(world_address, actor, path, field, lantern)
         if powered ~= nil then
             switched = switched + 1
-            first = first or {...}
+            if path:match("^([^%.]+)%.") ~= state.map then streamed = streamed + 1 end
+            first = first or {world_address, actor, path, field, lantern}
         end
         return powered, broken
     end
@@ -225,7 +234,7 @@ local function compare_switch_reads()
         collectgarbage("stop")
         local native_ms, native_kib = trial(native)
         local lua_ms, lua_kib = trial(nil)
-        return ("%d,%.3f,%.3f,%.3f,%.3f"):format(switched, native_ms, lua_ms, native_kib, lua_kib)
+        return ("%d,%d,%.3f,%.3f,%.3f,%.3f"):format(switched, streamed, native_ms, lua_ms, native_kib, lua_kib)
     end)
     SilverfishReadNativeSwitchPower = native
     if running then collectgarbage("restart") end
@@ -374,6 +383,21 @@ local function compare_rows()
         lua_first + lua_second, native_first_cycles + native_second_cycles, lua_first_cycles + lua_second_cycles)
 end
 
+local function retain_long_interval(active, elapsed, cycles, heap_delta)
+    local entries = active.long_intervals
+    local index = #entries + 1
+    while index > 1 and elapsed > entries[index - 1].elapsed do index = index - 1 end
+    if index > long_interval_limit then return end
+    local calls = active.calls
+    table.insert(entries, index, {
+        elapsed = elapsed, cycles = cycles, heap_delta = heap_delta,
+        tick = calls.tick and calls.tick.wall or 0,
+        observers = calls.delayed_observers and calls.delayed_observers.wall or 0,
+        status = calls.write_status and calls.write_status.wall or 0,
+    })
+    entries[long_interval_limit + 1] = nil
+end
+
 LoopInGameThreadWithDelay(1, function()
     local active = capture
     if not active then return end
@@ -387,11 +411,13 @@ LoopInGameThreadWithDelay(1, function()
     if previous then
         local duration, used_cycles = (now - previous) / 1000, cycles - previous_cycles
         record(active, "frame", duration, used_cycles)
-        if active.gc_mode_trial then
-            if duration > 1000 / 60 then record(active, "frame_over_16ms", duration, used_cycles) end
+        if duration > 1000 / 60 then
+            record(active, "frame_over_16ms", duration, used_cycles)
             if duration > 1000 / 30 then record(active, "frame_over_33ms", duration, used_cycles) end
-            if collected >= 1024 then record(active, "frame_with_heap_drop", duration, used_cycles) end
+            if duration > 50 then record(active, "frame_over_50ms", duration, used_cycles) end
+            retain_long_interval(active, duration, used_cycles, -collected)
         end
+        if collected >= 1024 then record(active, "frame_with_heap_drop", duration, used_cycles) end
         if duration > active.peak then
             active.peak, active.peak_cycles, active.peak_calls = duration, used_cycles, active.calls
             active.peak_heap_delta = -collected
@@ -436,7 +462,7 @@ LoopInGameThreadWithDelay(50, function()
                 rows = {}, calls = {}, peak = 0, peak_calls = {}, started = now,
                 coarse = coarse, deadline = now + (gc_trial and gc_window_us or coarse and coarse_window_us or window_us),
                 uncached_world = action == "coarseraw",
-                gc_mode_trial = action == "gcmode",
+                long_intervals = {},
                 status_peaks = {}, heap_calls = {}, tick_sources = {}, snapshot_sources = {},
                 max_status_rows = 0, max_status_bytes = 0,
                 heap_start = heap, heap_previous = heap, heap_peak = heap, heap_max_drop = 0, heap_large_drops = 0,

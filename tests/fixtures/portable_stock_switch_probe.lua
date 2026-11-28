@@ -12,7 +12,27 @@
             switches.stream_fixture = {world = state.world, stream = stream}
             return "loading"
         end
-        assert(fixture and same(fixture.world, state.world) and valid(fixture.stream))
+        assert(fixture and same(fixture.world, state.world))
+        if mode == "reader" then
+            local read = assert(SilverfishReadNativeSwitchPower, "native switch reader unavailable")
+            local world_address = state.world:GetAddress()
+            if valid(fixture.stream) and fixture.stream:IsLevelVisible() then
+                local entry = assert(find_switch(state, phase, fields[5]), "streamed switch missing from the census")
+                assert(same(entry.level, fixture.stream:GetLoadedLevel()))
+                fixture.reader_address, fixture.reader_path = entry.address, entry.path
+                local powered = read(world_address, entry.address, entry.path, "Powered", false)
+                assert(type(powered) == "boolean" and powered == entry.actor.Powered,
+                    "native streamed switch disagrees with the stock power state")
+                assert(read(world_address, entry.address, entry.path .. "_missing", "Powered", false) == nil,
+                    "native streamed switch accepted a different path for the cached address")
+                return bit(powered)
+            end
+            assert(fixture.reader_address and fixture.reader_path)
+            assert(read(world_address, fixture.reader_address, fixture.reader_path, "Powered", false) == nil,
+                "native streamed switch accepted a hidden or unloaded actor")
+            return "refused"
+        end
+        assert(valid(fixture.stream))
         if mode == "hide" or mode == "show" or mode == "unload" then
             fixture.stream:SetShouldBeVisible(mode == "show")
             if mode == "unload" then fixture.stream:SetShouldBeLoaded(false) end
