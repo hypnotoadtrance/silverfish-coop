@@ -5599,6 +5599,9 @@ class Client:
         self.crate_lids = native_loot.GuestCrateProjection()
         self.crate_roll_view = native_loot.GuestRollView()
         self.provisional_crate_rolls = {}
+        directory = getattr(bridge, "directory", None)
+        self.trace_crate_timing = (isinstance(directory, Path) and bridge.local_bridge is not None and
+                                   (directory / native_world_loot.CRATE_TIMING_FIXTURE).is_file())
         self.world_loot_wake = asyncio.Event()
         self.last_lockpick_result = 0
         self.pending_lockpick_unlocks: dict[int, str] = {}
@@ -6291,6 +6294,7 @@ class Client:
             return
         session, epoch = self.host_session, self.zone_epoch
         inputs = self.bridge.native_crate_inputs()
+        drained_us = time.monotonic_ns() // 1000 if self.trace_crate_timing else None
         inputs, local_outcomes = split_crate_input_outcomes(self.last_game, inputs)
         await self.service_lockpick_results(scope, inputs, schedule=schedule_lockpick)
         intents = self.crate_intents.take(self.last_game, inputs)
@@ -6300,6 +6304,9 @@ class Client:
             operation = uuid.uuid5(self.bridge.input_namespace,
                                    f"{session}:{epoch}:{self.invite['character_id']}:crate:{sequence}:{crate}").hex
             outcome = local_outcomes.get((sequence, crate))
+            if drained_us is not None:
+                self.control.event("native_crate_input_timing", crate=crate, sequence=sequence, operation_id=operation,
+                                   worker_input_drained_us=drained_us)
             if schedule is None:
                 await self.finish_crate_interaction(scope, operation, crate, sequence, source, outcome)
             else:
@@ -6351,10 +6358,11 @@ class Client:
         local_roll = native_crate_outcome.observed_roll(crate, area, self.invite["character_id"], operation, outcome)
         settlement = asyncio.get_running_loop().create_future()
         self.provisional_crate_rolls[crate] = scope, local_roll, settlement
+        timing = {"worker_projection_wake_us": time.monotonic_ns() // 1000} if self.trace_crate_timing else {}
         self.world_loot_wake.set()
         self.control.event("native_loot_locally_rolled", crate=crate, operation_id=operation,
                            item_count=len(local_roll["items"]),
-                           outcome_source="memory_input" if local_outcome is not None else "bridge_command")
+                           outcome_source="memory_input" if local_outcome is not None else "bridge_command", **timing)
         settled = None
         try:
             try:
@@ -7401,6 +7409,7 @@ class Client:
             await self.dispatch_stock_interaction(scope, operation, target)
 
     async def project_world_loot(self) -> None:
+        timing = {"worker_frame_start_us": time.monotonic_ns() // 1000} if self.trace_crate_timing else None
         game = self.last_game
         area, session, zone = game.get("map"), self.host_session, self.zone_epoch
         version = game.get(native_world_loot.CAPABILITY, 0)
@@ -7435,6 +7444,7 @@ class Client:
                 mushroom_frame=gameplay.get(native_mushrooms.KEY),
                 quest_package=gameplay.get(native_host_dig_live.PACKAGE_FRAME),
                 preview_visit=self.stock_interaction_scope() if active else None,
+                timing=timing,
             )
         except (OSError, RuntimeError, TimeoutError) as error:
             if self.world_loot.last_error != str(error):
@@ -7448,6 +7458,9 @@ class Client:
                     == game.get("pawns", {}).get("local", {}).get("name")
                     and snapshot.get("sequence", 0) >= current.get("sequence", 0)):
                 self.last_game = snapshot
+        finally:
+            if timing is not None and "bridge_ticket" in timing:
+                self.control.event("native_crate_projection_timing", map=area, **timing)
 
     async def run_world_loot(self) -> None:
         while not self.stopping:

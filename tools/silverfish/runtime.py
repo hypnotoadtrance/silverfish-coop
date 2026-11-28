@@ -4238,8 +4238,10 @@ class Bridge:
         return reply
 
     async def command(self, action: str, *arguments: str, timeout: float = 8, update_status: bool = True,
-                      catalog_body: bytes | None = None) -> dict:
+                      catalog_body: bytes | None = None, timing=None) -> dict:
         fields = (uuid.uuid4().hex, action, *arguments)
+        if timing is not None:
+            timing["bridge_ticket"] = fields[0]
         long_fields = (range(7, len(fields), 3) if action == native_crate_outcome.ADOPT and self.local_bridge is not None else
                        (5, 6) if action == native_board_contract.MENU_OPEN else
                        (5,) if action == native_inventory_grant.APPLY and self.local_bridge is not None else
@@ -4273,7 +4275,11 @@ class Bridge:
                 status = await self.wait_for(lambda state: state.get("ack", {}).get("id") == fields[0], timeout,
                                              interval=.025, file_reply=True)
         else:
-            raw = await self.local_bridge.command(header + (catalog_body or b""), timeout)
+            payload = header + (catalog_body or b"")
+            if timing is None:
+                raw = await self.local_bridge.command(payload, timeout)
+            else:
+                raw = await self.local_bridge.command(payload, timeout, timing=timing)
             if action in (native_crate_outcome.LOCAL_ROLL, native_crate_outcome.ADOPT):
                 return _parse_crate_outcome(raw, fields)
             if action in {"travel", "travel-party"} and raw.startswith("native-travel-reply\t"):

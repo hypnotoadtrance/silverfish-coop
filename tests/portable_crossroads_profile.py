@@ -394,6 +394,144 @@ def instrument_inline_crate_scan(source):
     return source
 
 
+def _crate_timing_overlay(source, replacements):
+    for anchor, replacement in replacements:
+        if source.count(anchor) != 1:
+            raise ValueError(f"The crate timing anchor changed: {anchor.strip()}")
+        source = source.replace(anchor, replacement, 1)
+    return source
+
+
+def instrument_crate_input_timing(source):
+    prepare = """            local reply = require("native_loot_actions").prepare_outcome(state, phase, profile.name, sequence, status_row)
+            if reply and SilverfishEnqueueLocalBridgeInput(press .. reply) then return end
+"""
+    receipts = "    local receipts = table.pack(SilverfishReadNativeLootCrateReceipts(detail.pawn:GetAddress()))\n"
+    visit = "        if profile then accept(index, profile, detail.name, sequence, pried, guest) end\n"
+    fallback = "        SilverfishEnqueueLocalBridgeInput(press)\n"
+    return _crate_timing_overlay(source, (
+        (receipts, """    local timing = SilverfishPortableCrateTiming
+    local stamp = timing and timing.map == state.map and SilverfishBridgeProfileStamp
+    local read_start = stamp and stamp()
+""" + receipts + "    local read_end = stamp and stamp()\n"),
+        (visit, """        if stamp and profile and profile.name == timing.crate and sequence > timing.last_receipt then
+            timing.last_receipt = sequence
+            timing.push("receipt", state.map, profile.name, sequence, read_start, read_end)
+        end
+""" + visit),
+        (prepare, """            local timing = SilverfishPortableCrateTiming
+            local stamp = timing and timing.map == state.map and timing.crate == profile.name and SilverfishBridgeProfileStamp
+            local prepare_start = stamp and stamp()
+            local reply = require("native_loot_actions").prepare_outcome(state, phase, profile.name, sequence, status_row)
+            local prepare_return = stamp and stamp()
+            local enqueue_start = reply and stamp and stamp()
+            local enqueued = reply and SilverfishEnqueueLocalBridgeInput(press .. reply)
+            if stamp then
+                timing.push("input", state.map, profile.name, sequence, prepare_start, prepare_return,
+                    enqueue_start or 0, stamp(), enqueued and "inline" or reply and "inline_refused" or "no_outcome")
+            end
+            if enqueued then return end
+"""),
+        (fallback, """        local timing = SilverfishPortableCrateTiming
+        if timing and timing.map == state.map and timing.crate == profile.name then
+            local enqueue_start = SilverfishBridgeProfileStamp()
+            local enqueued = SilverfishEnqueueLocalBridgeInput(press)
+            timing.push("input", state.map, profile.name, sequence, 0, 0, enqueue_start, SilverfishBridgeProfileStamp(),
+                enqueued and "press" or "press_refused")
+        else
+            SilverfishEnqueueLocalBridgeInput(press)
+        end
+"""),
+    ))
+
+
+def instrument_crate_outcome_timing(source):
+    # Restrict common escrow anchors to the guest-local function body.
+    start = "local function local_outcome(fields, state, phase)\n"
+    stop = "\nlocal function adopt_outcome("
+    prefix, opening, remaining = source.partition(start)
+    section, closing, suffix = remaining.partition(stop)
+    if not opening or not closing:
+        raise ValueError("The local crate outcome boundary changed")
+    section = _crate_timing_overlay(section, (
+        ("    local profile = loot.profile(state.map, fields[3])\n", """    local timing = SilverfishPortableCrateTiming
+    local stamp = timing and timing.map == state.map and timing.crate == fields[3] and SilverfishBridgeProfileStamp
+    local started = stamp and stamp()
+    local capture_done, export_done
+    local profile = loot.profile(state.map, fields[3])
+"""),
+        ("    local reply = table.pack(SilverfishOpenNativeGuestLootCrate(",
+         "    local native_start = stamp and stamp()\n    local reply = table.pack(SilverfishOpenNativeGuestLootCrate("),
+        ("    if not reply[1] then\n", "    local native_return = stamp and stamp()\n    if not reply[1] then\n"),
+        ("        capture_rows(scope, pool, outputs, items)\n",
+         "        capture_rows(scope, pool, outputs, items)\n        capture_done = stamp and stamp()\n"),
+        ("        if not ok or #rows ~= #items then error(reason, 0) end\n",
+         "        export_done = stamp and stamp()\n        if not ok or #rows ~= #items then error(reason, 0) end\n"),
+        ("    retire_items(items)\n", """    retire_items(items)
+    if stamp then
+        timing.push("outcome", state.map, fields[3], sequence, started, native_start, native_return,
+            capture_done or 0, export_done or 0, stamp(), exported and "typed" or "unavailable")
+    end
+"""),
+    ))
+    return prefix + opening + section + closing + suffix
+
+
+def instrument_crate_frame_timing(source):
+    anchor = "function projection.frame_reply(fields, state, phase, row)\n"
+    return _crate_timing_overlay(source, ((anchor, anchor + """    local timing = SilverfishPortableCrateTiming
+    if timing and phase == "connected" and timing.map == state.map then
+        local started = SilverfishBridgeProfileStamp()
+        local ids = {}
+        for index = 5, #fields do
+            ids[#ids + 1] = fields[index]:match("^([^|]+)") or "-"
+        end
+        timing.push("frame", state.map, fields[4], fields[1], started, table.concat(ids, "|"))
+    end
+"""),))
+
+
+def instrument_crate_status_timing(source):
+    anchor = "local function write_status(state, current_phase, failure, fields, pending, crate_diagnostic)\n"
+    return _crate_timing_overlay(source, ((anchor, anchor + """    local timing = SilverfishPortableCrateTiming
+    if timing and current_phase == "connected" and timing.map == state.map then
+        timing.push("status", state.map, sequence + 1, SilverfishBridgeProfileStamp(), fields and fields[2] or "-")
+    end
+"""),))
+
+
+def instrument_crate_probe_timing(source):
+    press = '        local pressed_us = type(SilverfishBridgeProfileStamp) == "function" and SilverfishBridgeProfileStamp()\n'
+    modes = '        and mode ~= "discovered" then return end\n'
+    motion = '    if mode == "motion" then\n'
+    return _crate_timing_overlay(source, (
+        (modes, modes.replace('then return end', 'and mode ~= "timing" then return end')),
+        (press, press + r'''        if mode == "coldpress" and pressed_us then
+            local rows = {}
+            local package_name = map:match("^(.*)%.[^.]+$")
+            local function push(...)
+                if #rows < 128 then rows[#rows + 1] = table.concat({...}, "\t") end
+            end
+            SilverfishPortableCrateTiming = {
+                map = package_name, crate = crate:GetFullName(), rows = rows, push = push, last_receipt = 0,
+            }
+            push("press", package_name, crate:GetFullName(), pressed_us)
+        end
+'''),
+        (motion, r'''    if mode == "timing" then
+        ok, result = pcall(function()
+            local timing = assert(SilverfishPortableCrateTiming, "The cold crate timing probe is inactive")
+            local output = assert(io.open(mailbox .. "/portable-crate-timing.tsv", "wb"))
+            output:write(table.concat(timing.rows, "\n"), "\n")
+            output:close()
+            SilverfishPortableCrateTiming = nil
+            return "written"
+        end)
+    elseif mode == "motion" then
+'''),
+    ))
+
+
 def instrument_loose_discovery(source):
     anchor = "SilverfishDiscoverLoosePickups(pawn:GetAddress(), current.host)"
     if source.count(anchor) != 1:

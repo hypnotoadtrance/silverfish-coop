@@ -5,6 +5,7 @@ import ctypes
 from ctypes import wintypes
 import os
 from pathlib import Path
+import time
 
 from .guest_request_scope import mark_effect
 
@@ -244,11 +245,17 @@ class LocalBridge:
                 self._status_frame = None
         return self._status_frame
 
-    async def command(self, payload: bytes, timeout: float, *, skip_if_busy: bool = False) -> str:
+    async def command(self, payload: bytes, timeout: float, *, skip_if_busy: bool = False, timing=None) -> str:
+        if timing is not None:
+            timing["lane_enter_us"] = time.monotonic_ns() // 1000
         if skip_if_busy and self._lock.locked():
             raise LocalCommandNotSubmitted("The local co-op command lane is busy")
         async with self._lock:
+            if timing is not None:
+                timing["lane_acquired_us"] = time.monotonic_ns() // 1000
             ticket = self._submit(payload, len(payload))
+            if timing is not None:
+                timing["native_submit_return_us"] = time.monotonic_ns() // 1000
             if not ticket:
                 raise LocalCommandNotSubmitted("The game could not queue the local co-op command")
             mark_effect("game_command")
@@ -261,6 +268,8 @@ class LocalBridge:
                     raise TimeoutError("The game did not acknowledge the local co-op command")
                 if size < 0:
                     raise RuntimeError("The local co-op command receipt is unavailable")
+                if timing is not None:
+                    timing["native_reply_us"] = time.monotonic_ns() // 1000
                 buffer = ctypes.create_string_buffer(size)
                 if not self._copy(ticket, buffer, size):
                     raise RuntimeError("The local co-op command receipt changed")

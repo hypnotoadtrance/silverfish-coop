@@ -32,6 +32,7 @@ FIXTURE = "native-world-loot-fixture"
 APPROACH = "native-world-loot-approach"
 CAPABILITY = "native_world_loot_version"
 SHARED_PICKUPS_VERSION = 2
+CRATE_TIMING_FIXTURE = "portable-crate-timing.enable"
 CRATE_CLAIM = "native-loot-claim"
 ENEMY_CLAIM = "native-enemy-loot-claim"
 _TARGET = re.compile(r"world-loot:([0-9a-f]{32}):([0-9a-f]{32})(?::([1-9][0-9]{0,15}))?\Z")
@@ -408,7 +409,7 @@ class Projection:
 
     async def sync(self, bridge, game, rolls, generation, zone, *, active, enemy_frame=None, enemy_rolls=None,
                    player_drops=None, stock_enemy_drops=None, mushroom_frame=None, enemy_motion=None, carried=None,
-                   quest_package=None, preview_visit=None):
+                   quest_package=None, preview_visit=None, timing=None):
         phase = game.get("state")
         if phase not in {"hosting", "connected"} or not isinstance(zone, str):
             self.previous = None
@@ -467,7 +468,12 @@ class Projection:
             return game
         self.next_sync = now + .65
         self.previous = signature
-        snapshot = await bridge.command(FRAME, area, epoch, *args, timeout=3)
+        if timing is None:
+            snapshot = await bridge.command(FRAME, area, epoch, *args, timeout=3)
+        else:
+            timing["crate_items"] = [identity for identity, item in self.items.items() if item.claim_action == CRATE_CLAIM]
+            timing["worker_frame_ready_us"] = time.monotonic_ns() // 1000
+            snapshot = await bridge.command(FRAME, area, epoch, *args, timeout=3, timing=timing)
         if FRAME_REPLY in snapshot:
             if snapshot[FRAME_REPLY] != seat:
                 raise RuntimeError("The stock world loot reply belonged to a different game seat")

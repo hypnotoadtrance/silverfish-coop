@@ -7319,6 +7319,49 @@ def instrument_crate_loot_presentation(script: str) -> str:
 ''', 1)
 
 
+async def crate_projection_timing(guest, guest_state, crate, operation, sequence, pressed_us, first_views):
+    assert await portable_probe_command(guest.bridge, "portable-crate", "timing") == "written"
+    trace = guest.bridge.directory / "portable-crate-timing.tsv"
+    rows = [line.split("\t") for line in trace.read_text(encoding="ascii").splitlines()]
+    press, = [row for row in rows if row[0] == "press" and row[2] == crate]
+    assert int(press[3]) == pressed_us, press
+    receipt, = [row for row in rows if row[0] == "receipt" and row[2:4] == [crate, str(sequence)]]
+    enqueue, = [row for row in rows if row[0] == "input" and row[2:4] == [crate, str(sequence)] and row[8] == "inline"]
+    capture, = [row for row in rows if row[0] == "outcome" and row[2:4] == [crate, str(sequence)] and row[10] == "typed"]
+    first_pickable = min(first_views.values())
+    frame = max((row for row in rows if row[0] == "frame" and int(row[4]) <= first_pickable
+                 and set(first_views) <= set(row[5].split("|"))), key=lambda row: int(row[4]))
+    recent = await resident_events(guest.client / "run", guest_state)
+    drained, = [row for row in recent if row["event"] == "native_crate_input_timing" and row["operation_id"] == operation]
+    planned, = [row for row in recent if row["event"] == "native_loot_locally_rolled" and row["operation_id"] == operation]
+    submitted, = [row for row in recent if row["event"] == "native_crate_projection_timing" and row["bridge_ticket"] == frame[3]]
+    assert set(first_views) <= set(submitted["crate_items"]), submitted
+
+    stamps = {"press": pressed_us, "native_receipt_poll_start": int(receipt[4]), "native_receipt_poll_end": int(receipt[5]),
+              "prepare_start": int(enqueue[4]), "prepare_return": int(enqueue[5]),
+              "input_enqueue_start": int(enqueue[6]), "input_enqueue_return": int(enqueue[7]),
+              "stock_roll_start": int(capture[5]), "stock_roll_return": int(capture[6]),
+              "typed_capture_done": int(capture[7]), "typed_export_done": int(capture[8]),
+              "original_items_retired": int(capture[9]), "worker_input_drained": drained["worker_input_drained_us"],
+              "worker_projection_wake": planned["worker_projection_wake_us"],
+              "worker_frame_start": submitted["worker_frame_start_us"], "worker_frame_ready": submitted["worker_frame_ready_us"],
+              "lane_enter": submitted["lane_enter_us"], "lane_acquired": submitted["lane_acquired_us"],
+              "native_submit_return": submitted["native_submit_return_us"], "native_reply": submitted["native_reply_us"],
+              "native_frame_start": int(frame[4]), "first_pickable": first_pickable}
+    ordered = ("press", "native_receipt_poll_start", "native_receipt_poll_end", "prepare_start", "stock_roll_start",
+               "stock_roll_return", "typed_capture_done", "typed_export_done", "original_items_retired", "prepare_return",
+               "input_enqueue_start", "worker_input_drained", "worker_projection_wake", "worker_frame_start",
+               "worker_frame_ready", "lane_enter", "lane_acquired", "native_frame_start", "first_pickable")
+    assert all(stamps[left] <= stamps[right] for left, right in zip(ordered, ordered[1:])), stamps
+    return {"press_to_stage_ms": {label: round((stamp - pressed_us) / 1000, 3) for label, stamp in stamps.items()},
+            "lane_wait_ms": round((stamps["lane_acquired"] - stamps["lane_enter"]) / 1000, 3),
+            "game_dispatch_ms": round((stamps["native_frame_start"] - stamps["native_submit_return"]) / 1000, 3),
+            "earlier_world_frames_ms": [round((int(row[4]) - pressed_us) / 1000, 3) for row in rows
+                                         if row[0] == "frame" and int(frame[4]) > int(row[4]) >= pressed_us],
+            "stock_status_passes_ms": [round((int(row[3]) - pressed_us) / 1000, 3) for row in rows
+                                       if row[0] == "status" and first_pickable >= int(row[3]) >= pressed_us]}
+
+
 async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_positions: bool = False, cold: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_state, guest_state = await asyncio.gather(
@@ -7431,6 +7474,8 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
             started = max(starts)
             timings["press_to_guest_projection_ms"] = round((started - pressed_us) / 1000, 2)
             timings["projection_to_first_world_item_ms"] = round((min(first_views.values()) - started) / 1000, 2)
+        timings["projection_timing"] = await crate_projection_timing(guest, guest_state, crate, roll["id"],
+                                                                     received["sequence"], pressed_us, first_views)
         timings["stock_crate_pickup"] = await claim_stock_crate_item(host, guest, pawn, crate, roll, host_state, guest_state)
     assert save_fingerprints() == before
     return {
@@ -8772,7 +8817,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if crossroads_profile:
             from portable_crossroads_profile import (
                 instrument_anomaly_work, instrument_avatar_appearance, instrument_avatar_gait, instrument_avatar_lean,
-                instrument_avatar_observer, instrument_death_poll,
+                instrument_avatar_observer, instrument_crate_frame_timing, instrument_crate_input_timing,
+                instrument_crate_outcome_timing, instrument_crate_probe_timing, instrument_crate_status_timing,
+                instrument_death_poll,
                 instrument_flashlight_scope,
                 instrument_guest_status_binding, instrument_host_drop_context, instrument_inline_crate_scan,
                 instrument_input_mappings, instrument_journal_context,
@@ -8783,12 +8830,14 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
 
             crate_probe = ((Path(__file__).with_name("fixtures") / "portable_crate_input_probe.lua").read_text(encoding="utf-8")
                            if stock_crate_ring else None)
+            if crate_probe:
+                crate_probe = instrument_crate_probe_timing(crate_probe)
 
             def crossroads_overlay(source):
                 profiled = instrument_profile(source, stock_receipts=bool(
                     stock_crossroads_door or stock_warehouse_switch or oil_lamps_check or tutorial_dock_gait or stock_campfire))
                 # Native globals are registered on the co-op Lua state.
-                return (profiled + "\nstatus_publication.cold_crate_probe = function()\n" + crate_probe
+                return (instrument_crate_status_timing(profiled) + "\nstatus_publication.cold_crate_probe = function()\n" + crate_probe
                         + "\nend\nstatus_publication.cold_crate_probe()\n") if crate_probe else profiled
 
             proof["crossroads_profile_overlays"] = [
@@ -8797,9 +8846,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             if stock_crate_ring:
                 for game in games:
                     probes.enter_context(portable_script_overlay(game, "native_guest_drop_projection.lua",
-                                                                  instrument_crate_loot_presentation))
+                        lambda script: instrument_crate_frame_timing(instrument_crate_loot_presentation(script))))
                     probes.enter_context(portable_script_overlay(game, "native_loot_actions.lua",
-                                                                  instrument_crate_host_action))
+                        lambda script: instrument_crate_outcome_timing(instrument_crate_host_action(script))))
+                    probes.enter_context(portable_script_overlay(game, "native_loot_crate_input.lua",
+                                                                  instrument_crate_input_timing))
             for game in games:
                 probes.enter_context(portable_script_overlay(game, "zone_wall.lua", instrument_zone_walls))
                 probes.enter_context(portable_script_overlay(game, "native_stash_view.lua", instrument_stash_binding))
@@ -9195,6 +9246,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             processes.append((game, process))
             mailbox = await discover_mailbox(mailbox_root, process)
             assert runtime.read_json(mailbox / embedded_startup.UNIFIED_FILE) == release.selection
+            if stock_crate_ring and crossroads_profile:
+                (mailbox / native_world_loot.CRATE_TIMING_FIXTURE).touch(exist_ok=False)
             seat = Seat(profile, campaign, workspace / "clients" / title.name,
                         port, runtime.Bridge(mailbox, process))
             seats.append(seat)
