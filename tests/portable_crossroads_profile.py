@@ -9,10 +9,11 @@ import time
 
 from portable_guest_world_start import verify_stock_clock, wait_resident_status
 from tools.silverfish import native_downed_markers, native_kill_volume, native_loot, native_package_handoff_journal
-from tools.silverfish import native_loose_pickup, native_stash
+from tools.silverfish import native_loose_pickup, native_stash, native_title_entry
 from tools.silverfish.authored_loot import full_name
 from tools.silverfish.control import current_status, submit
 from tools.silverfish.runtime import MENU
+from tools.silverfish.title_handoff import _isolated_stock_title
 from tools.silverfish.travel import CROSSROADS
 
 
@@ -45,6 +46,17 @@ end
         local read = SilverfishReadNativeBridgeLifecycle
         local current = type(read) == "function" and read() or "missing"
         message = startup and (startup .. "," .. current) or "unavailable"
+    elseif action == "titleparity" and not capture then
+        local sample = SilverfishProfileNativeTitleRows
+        if type(sample) == "function" then
+            local ok, result = pcall(function()
+                local state = inspect()
+                return sample(state, phase(state), status_row)
+            end)
+            message = ok and result or ("title parity failed: " .. tostring(result))
+        else
+            message = "unavailable"
+        end
     elseif action == "gcrestore" then
 """)
     native_fast = "SilverfishMakeFastLocalBridgeCallback(fast_actions, dispatch_fast)" in source
@@ -519,12 +531,111 @@ async def verify_crossroads_recovery(host, guest, _pawn):
     return {"stock_crossroads_recovery": receipts}
 
 
+def instrument_title_rows(source):
+    if "SilverfishNativeTitleRows" not in source:
+        return source
+    start = "\nfunction title.rows(state, phase, status_row, idle_sequence)\n"
+    branch = "        if report then return {report, startup} end\n"
+    stop = "\nreturn title\n"
+    assert all(source.count(anchor) == 1 for anchor in (start, branch, stop))
+    source = source.replace(start, "\nlocal profiled_native_title\n" + start)
+    source = source.replace(branch, """        if report then
+            profiled_native_title = {report = report, startup = startup, sequence = idle_sequence}
+            return {report, startup}
+        end
+""")
+    return source.replace(stop, r"""
+
+function SilverfishProfileNativeTitleRows(state, phase, row)
+    local native = assert(SilverfishNativeTitleRows, "missing native title row producer")
+    local sample = profiled_native_title
+    if not on_title(state, phase) or not sample or not sample.sequence then return "pending" end
+    local expected = lua_rows(state, phase, row, sample.sequence)
+    local function read(current_phase, world)
+        return native(world, state.controller, current_phase, not not state.listening, state.server,
+            state.clients, state.local_pawn ~= nil, sample.sequence)
+    end
+    local report, startup = read(phase, state.world)
+    assert(report == expected[1] and startup == expected[2],
+        "native and stock title rows differ")
+    if sample.report ~= report or sample.startup ~= startup then return "pending" end
+    local opening, opening_startup = read("opening", state.world)
+    local stock_opening = lua_rows(state, "opening", row, sample.sequence)
+    assert(opening == stock_opening[1] and opening_startup == nil and stock_opening[2] == nil,
+        "native opening title differs from stock or advertises startup readiness")
+    assert(read("hosting", state.world) == nil and read(phase, nil) == nil,
+        "native title producer accepted another phase or an absent world")
+    return table.concat({tostring(sample.sequence), report, startup}, "\n")
+end
+
+return title
+""")
+
+
+async def read_native_title_parity(seat, probe, *, expected="ready"):
+    deadline = time.monotonic() + 8
+    while True:
+        reply = await session_profile_request(seat, probe, "titleparity")
+        if reply == "unavailable":
+            return None
+        if reply != "pending":
+            break
+        assert time.monotonic() < deadline, "No native title rows matched stock for the current menu"
+        await asyncio.sleep(.15)
+    assert not reply.startswith("title parity failed"), reply
+    sequence, emitted, *startup = reply.splitlines()
+    sequence = int(sequence)
+    report = native_title_entry.parse(emitted.split("\t"), "ready", MENU)
+    assert report["state"] == expected, report
+    published = await seat.bridge.wait_for(lambda game: game["sequence"] >= sequence
+                                           and game.get(native_title_entry.KEY) == report, timeout=5)
+    if expected == "ready":
+        receipt, = startup
+        captured_startup = native_title_entry.parse_startup(receipt.split("\t"), {
+            "mode": "idle", "state": "ready", "map": MENU, "sequence": sequence, native_title_entry.KEY: report,
+        })
+        assert _isolated_stock_title(published, seat.profile / "Saved"), published
+        assert published[native_title_entry.STARTUP_KEY]["saved_directory"] == captured_startup["saved_directory"]
+    else:
+        assert not startup and native_title_entry.STARTUP_KEY not in published, published
+        assert report["reason"] == "stock_menu_below_dialog" and not report["top"], report
+    return {"sequence": sequence, "published_sequence": published["sequence"], "title": report,
+            "exact_stock_rows": True, "opening_not_ready": True, "wrong_world_and_phase_refused": True,
+            "worker_startup_ready": expected == "ready"}
+
+
+async def verify_title_stack_readiness(seat, probe, original):
+    fixture = "native-title-settings-widget-fixture"
+    mounted = await seat.bridge.command(fixture, "mount")
+    assert mounted["ack"]["message"] == "title_settings_fixture_mounted", mounted
+    covered = None
+    try:
+        covered = await seat.bridge.command(fixture, "cover")
+        assert covered["ack"]["message"] == "title_settings_fixture_stale_read_write_blocked_removed", covered
+        shadowed = await read_native_title_parity(seat, probe, expected="waiting")
+        assert shadowed and shadowed["title"] == covered[native_title_entry.KEY]
+        title, baseline = shadowed["title"], original["title"]
+        assert title["menu_stack"] == baseline["menu_stack"] + 1, shadowed
+        assert title["widget"] == baseline["widget"] and title["controller"] == baseline["controller"], shadowed
+    finally:
+        current = seat.bridge.snapshot() or {}
+        menu_covered = current.get(native_title_entry.KEY, {}).get("reason") == "stock_menu_below_dialog"
+        operation = "uncover" if covered is not None or menu_covered else "remove"
+        await seat.bridge.command(fixture, operation)
+    returned = await read_native_title_parity(seat, probe)
+    assert returned and returned["title"] == original["title"] and returned["sequence"] > shadowed["sequence"], returned
+    return {"covered": shadowed, "returned": returned}
+
+
 def instrument_zone_walls(source):
     anchor = "local sources = wall_sources(world, scope.map, route, scope.fixture, scope.secondary)"
     assert source.count(anchor) == 1
     source = source.replace(anchor, 'local sources = SilverfishProfileCrossroadsCall("zone_wall_sources", '
                             'wall_sources, world, scope.map, route, scope.fixture, scope.secondary)')
-    batch_call = "        certified, discovered = SilverfishSnapshotNativeWallOverlapSources(world_address, refresh_discovered)\n"
+    batch_prefix = "        certified, discovered = SilverfishSnapshotNativeWallOverlapSources(world_address, refresh_discovered"
+    reuse_call = batch_prefix + ", authored_overlap_storage)\n"
+    has_reuse = reuse_call in source
+    batch_call = reuse_call if has_reuse else batch_prefix + ")\n"
     has_batch = batch_call in source
     if has_batch:
         source = source.replace("local function wall_sources(", "local profiled_wall_batch\nlocal function wall_sources(", 1)
@@ -532,13 +643,21 @@ def instrument_zone_walls(source):
             if not profiled_wall_batch or profiled_wall_batch.world ~= world_address then
                 profiled_wall_batch = {world = world_address}
             end
-            profiled_wall_batch.authored = certified
-            if refresh_discovered then profiled_wall_batch.discovery = type(discovered) == "table" end
+            local prior = profiled_wall_batch
+            local key = prior.key or next(certified)
+            local wrapper = key and certified[key]
+            if wrapper and rawequal(prior.authored, certified) and rawequal(prior.wrapper, wrapper) then
+                prior.reused = true
+            end
+            prior.key, prior.wrapper, prior.authored = key, wrapper, certified
+            if refresh_discovered then prior.discovery = type(discovered) == "table" end
         end
 """, 1)
     end = "\nreturn wall\n"
     assert source.count(end) == 1
-    fixture = ("" if has_batch else "local profiled_wall_batch\n") + """
+    fixture = ("" if has_batch else "local profiled_wall_batch\n")
+    fixture += f"local profiled_wall_reuse = {'true' if has_reuse else 'false'}\n"
+    fixture += """
 function SilverfishProfileCrossroadsWallSources(world, map)
     local certify = SilverfishCertifyNativeAuthoredOverlapWall
     if type(certify) ~= "function" then return "unavailable" end
@@ -617,6 +736,28 @@ function SilverfishProfileCrossroadsWallSources(world, map)
         end
         batch_fields = (",%d,%d,%d"):format(authored_count, discovery_count, observed.discovery and 1 or 0)
         native = function() return sample(address, false) end
+        if profiled_wall_reuse then
+            assert(observed.reused, "ordinary wall sync did not retain its authored table and wrapper")
+            local storage, wrappers = {}, {}
+            assert(rawequal(sample(address, false, storage), storage), "native wall batch replaced supplied storage")
+            for _, item in ipairs(qualified) do wrappers[item[2].actor] = storage[item[2].actor] end
+            assert(rawequal(sample(address, false, storage), storage), "native wall did not reuse warm storage")
+            for name, wrapper in pairs(wrappers) do
+                assert(rawequal(storage[name], wrapper), "native wall replaced the unchanged wrapper: " .. name)
+            end
+            local actor, name = qualified[1][1], qualified[1][2].actor
+            assert(sample(address + 1, false, storage) == nil and rawequal(storage[name], wrappers[name]),
+                "stale world changed retained authored wrappers")
+            storage[name] = false
+            assert(rawequal(sample(address, false, storage), storage) and same(storage[name], actor),
+                "native wall did not replace an unqualified authored wrapper")
+            local function warm() return sample(address, false, storage) end
+            local reuse_count = 32
+            local warm_ms, fresh_ms, warm_kib, fresh_kib = SilverfishProfileCrossroadsCompare(reuse_count, warm, native)
+            batch_fields = batch_fields .. (",%d,%.3f,%.3f,%.3f,%.3f"):format(
+                reuse_count, warm_ms, fresh_ms, warm_kib, fresh_kib)
+            native = warm
+        end
     end
     local native_ms, lua_ms, native_kib, lua_kib = SilverfishProfileCrossroadsCompare(count, native, read)
     return ("%d%s,%d,%.3f,%.3f,%.3f,%.3f"):format(
@@ -2973,13 +3114,21 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
                     sources, *batch = scope
                     record["authored_overlap_sources"] = int(sources)
                     if batch:
-                        authored, discovered, discovered_in_sync = map(int, batch)
+                        authored, discovered, discovered_in_sync = map(int, batch[:3])
                         assert authored == int(sources) and discovered >= -1 and discovered_in_sync in (0, 1), reply
                         record["native_batch"] = {
                             "authored_overlap_sources": authored, "authored_batch_used_in_sync": True,
                             "discovered_overlap_sources": discovered if discovered >= 0 else None,
                             "discovery_batch_used_in_sync": bool(discovered_in_sync),
                         }
+                        if batch[3:]:
+                            repeats, reused_ms, fresh_ms, reused_kib, fresh_kib = batch[3:]
+                            record["native_batch"]["wrapper_reuse"] = {
+                                "passes_per_reader": int(repeats), "reused_ms": reused_ms, "fresh_ms": fresh_ms,
+                                "reused_lua_heap_growth_kib": reused_kib, "fresh_lua_heap_growth_kib": fresh_kib,
+                                "reused_in_sync": True, "invalid_wrapper_replaced": True,
+                                "wrong_world_left_storage_unchanged": True,
+                            }
                 else:
                     game_seconds, verified_sequence = scope
                     record["local_save_game_seconds"] = game_seconds

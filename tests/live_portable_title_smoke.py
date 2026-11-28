@@ -8913,7 +8913,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 instrument_input_mappings, instrument_journal_context,
                 instrument_loose_discovery, instrument_npc_class_discovery, instrument_profile,
                 instrument_ready_roster, instrument_shop_discovery, instrument_spawn_context, instrument_stash_binding,
-                instrument_switch_reads, instrument_vital_reads, instrument_weather_status, instrument_world_scene,
+                instrument_switch_reads, instrument_title_rows, instrument_vital_reads, instrument_weather_status,
+                instrument_world_scene,
                 instrument_zone_walls,
             )
 
@@ -8998,6 +8999,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(portable_script_overlay(game, name, instrument))
                 for game in games
                 for name, instrument in (
+                    ("native_title_entry.lua", instrument_title_rows),
                     ("native_world.lua", instrument_world_scene),
                     ("native_world_view.lua", instrument_weather_status),
                     ("native_guest_clock.lua", instrument_guest_clock_dispatch),
@@ -9576,7 +9578,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             host = first
             if crossroads_profile:
                 from portable_crossroads_profile import (
-                    read_collector_modes, read_native_bridge_lifecycle, read_session_title,
+                    read_collector_modes, read_native_bridge_lifecycle, read_native_title_parity, read_session_title,
+                    verify_title_stack_readiness,
                 )
 
                 proof["initial_title_bridge_lifecycle"] = await read_native_bridge_lifecycle(
@@ -9588,6 +9591,13 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 if any(title_census):
                     assert all(title_census), title_census
                     proof["initial_title_native_census"] = dict(zip(("host", "guest"), title_census, strict=True))
+                title_rows = await asyncio.gather(*(read_native_title_parity(seat, portable_probe_command)
+                                                    for seat in (first, second)))
+                if any(title_rows):
+                    assert all(title_rows), title_rows
+                    proof["initial_native_title_rows"] = dict(zip(("host", "guest"), title_rows, strict=True))
+                    proof["stock_title_under_dialog"] = await verify_title_stack_readiness(
+                        first, portable_probe_command, title_rows[0])
             for campaign, checks in resident_campaigns.items():
                 if proof["sessions"]:
                     # A fresh loopback port also preserves the stock first-contact trust exercise.
@@ -9606,6 +9616,13 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                         assert (closed["host"]["pid"], closed["guest"]["pid"]) == (session["host_pid"], session["guest_pid"]), closed
                         session["title_bridge_lifecycle"] = closed
                     session["title_collector_modes"] = await read_collector_modes(host, second, portable_probe_command)
+                    if "initial_native_title_rows" in proof:
+                        reopened_title = await asyncio.gather(*(read_native_title_parity(seat, portable_probe_command)
+                                                               for seat in (host, second)))
+                        assert all(reopened_title), reopened_title
+                        for role, title in zip(("host", "guest"), reopened_title, strict=True):
+                            assert title["sequence"] > proof["initial_native_title_rows"][role]["sequence"], title
+                        session["returned_native_title_rows"] = dict(zip(("host", "guest"), reopened_title, strict=True))
                 proof["sessions"].append(dict(session, resident_campaign=campaign))
                 if saved := session.get("loki_saved_load"):
                     async def reopen_loki(host, guest, pawn):
