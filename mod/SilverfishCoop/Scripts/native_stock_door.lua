@@ -397,23 +397,35 @@ sample_door = function(scan, name, ready_pose)
             end
             if unchanged then return previous.row end
         end
+        local fields = {value[1] and 1 or 0, value[2] and 1 or 0, value[3] and 1 or 0}
+        value[10], value[11], value[12] = center.X, center.Y, center.Z
+        value[13], value[14], value[15], value[16] = grip.X, grip.Y, grip.Z, collision
+        for index = 4, 15 do
+            local formatted = string.format("%.3f", value[index])
+            fields[index] = formatted == "-0.000" and "0.000" or formatted
+        end
+        fields[16] = collision
+        if previous then
+            -- Keep the observation version when the new sample has the same wire pose.
+            local unchanged = true
+            for index = 1, 16 do
+                if previous.fields[index] ~= fields[index] then unchanged = false; break end
+            end
+            if unchanged then
+                value.row, value.fields = previous.row, previous.fields
+                scan.samples[name] = value
+                return value.row
+            end
+        end
         local kind, object = name:match("^([%w_]+) .+:PersistentLevel%.([%w_]+)$")
         local tag, scope, id = "native-stock-door", scan.map, name
         if not scan.confirmation and kind and name:sub(1, #stream_prefix) ~= stream_prefix then
             tag, scope, id = "native-stock-door-state", kind, object
         end
-        local version = scan.phase == "hosting" and confirmation_sequence and {confirmation_sequence()} or {}
-        local encoded = scan.row(tag, scope, id,
-            value[1] and 1 or 0, value[2] and 1 or 0, value[3] and 1 or 0,
-            string.format("%.3f", value[4]), string.format("%.3f", value[5]), string.format("%.3f", value[6]),
-            string.format("%.3f", value[7]), string.format("%.3f", value[8]), string.format("%.3f", value[9]),
-            string.format("%.3f", center.X), string.format("%.3f", center.Y), string.format("%.3f", center.Z),
-            string.format("%.3f", grip.X), string.format("%.3f", grip.Y), string.format("%.3f", grip.Z),
-            collision, table.unpack(version))
+        if scan.phase == "hosting" and confirmation_sequence then fields[17] = confirmation_sequence() end
+        local encoded = scan.row(tag, scope, id, table.unpack(fields))
         if scan.samples then
-            value[10], value[11], value[12] = center.X, center.Y, center.Z
-            value[13], value[14], value[15], value[16] = grip.X, grip.Y, grip.Z, collision
-            value.row = encoded
+            value.row, value.fields = encoded, fields
             scan.samples[name] = value
         end
         return encoded

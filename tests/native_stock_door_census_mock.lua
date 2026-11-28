@@ -202,9 +202,28 @@ assert(reading[20] == frames)
 frames = frames + 1
 assert(doors.rows(authority, "hosting", row)[1] == reading,
     "a new census must preserve the unchanged door's original row and observation version")
+local jitter = 0
+opened.DoorMesh.K2_GetComponentLocation = function() return {X = jitter, Y = 0, Z = 0} end
+local jitter_encodes = encodes
+for _, offset in ipairs({.0003, -.0004, .0004, 0}) do
+    frames = frames + 1
+    jitter = offset
+    opened.Arrow.RelativeRotation.Yaw = -offset
+    assert(doors.rows(authority, "hosting", row)[1] == reading,
+        "motion below the wire precision must keep the same door observation")
+end
+assert(encodes == jitter_encodes, "sub-precision motion must not republish a door")
+jitter = .0006
+local exact = doors.rows(authority, "hosting", row)[1]
+assert(exact[13] == "0.001" and exact[20] == frames,
+    "motion across a wire precision boundary must republish a door")
+frames = frames + 1
 opened.Locked = false
 local changed = doors.rows(authority, "hosting", row)[1]
 assert(changed[4] == 0 and changed[20] == frames, "a new lock reading must include its own version")
+frames = frames + 1
+local _, fresh = doors.command(report_open, authority, "hosting", row)
+assert(fresh[20] == frames, "an explicit stock confirmation observes even an unchanged wire pose")
 
 local mounted = make_state("Campaign", 1, "/WorkshopPack/Maps/")
 local stock = mounted.world.doors[1]
