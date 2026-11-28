@@ -1,6 +1,13 @@
 -- Test-only UE4SS entry for an isolated stock title.
 local root = os.getenv("SILVERFISH_SAME_PROCESS_SAVE_PROOF")
-if not root or os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not root:match("[\\/]same%-save%-%x+$") then return end
+local mailbox = os.getenv("SILVERFISH_COOP_BRIDGE")
+local grouped = root == nil
+if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" then return end
+if grouped then
+    if os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") ~= "1"
+        or os.getenv("SILVERFISH_COOP_INSTALLED_TITLE") ~= "1" or not mailbox
+        or not mailbox:match("[\\/]portable%-title%-%x+[\\/].+[\\/]game%-bridge[\\/]%x+$") then return end
+elseif not root:match("[\\/]same%-save%-%x+$") then return end
 local save_scope = require("native_save_scope")
 
 local statics_path = "/Script/Engine.Default__GameplayStatics"
@@ -16,15 +23,15 @@ local destination_world = "World /Game/Classes/Maps/Maps_OverWorld/Observitory_P
 local widgets_path = "/Script/UMG.Default__WidgetBlueprintLibrary"
 local manage_path = "/Game/Classes/GUI/ManageSaves_Widget.ManageSaves_Widget_C"
 local slot = "SameProcessCanary"
-local profile = root .. "/game-user/Saved/SaveGames"
+local profile = root and root .. "/game-user/Saved/SaveGames"
 local scope_id, other_id = string.rep("a", 32), string.rep("b", 32)
-local branch = "SilverfishCoop/" .. scope_id
-local coop_profile = profile .. "/" .. branch
-local other_profile = profile .. "/SilverfishCoop/" .. other_id
+local coop_profile = profile and profile .. "/SilverfishCoop/" .. scope_id
+local other_profile = profile and profile .. "/SilverfishCoop/" .. other_id
 local mode, ran, active = "solo", false, false
 local routes = {solo = {}, coop = {}, other = {}}
 local config_candidate, stable_samples = nil, 0
-local pending, pending_other
+local pending, pending_other, original_state
+local native_routes = {select = 0, release = 0, wrong_release = 0}
 local preferences = {FOV = 88, MouseSensitivity = 0.75, VolumeMaster = 0.375, VolumetricFog = false}
 
 local function text(value)
@@ -52,6 +59,11 @@ local function report(state, message)
             assert(stream:write(side, "\t", name, "\t", tostring(routes[side][name] or 0), "\n"))
         end
     end
+    if grouped then
+        for _, name in ipairs({"select", "release", "wrong_release"}) do
+            assert(stream:write("native\t", name, "\t", tostring(native_routes[name]), "\n"))
+        end
+    end
     stream:close()
     assert(os.rename(path .. ".tmp", path))
 end
@@ -65,8 +77,11 @@ local function count(name)
 end
 
 local function observe_slot(name, parameter, user)
-    if not active or text(parameter:get()) ~= slot or user:get() ~= 0 then return end
-    count(name)
+    if not active or user:get() ~= 0 then return end
+    local actual = text(parameter:get())
+    local scope = mode == "coop" and scope_id or mode == "other" and other_id
+    if actual == slot or scope and type(actual) == "string"
+        and actual:gsub("\\\\", "/") == "SilverfishCoop/" .. scope .. "/" .. slot then count(name) end
 end
 
 RegisterHook("/Script/Engine.GameplayStatics:SaveGameToSlot", function(_, _, parameter, user)
@@ -91,8 +106,12 @@ RegisterHook("/Script/Engine.AsyncActionHandleSaveGame:AsyncSaveGameToSlot", fun
     observe_slot("async_save", parameter, user)
 end)
 RegisterHook("/Script/BlueprintFileUtils.BlueprintFileUtilsBPLibrary:FindFiles", function(_, directory, _, extension)
-    if not active or text(extension:get()) ~= ".sav" or normalized(text(directory:get())) ~= normalized(profile) then return end
-    count("find")
+    if not active or text(extension:get()) ~= ".sav" then return end
+    local actual = text(directory:get())
+    if type(actual) ~= "string" then return end
+    actual = normalized(actual)
+    local selected_profile = mode == "coop" and coop_profile or mode == "other" and other_profile or profile
+    if actual == normalized(profile) or actual == normalized(selected_profile) then count("find") end
 end)
 
 local function slurp(path)
@@ -146,11 +165,36 @@ local function prove_manage_saves(controller)
     screen:RemoveFromParent()
 end
 
+local function assert_native_scope(id)
+    if grouped then assert_equal(SilverfishSelectedNativeSaveScope(), id, "native selected save scope") end
+end
+
+local function select_scope(id)
+    save_scope.select(id)
+    assert_native_scope(id)
+    native_routes.select = native_routes.select + 1
+end
+
+local function release_scope(id)
+    save_scope.release(id)
+    assert_native_scope(nil)
+    native_routes.release = native_routes.release + 1
+end
+
 local function prepare(controller, instance, statics, save_class, stock_save)
     local config = instance.GamePlay_Config
     require_that(valid(config) and config:GetClass():GetFullName() == config_path, "stock settings object unavailable")
-    for field, value in pairs(preferences) do config[field] = value end
-    require_that(statics:SaveGameToSlot(config, "Config", 0), "the stock settings slot did not save")
+    original_state = {instance = instance, stock_save = stock_save, slot_name = text(instance.CurrentSaveSlot),
+                      autosave = instance.SaveAfterTransition, save_exists = instance.SaveFileExists}
+    if grouped then
+        assert_native_scope(nil)
+        require_that(not statics:DoesSaveGameExist(slot, 0), "the temporary solo slot already exists")
+        original_state.verified_new_slot = true
+        for field in pairs(preferences) do preferences[field] = config[field] end
+    else
+        for field, value in pairs(preferences) do config[field] = value end
+        require_that(statics:SaveGameToSlot(config, "Config", 0), "the stock settings slot did not save")
+    end
     check_preferences(statics:LoadGameFromSlot("Config", 0))
     snapshot_save("config-before", profile .. "/Config.sav")
     local canary = statics:CreateSaveGameObject(save_class)
@@ -164,7 +208,7 @@ local function prepare(controller, instance, statics, save_class, stock_save)
     local solo_bytes = snapshot_save("solo-before", profile .. "/" .. slot .. ".sav")
     recent(instance, 119)
 
-    save_scope.select(scope_id)
+    select_scope(scope_id)
     mode = "coop"
     recent(instance, nil)
     canary.Level = "Observitory_P"
@@ -174,11 +218,14 @@ local function prepare(controller, instance, statics, save_class, stock_save)
     require_that(solo_bytes ~= coop_bytes, "solo and co-op saves contain identical data")
     recent(instance, 202)
     check_preferences(statics:LoadGameFromSlot("Config", 0))
-    require_that(not statics:SaveGameToSlot(canary, "../../ScopeEscape", 0), "an invalid save slot was accepted")
+    local escaped = grouped and slot .. "_Escape" or "ScopeEscape"
+    require_that(not statics:SaveGameToSlot(canary, "../../" .. escaped, 0), "an invalid save slot was accepted")
     local wrong_release = pcall(save_scope.release, other_id)
     require_that(not wrong_release, "another scope released the active campaign")
-    save_scope.release(scope_id)
-    save_scope.select(other_id)
+    assert_native_scope(scope_id)
+    native_routes.wrong_release = native_routes.wrong_release + 1
+    release_scope(scope_id)
+    select_scope(other_id)
     mode = "other"
     recent(instance, nil)
     canary.Level = "DeadBridge_P"
@@ -187,8 +234,7 @@ local function prepare(controller, instance, statics, save_class, stock_save)
     local request = valid(async) and async:AsyncSaveGameToSlot(controller, canary, slot, 0)
     require_that(valid(request), "stock save action was unavailable")
     request:Activate()
-    pending_other = {instance = instance, stock_save = stock_save, slot_name = text(instance.CurrentSaveSlot),
-                     solo_bytes = solo_bytes}
+    pending_other = {instance = instance, solo_bytes = solo_bytes}
 end
 
 local function finish_other(statics, world)
@@ -201,8 +247,8 @@ local function finish_other(statics, world)
     local controller = statics:GetPlayerController(world, 0)
     recent(instance, 303)
     snapshot_save("other-after-async-save", other_profile .. "/" .. slot .. ".sav")
-    save_scope.release(other_id)
-    save_scope.select(scope_id)
+    release_scope(other_id)
+    select_scope(scope_id)
     mode = "coop"
     recent(instance, 202)
     prove_manage_saves(controller)
@@ -229,18 +275,49 @@ end
 
 local function verify_returned(statics)
     local instance = pending.instance
-    save_scope.release(scope_id)
+    release_scope(scope_id)
     mode = "solo"
     recent(instance, 119)
     require_that(pending.solo_bytes == slurp(profile .. "/" .. slot .. ".sav"), "co-op altered solo save bytes")
     check_preferences(instance.GamePlay_Config)
     check_preferences(statics:LoadGameFromSlot("Config", 0))
     snapshot_save("config-after", profile .. "/Config.sav")
-    instance.CurrentSaveSlot = pending.slot_name
-    instance.SaveSlot_Ref = pending.stock_save
 end
 
-LoopInGameThreadWithDelay(75, function()
+local function restore_original(statics)
+    if not original_state then return end
+    local previous = original_state
+    local instance = previous.instance
+    if grouped then
+        local selected = save_scope.selected()
+        if selected == scope_id or selected == other_id then release_scope(selected) end
+        assert_native_scope(nil)
+        if previous.verified_new_slot and statics:DoesSaveGameExist(slot, 0) then
+            require_that(statics:DeleteGameInSlot(slot, 0), "temporary solo save could not be removed")
+        end
+    end
+    instance.CurrentSaveSlot = previous.slot_name
+    if grouped and not valid(previous.stock_save) and previous.save_exists then
+        local recent_save = {}
+        instance:Find_MostRecentSaveFile(recent_save, recent_save)
+        instance.SaveSlot_Ref = valid(recent_save.Save) and recent_save.Save or nil
+    else
+        instance.SaveSlot_Ref = valid(previous.stock_save) and previous.stock_save or nil
+    end
+    instance.SaveAfterTransition = previous.autosave
+    instance.SaveFileExists = previous.save_exists
+end
+
+local function finish(statics, ok, failure)
+    active, mode = false, "solo"
+    local cleaned, cleanup_failure = pcall(restore_original, statics)
+    if not cleaned then failure = (failure and tostring(failure) .. " / " or "") .. tostring(cleanup_failure) end
+    pending, pending_other = nil, nil
+    report(ok and cleaned and "verified" or "failed", failure or "stock save menus, asynchronous save and load shared one process")
+    return true
+end
+
+local function tick()
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
     if not valid(world) then return end
@@ -249,29 +326,20 @@ LoopInGameThreadWithDelay(75, function()
             local title = world:GetFullName() == stock_world and FindFirstOf(title_class)
             local statics = StaticFindObject(statics_path)
             if not valid(title) or not title:IsInViewport() or not title:IsVisible() or not valid(statics) then return end
-            local ok, failure = pcall(verify_returned, statics)
-            active, mode, pending = false, "solo", nil
-            report(ok and "verified" or "failed", failure or "stock save menus, asynchronous save and load shared one process")
-            return true
+            return finish(statics, pcall(verify_returned, statics))
         end
         if world:GetFullName() ~= destination_world then return end
         local statics = StaticFindObject(statics_path)
         if not valid(statics) then return end
         local ok, failure = pcall(verify_loaded, statics, world)
-        if not ok then
-            report("failed", failure)
-            return true
-        end
+        if not ok then return finish(statics, false, failure) end
         return
     end
     if pending_other then
         local statics = StaticFindObject(statics_path)
         if not valid(statics) or world:GetFullName() ~= stock_world then return end
         local ok, failure = pcall(finish_other, statics, world)
-        if not ok then
-            report("failed", failure)
-            return true
-        end
+        if not ok then return finish(statics, false, failure) end
         return
     end
     if ran then return true end
@@ -306,10 +374,27 @@ LoopInGameThreadWithDelay(75, function()
         require_that(actual == normalized(profile), "unexpected stock saved directory: " .. actual)
         prepare(controller, instance, statics, save_class, stock_save)
     end)
-    if not ok then
-        active, mode, pending = false, "solo", nil
-        instance.SaveSlot_Ref = stock_save
-        report("failed", failure)
-        return true
+    if not ok then return finish(statics, false, failure) end
+end
+
+if grouped then
+    function SilverfishStartSameProcessSaveProof(request, first, second, expected_profile)
+        local function token(value)
+            return type(value) == "string" and #value == 32 and value:match("^[0-9a-f]+$") and value:find("[1-9a-f]")
+        end
+        require_that(root == nil and token(request) and token(first) and token(second) and first ~= second
+            and type(expected_profile) == "string" and expected_profile:match("^%a:[/\\\\]"),
+            "invalid private native save proof request")
+        require_that(type(SilverfishSelectedNativeSaveScope) == "function"
+            and type(SilverfishSelectNativeSaveScope) == "function" and type(SilverfishReleaseNativeSaveScope) == "function"
+            and not save_scope.selected(), "native save routing is unavailable")
+        assert_native_scope(nil)
+        root, profile, scope_id, other_id = mailbox .. "/same-save-" .. request, expected_profile, first, second
+        coop_profile, other_profile = profile .. "/SilverfishCoop/" .. first, profile .. "/SilverfishCoop/" .. second
+        slot = "SFSaveCanary_" .. request
+        LoopInGameThreadWithDelay(75, tick)
+        return "armed native stock save proof"
     end
-end)
+else
+    LoopInGameThreadWithDelay(75, tick)
+end

@@ -30,18 +30,19 @@ def _install_fixture(game: Path) -> None:
         raise ValueError("Use only the dedicated stock replica for this fixture")
     script = mods / MOD / "Scripts/main.lua"
     activation = mods / "mods.txt"
-    scope_module = script.with_name("native_save_scope.lua")
     tests = Path(__file__).resolve().parent
     expected = (tests / "fixtures/same_process_save.lua").read_bytes()
-    module = tests.parent / "mod/SilverfishCoop/Scripts/native_save_scope.lua"
-    for path in (script, activation, scope_module):
+    modules = tests.parent / "mod/SilverfishCoop/Scripts"
+    dependencies = ("native_save_scope.lua", "world_seed.lua", "zone_maps.lua", "authored_zone_maps.lua")
+    for path in (script, activation, *(script.with_name(name) for name in dependencies)):
         if path.resolve() != path or (path.exists() and path.stat().st_nlink != 1):
             raise ValueError("The fixture activation and script must be ordinary files")
     if activation.exists() and activation.read_bytes() != b"SameProcessSaveProof : 1\n":
         raise ValueError("The stock replica already has a different mods list")
     script.parent.mkdir(parents=True, exist_ok=True)
     script.write_bytes(expected)
-    scope_module.write_bytes(module.read_bytes())
+    for name in dependencies:
+        script.with_name(name).write_bytes((modules / name).read_bytes())
     activation.write_bytes(b"SameProcessSaveProof : 1\n")
 
 
@@ -53,6 +54,113 @@ def _read_proof(path: Path) -> dict:
         mode, call, quantity = line.split("\t")
         result["calls"].setdefault(mode, {})[call] = int(quantity)
     return result
+
+
+def same_process_save_overlay(source: str) -> str:
+    """Arm the scoped save fixture from the private installed Lua state."""
+    anchor = '    if command == "native-save-scope-select" or command == "native-save-scope-release" then\n'
+    if source.count(anchor) != 1:
+        raise ValueError("The private save scope command anchor changed")
+    action = '''    if command == "native-same-process-save-proof" then
+        if #fields ~= 6 or role ~= "idle" or not native_title_entry.probe(state, current_phase)
+            or type(SilverfishStartSameProcessSaveProof) ~= "function" then
+            error("Arm the private save proof at an unscoped stock title", 0)
+        end
+        return SilverfishStartSameProcessSaveProof(fields[3], fields[4], fields[5], fields[6])
+    end
+
+'''
+    fixture = Path(__file__).with_name("fixtures").joinpath("same_process_save.lua").read_text(encoding="utf-8")
+    return source.replace(anchor, action + anchor) + "\n;(function()\n" + fixture + "\nend)()\n"
+
+
+async def _wait_proof(proc, case):
+    proof = case / "proof.tsv"
+    async with asyncio.timeout(45):
+        while proc.poll() is None and not proof.is_file():
+            await asyncio.sleep(.1)
+    if proc.poll() is not None:
+        raise RuntimeError(f"The stock title exited during the save proof ({proc.returncode})")
+    evidence = _read_proof(proof)
+    if evidence["fixture_state"] != "verified":
+        raise RuntimeError(evidence["fixture_message"])
+    return evidence
+
+
+def _verify_stock_calls(calls):
+    assert calls["solo"]["save"] == calls["coop"]["save"] == calls["coop"]["delete"] == 1, calls
+    assert calls["solo"]["delete"] == 0 and calls["coop"]["find"] >= 4, calls
+    assert calls["solo"]["load"] >= 2 and calls["coop"]["load"] >= 1, calls
+    assert calls["solo"]["exists"] >= 2 and calls["coop"]["exists"] >= 1, calls
+    assert calls["solo"]["async_load"] == 0 and calls["coop"]["async_load"] == 1, calls
+    assert calls["other"]["async_save"] == 1 and calls["coop"]["async_save"] == 0, calls
+
+
+def _proof_hashes(case):
+    hashes = {}
+    for name in ("solo-before", "coop-before-delete", "other-after-async-save", "config-before", "config-after"):
+        with (case / f"{name}.sav").open("rb") as item:
+            hashes[name] = file_digest(item, "sha256").hexdigest()
+    return hashes
+
+
+async def verify_installed_save_scope(seat) -> dict:
+    """Exercise native save routing after a portable seat returns to stock title."""
+    bridge = seat.bridge
+    if (os.name != "nt" or "steamapps" in {p.casefold() for p in seat.profile.parts}
+            or not any(p.startswith("portable-title-") for p in bridge.directory.parts)
+            or bridge.directory.resolve(strict=True) != bridge.directory):
+        raise ValueError("The native save proof requires an existing private portable seat")
+    initial = await bridge.wait_for(lambda frame: frame.get(native_title_entry.KEY, {}).get("state") == "ready"
+                                    and frame.get("mode") == "idle" and frame.get("save_scope", False) is None)
+    saves = seat.profile / "Saved" / "SaveGames"
+    if saves.resolve(strict=True) != saves:
+        raise ValueError("The portable SaveGames directory is redirected")
+    original = saved_hashes(saves)
+    token, scope, other_scope = uuid.uuid4().hex, uuid.uuid4().hex, uuid.uuid4().hex
+    slot = f"SFSaveCanary_{token}.sav"
+    if os.path.lexists(saves / slot):
+        raise ValueError("The private canary save slot already exists")
+    case = bridge.directory / f"same-save-{token}"
+    private = saves / "SilverfishCoop"
+    if private.resolve() != private:
+        raise ValueError("The private co-op save directory is redirected")
+    case.mkdir()
+    coop, other = private / scope, private / other_scope
+    owned = []
+    submitted = False
+    try:
+        for path in (coop, other):
+            path.mkdir(parents=True)
+            owned.append(path)
+        submitted = True
+        armed = await bridge.command("native-same-process-save-proof", token, scope, other_scope, str(saves))
+        assert armed["ack"]["message"] == "armed native stock save proof", armed
+        evidence = await _wait_proof(bridge.process, case)
+        _verify_stock_calls(evidence["calls"])
+        assert evidence["calls"]["native"] == {"select": 3, "release": 3, "wrong_release": 1}, evidence["calls"]
+        assert not (saves / slot).exists() and not list(coop.iterdir()), "The stock cleanup kept a canary save"
+        other_bytes = (other / slot).read_bytes()
+        assert other_bytes == (case / "other-after-async-save.sav").read_bytes()
+        assert not list(seat.profile.rglob(f"SFSaveCanary_{token}_Escape.sav")), "A rejected save path escaped the scope"
+        hashes = _proof_hashes(case)
+        assert len({hashes["solo-before"], hashes["coop-before-delete"], hashes["other-after-async-save"]}) == 3, hashes
+        assert hashes["config-before"] == hashes["config-after"], "Native save routing changed Config"
+        title = await bridge.wait_for(lambda frame: frame["sequence"] > initial["sequence"]
+                                      and frame.get(native_title_entry.KEY, {}).get("state") == "ready"
+                                      and frame.get("mode") == "idle" and frame.get("save_scope", False) is None)
+    finally:
+        if not submitted or (case / "proof.tsv").is_file() or bridge.process.poll() is not None:
+            for directory in owned:
+                snapshot = directory / slot
+                if snapshot.is_file() and snapshot.resolve(strict=True) == snapshot:
+                    snapshot.unlink()
+                directory.rmdir()
+    assert saved_hashes(saves) == original, "The native proof changed a pre-existing save"
+    evidence.update(verified=True, pid=bridge.process.pid, title_sequence=title["sequence"],
+                    existing_saves_verified=True, save_hashes=hashes,
+                    native_routing=True, scope_released=True)
+    return evidence
 
 
 async def verify(work: Path, original: Path) -> None:
@@ -91,32 +199,15 @@ async def verify(work: Path, original: Path) -> None:
     try:
         process = GameProcess(arguments, executable=game, cwd=game.parent, env=environment, startupinfo=startup)
         evidence["pid"] = process.pid
-        proof_file = case / "proof.tsv"
-        async with asyncio.timeout(45):
-            while process.poll() is None and not proof_file.is_file():
-                await asyncio.sleep(.1)
-        if process.poll() is not None:
-            raise RuntimeError(f"The stock title exited during the save proof ({process.returncode})")
-        evidence.update(_read_proof(proof_file))
-        if evidence["fixture_state"] != "verified":
-            raise RuntimeError(evidence["fixture_message"])
-        calls = evidence["calls"]
-        assert calls["solo"]["save"] == calls["coop"]["save"] == calls["coop"]["delete"] == 1, calls
-        assert calls["solo"]["delete"] == 0 and calls["coop"]["find"] >= 4, calls
-        assert calls["solo"]["load"] >= 2 and calls["coop"]["load"] >= 1, calls
-        assert calls["solo"]["exists"] >= 2 and calls["coop"]["exists"] >= 1, calls
-        assert calls["solo"]["async_load"] == 0 and calls["coop"]["async_load"] == 1, calls
-        assert calls["other"]["async_save"] == 1 and calls["coop"]["async_save"] == 0, calls
+        evidence.update(await _wait_proof(process, case))
+        _verify_stock_calls(evidence["calls"])
         assert (solo / SLOT).read_bytes() == (case / "solo-before.sav").read_bytes()
         assert (solo / "Config.sav").read_bytes() == (case / "config-after.sav").read_bytes()
         assert not list(coop.iterdir()), "Stock delete did not remove the co-op file"
         assert (other / SLOT).read_bytes() == (case / "other-after-async-save.sav").read_bytes()
         assert (other / SLOT).read_bytes() != (solo / SLOT).read_bytes()
         assert not list(profile.rglob("ScopeEscape.sav")), "An invalid save slot escaped its campaign directory"
-        evidence["save_hashes"] = {}
-        for name in ("solo-before", "coop-before-delete", "other-after-async-save", "config-before", "config-after"):
-            with (case / f"{name}.sav").open("rb") as item:
-                evidence["save_hashes"][name] = file_digest(item, "sha256").hexdigest()
+        evidence["save_hashes"] = _proof_hashes(case)
         evidence["verified"] = evidence["save_hashes"]["solo-before"] != evidence["save_hashes"]["coop-before-delete"]
     except (OSError, RuntimeError, ValueError, TimeoutError, AssertionError) as error:
         evidence["failure"] = repr(error)

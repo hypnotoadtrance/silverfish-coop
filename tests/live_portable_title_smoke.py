@@ -8722,7 +8722,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False, nonmirrored_startup: bool = False,
                  compact_crate_status: bool = False, compact_world_view: bool = False,
                  guest_shop_lease: bool = False, guest_stash_memory: bool = False, guest_stash_large_memory: bool = False,
-                 stock_pause_exit: bool = False, stock_host_creator: bool = False,
+                 stock_pause_exit: bool = False, stock_host_creator: bool = False, native_save_routing: bool = False,
                  stock_friendly_fire=False,
                  lab_terminal_check=None,
                  oil_lamps_check=None, streamed_switch_check=None, crate_transfer_check=None,
@@ -9462,6 +9462,12 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(installed_probe(game))
         elif stock_host_creator:
             probes.enter_context(installed_probe(first_game))
+        if native_save_routing:
+            from live_same_process_save_smoke import same_process_save_overlay
+
+            proof["native_save_routing_overlays"] = {
+                str(game): probes.enter_context(portable_main_overlay(game, same_process_save_overlay)) for game in games
+            }
         if not second_legacy_work:
             build_ids = []
             for workspace, game in zip(workspaces, games, strict=True):
@@ -9870,7 +9876,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["sessions"].append(await start_pair(first, second, "Cabinet scout", on_join=check_cabinet,
                                                       load_existing=True, wait_status=wait_resident_status,
                                                       after_exit=check_cabinet_saved))
-        elif not manage_saves and not stock_host_creator:
+        elif not manage_saves and not stock_host_creator and not native_save_routing:
             create = create_stock_split_character if stock_split or stock_equip else create_stock_drop_character if stock_drop else None
             proof["sessions"].append(await start_pair(first, second, "Second portable scout", on_join=check_gameplay,
                                                       create_character=create_stock_bag_character if stock_use else create,
@@ -9889,6 +9895,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["stock_host_creator"] = {"pid": hosted["pid"], "map": hosted["game"]["map"],
                                            "creator_controls": controls, "stop_reason": stopped["stop_reason"],
                                            "stock_title_returned": True}
+        if native_save_routing:
+            from live_same_process_save_smoke import verify_installed_save_scope
+
+            proof["native_save_routing"] = await verify_installed_save_scope(first)
         for seat, (hashes, preferences) in zip(seats, baselines, strict=True):
             for key in ("singleplayer", "modes", "multiplayer", "modes", "singleplayer"):
                 button = await seat.bridge.command("native-title-button-fixture", key)
@@ -9968,6 +9978,8 @@ if __name__ == "__main__":
                         help="exercise guest stock Quit to Menu and host Save and Quit in the same resident pair")
     parser.add_argument("--stock-host-creator", action="store_true",
                         help="start a fresh stock host campaign in the existing process and return to title")
+    parser.add_argument("--native-save-routing", action="store_true",
+                        help="verify stock save routing of identical slot names in native co-op and singleplayer scopes")
     parser.add_argument("--stock-drop", action="store_true", help="test stock guest backpack Sort, Drop, and Use actions")
     parser.add_argument("--stock-inventory-fall", action="store_true",
                         help="verify ordinary stock host and guest drops fall and remain collectible on the same pair")
@@ -10280,7 +10292,7 @@ if __name__ == "__main__":
     resident_check_options.add("stock_cooked_meal")
     resident_check_options.update(("crossroads_profile", "crossroads_gc_trial", "crossroads_host_maintenance_trial",
                                    "stock_crossroads_recovery", "stock_discovered_overlap", "stock_authored_quest_placement",
-                                   "stock_guest_title_recovery", "stock_host_creator", "rendered"))
+                                   "stock_guest_title_recovery", "stock_host_creator", "native_save_routing", "rendered"))
     if args.crossroads_gc_trial and not args.crossroads_profile:
         parser.error("--crossroads-gc-trial requires --crossroads-profile")
     if args.crossroads_gc_trial == "stopped" and not args.rendered:
@@ -10347,6 +10359,7 @@ if __name__ == "__main__":
                        container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge,
                        stock_use=args.stock_use, stock_food=args.stock_food, stock_campfire=args.stock_campfire,
                        stock_pause_exit=args.stock_pause_exit, stock_host_creator=args.stock_host_creator,
+                       native_save_routing=args.native_save_routing,
                        stock_cooked_meal=args.stock_cooked_meal,
                        stock_personal_consumable=args.stock_personal_consumable,
                        stock_wipe_chooser=args.stock_wipe_chooser,
