@@ -86,7 +86,7 @@ The guest can send two claims for different loose or projected items at a time. 
 
 An ordinary placed container can use its live stock class and actor path as its identity. For a streamed placement, combine the parent map with the sublevel actor path so repeated level instances keep separate rolls. The input hook resolves a visible actor on demand. Keep the roll in the campaign when a sublevel unloads, hide its local loot until the sublevel returns, and restore the same exhausted state and remaining contents. The stock class supplies the roll and lid behavior. Containers with configured loot overrides, special locks, power requirements, or randomized lids retain their qualified paths. Keep the first completed roll shared for the current loot cycle. A stock respawn starts a new cycle.
 
-For an ordinary container spawned by the host in the persistent level, replicate the stock actor and give it a shared ID through an Unreal actor reference. Each seat uses its own actor path to apply local stock behavior. Keep the shared roll in memory for that session. A campaign checkpoint still saves collected items with their owners.
+For an ordinary container spawned by the host in the persistent level, replicate the stock actor and give it a shared ID through an Unreal actor reference. Each seat uses its own actor path to apply local stock behavior. Keep the shared roll in memory for the current visit. Release it when the host observes the crate end play or starts a new visit. The checkpoint still saves collected items with their owners.
 
 ## Compatibility with game updates and other mods
 
