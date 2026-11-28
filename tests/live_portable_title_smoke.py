@@ -327,6 +327,27 @@ def stock_shovel_overlay(game: Path):
         yield {"stock_shovel": shovel, "hold_report": report}
 
 
+def suppress_one_melee_release_reply(game: Path):
+    original = (
+        "        SilverfishPublishLocalBridgeReply(pending.ticket,\n"
+        "            guest_combat(fields, state, current_phase, sequence, status_row, players.is_standing_guest))"
+    )
+
+    def patch(script):
+        if script.count(original) != 1:
+            raise ValueError("The replica lacks the compact melee reply dispatcher")
+        injected = '''        local reply = guest_combat(fields, state, current_phase, sequence, status_row, players.is_standing_guest)
+        local release = fields[2] == "native-guest-melee-input-edge" and fields[4] == "release"
+        if release and not status_publication.test_melee_release_reply_dropped and reply:find("\\taccepted\\t", 1, true) then
+            status_publication.test_melee_release_reply_dropped = true
+        else
+            SilverfishPublishLocalBridgeReply(pending.ticket, reply)
+        end'''
+        return script.replace(original, injected, 1)
+
+    return portable_main_overlay(game, patch)
+
+
 def stock_board_approach_overlay(game: Path):
     def allow_portable_approach(script):
         gate = 'local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"'
@@ -1407,6 +1428,7 @@ async def verify_stock_melee_family(host: Seat, guest: Seat, _pawn: str) -> dict
 
 async def verify_stock_melee_edges_only(host: Seat, guest: Seat, pawn: str) -> dict:
     before = campaign_save_hashes(host.campaign)
+    started = time.time()
     frame = await equip_stock_guest_melee(host, guest, "seed-melee-edges", "old-pipe")
     guid = frame["game"]["native_guest_primary_scope"]["guid"]
     async def observe(action):
@@ -1418,6 +1440,9 @@ async def verify_stock_melee_edges_only(host: Seat, guest: Seat, pawn: str) -> d
         assert (edges[edge]["pawn"], edges[edge]["guid"]) == (pawn, guid), edges[edge]
     first_person_contacts = int(await observe("melee-local-read"))
     assert first_person_contacts >= 5, (first_person_contacts, edges)
+    recovered, = [event for event in await resident_events(guest.client / "run", frame)
+                  if event["time_unix"] >= started and event.get(native_guest_melee.REPLY_RECOVERED)]
+    assert recovered["event"] == "native_guest_melee_edge" and recovered["edge"] == "release", recovered
     async def command(seat, action):
         return await portable_probe_command(seat.bridge, "portable-npc-override", action)
 
@@ -1452,6 +1477,7 @@ async def verify_stock_melee_edges_only(host: Seat, guest: Seat, pawn: str) -> d
     assert await command(host, "clear-melee-prop") == "cleared"
     assert campaign_save_hashes(host.campaign) == before, "A regular melee attack wrote campaign saves"
     return {"stock_melee_edges": {**edges, "first_person_contacts": first_person_contacts, "prop_impact": prop,
+                                  "recovered_release": recovered[native_guest_melee.INPUT_KEY],
                                   "campaign_unchanged": True}}
 
 
@@ -8770,6 +8796,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["stock_nearby_overlays"] = [probes.enter_context(stock_nearby_overlay(game)) for game in games]
         if stock_bandage_revisit:
             proof["loose_revisit_overlays"] = [probes.enter_context(loose_revisit_overlay(game)) for game in games]
+        if stock_melee_edges:
+            proof["melee_release_reply_overlays"] = [probes.enter_context(suppress_one_melee_release_reply(game)) for game in games]
         if stock_shovel or stock_buried_placements:
             proof["stock_shovel_overlays"] = [probes.enter_context(stock_shovel_overlay(game)) for game in games]
         if stock_shovel_quest or stock_dead_drops or stock_authored_quest_placement:

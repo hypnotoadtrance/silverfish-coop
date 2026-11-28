@@ -23,6 +23,8 @@ INPUT_STATE = "native-guest-melee-input-state"
 COMPACT_ACTIONS = frozenset((INPUT + "-start", INPUT + "-edge", SWING + "-start"))
 REPLY_HEADER = "native-guest-melee-reply\t1\n"
 REPLY_BYTES = "native_guest_melee_reply_bytes"
+REPLY_RECOVERED = "bridge_reply_recovered"
+MELEE_REPLY_WAIT = 0.75
 INPUT_KEY = "native_guest_melee_input_state"
 INPUT_FIXTURE = "native-guest-melee-input-fixture"
 INPUT_FIXTURE_KEY = "native_guest_melee_input_fixture"
@@ -219,6 +221,23 @@ class InputScope:
             self.area, self.pawn, self.guid, self.frame["serial"])
 
 
+class _ReplyUnavailable(RuntimeError):
+    """The stock operation may have run and is safe to query by identity."""
+
+async def _submit_stock_input(bridge, command, operation, *, timeout):
+    if getattr(bridge, "local_bridge", None) is None:
+        return await bridge.command(*command, timeout=timeout)
+    try:
+        return await bridge.command(*command, operation, timeout=min(timeout, MELEE_REPLY_WAIT), update_status=False)
+    except TimeoutError:
+        try:
+            receipt = await bridge.command(*command, operation, timeout=timeout, update_status=False)
+        except (TimeoutError, LocalCommandNotSubmitted) as error:
+            # The exact native stroke expires independently if both replies are lost.
+            raise _ReplyUnavailable("native_guest_melee_reply_unavailable") from error
+    return {**receipt, REPLY_RECOVERED: True}
+
+
 class AuthorityInput:
     """Match each physical input edge to the same authenticated stock weapon."""
 
@@ -255,9 +274,12 @@ class AuthorityInput:
             return
         else:
             frame = self._proof(host.last_game, scope)
-        if scope.observes(frame) and frame["status"] in TERMINAL:
-            host.control.event("native_guest_melee_input_settled", character_id=scope.character, **frame)
-            self.scope = None
+        if scope.observes(frame):
+            if frame["presses"] == frame["releases"]:
+                scope.held = None
+            if frame["status"] in TERMINAL:
+                host.control.event("native_guest_melee_input_settled", character_id=scope.character, **frame)
+                self.scope = None
 
     async def request(self, bridge, character, target, operation):
         parts = target.split("@") if isinstance(target, str) else []
@@ -302,7 +324,7 @@ class AuthorityInput:
         else:
             command = (INPUT + "-start", pawn, guid, TAP) if edge == TAP else (INPUT + "-start", pawn, guid)
         try:
-            snapshot = await bridge.command(*command, timeout=3)
+            snapshot = await _submit_stock_input(bridge, command, operation, timeout=3)
         except RuntimeError as error:
             if isinstance(error, LocalCommandNotSubmitted) or str(error).startswith("native_guest_melee_"):
                 raise party.RuleError(str(error)) from error
@@ -320,6 +342,8 @@ class AuthorityInput:
             scope = self.scope = InputScope(character, epoch, area, pawn, guid, frame)
         scope.held = stroke if edge == "press" else None
         result = {INPUT_KEY: frame}
+        if snapshot.get(REPLY_RECOVERED):
+            result[REPLY_RECOVERED] = True
         if REPLY_BYTES in snapshot:
             # A frame published before this mutation can still be awaiting the host loop.
             scope.reply_sequence = snapshot["sequence"]
@@ -431,13 +455,17 @@ async def perform(host, bridge, action: str, character: str, guid: str, operatio
     host.native_checkpoint_unsafe = True
     try:
         try:
-            snapshot = await bridge.command(action if action == EQUIP else action + "-start", pawn, guid, timeout=5)
+            if ordinary:
+                snapshot = await _submit_stock_input(bridge, (action + "-start", pawn, guid), operation_id, timeout=5)
+            else:
+                snapshot = await bridge.command(action if action == EQUIP else action + "-start", pawn, guid, timeout=5)
         except RuntimeError as error:
             if isinstance(error, LocalCommandNotSubmitted) or str(error).startswith("native_guest_melee_"):
                 host.native_checkpoint_unsafe = False
                 raise party.RuleError(str(error)) from error
             raise
         reply_bytes = snapshot.get(REPLY_BYTES)
+        reply_recovered = snapshot.get(REPLY_RECOVERED)
         proof = exact(snapshot, key)
         if not proof:
             raise RuntimeError("The stock melee receipt does not match the exact guest and GUID")
@@ -478,6 +506,8 @@ async def perform(host, bridge, action: str, character: str, guid: str, operatio
         if REPLY_BYTES not in snapshot:
             host.last_game, host.last_seen = snapshot, time.monotonic()
         result = {key: proof}
+        if reply_recovered:
+            result[REPLY_RECOVERED] = True
         if reply_bytes is not None:
             result[REPLY_BYTES] = reply_bytes
         if deferred:

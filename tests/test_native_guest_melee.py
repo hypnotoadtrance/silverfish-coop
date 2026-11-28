@@ -351,6 +351,46 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
         memory._cancel.assert_called_once_with(37)
         host.checkpoint_native.assert_not_awaited()
 
+    async def test_lost_local_melee_reply_retries_the_same_operation(self):
+        host = self.host()
+        host.zone_epoch = "epoch"
+        pawn = "exact pawn"
+        host.last_game["native_guest_equipped_weapons"] = {pawn: {"kind": "old-pipe", "guid": GUID}}
+        handler = melee.AuthorityInput(host)
+        press = dict(map=CROSSROADS, pawn=pawn, guid=GUID, serial=3, status="pending", presses=1, releases=0,
+                     contacts=0, hits=0, charged=0, combo=0)
+        snapshot = dict(host.last_game, **{melee.INPUT_KEY: press, melee.REPLY_BYTES: 220, "sequence": 7})
+        bridge = SimpleNamespace(local_bridge=object(), command=AsyncMock(side_effect=[TimeoutError(), snapshot]))
+        target = f"epoch@{GUID}@{'1' * 32}@press"
+        with patch.object(melee.native_inventory, "retain_guest_save", new=AsyncMock(return_value=True)):
+            result = await handler.request(bridge, "guest", target, OPERATION)
+            self.assertEqual(result[melee.INPUT_KEY], press)
+            self.assertTrue(result[melee.REPLY_RECOVERED])
+            self.assertEqual(await handler.request(bridge, "guest", target, OPERATION), result)
+        first, retry = bridge.command.await_args_list
+        self.assertEqual(first.args, retry.args)
+        self.assertEqual(first.args[-1], OPERATION)
+        self.assertEqual(first.kwargs["timeout"], melee.MELEE_REPLY_WAIT)
+        self.assertFalse(host.stopping)
+        self.assertFalse(host.native_checkpoint_unsafe)
+        host.checkpoint_native.assert_not_awaited()
+
+    async def test_two_missing_local_melee_replies_leave_the_host_running(self):
+        host = self.host()
+        host.zone_epoch = "epoch"
+        pawn = "exact pawn"
+        host.last_game["native_guest_equipped_weapons"] = {pawn: {"kind": "old-pipe", "guid": GUID}}
+        handler = melee.AuthorityInput(host)
+        bridge = SimpleNamespace(local_bridge=object(), command=AsyncMock(side_effect=TimeoutError))
+        with patch.object(melee.native_inventory, "retain_guest_save", new=AsyncMock(return_value=True)):
+            with self.assertRaisesRegex(party.RuleError, "native_guest_melee_reply_unavailable"):
+                await handler.request(bridge, "guest", f"epoch@{GUID}@{'1' * 32}@tap", OPERATION)
+        self.assertIsNone(handler.scope)
+        self.assertFalse(host.stopping)
+        self.assertFalse(host.native_checkpoint_unsafe)
+        self.assertEqual(bridge.command.await_count, 2)
+        host.checkpoint_native.assert_not_awaited()
+
     async def test_exact_stroke_remains_bound_across_stock_combo_edges_without_checkpoint(self):
         host = self.host()
         area, pawn = CROSSROADS, "exact pawn"
