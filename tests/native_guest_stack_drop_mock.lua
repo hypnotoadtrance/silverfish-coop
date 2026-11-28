@@ -183,3 +183,81 @@ settle[3], settle[7] = "debit", replacement
 assert(attempt(settle, "hosting"))
 row = stack_drop.rows(game, "hosting", status)[3]
 assert(row[1] == settle[2] and row[3] == "debit" and row[4] == host_name and row[9] == "applied")
+
+local pending, transient, slot_live = object(15), object(16), "SFCoop_" .. ("d"):rep(32)
+local item = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
+local escrow = require("native_loot_actions")
+local funded = false
+local debits = 0
+pending.PlayerBackpack = isolated.PlayerBackpack
+function escrow.create_pending_escrow(_, _, world, key)
+    assert(world == game.world and key == slot_live and not funded)
+    funded = true
+    return pending
+end
+function escrow.pending_escrow(world, key)
+    assert(world == game.world and key == slot_live)
+    return funded and pending or nil
+end
+function escrow.release_escrow(key)
+    assert(key == slot_live and funded)
+    funded = false
+end
+function StaticFindObject(path)
+    return path == "/Engine/Transient" and transient or classes[path] or engine_object(path)
+end
+function StaticConstructObject(_, outer)
+    assert(outer == transient)
+    return isolated
+end
+EObjectFlags = {RF_Transient = 0}
+function SilverfishReferenceNativeDetachedSave() end
+function SilverfishReadNativeInventoryCensus(address)
+    assert(address == 3 or address == 15)
+    return true, "complete", table.concat({guid, "backpack", "0", item, "9", "1", "0", "0", "1"}, "\t"), 1
+end
+function SilverfishPrepareNativeInventoryWipe(frozen, projected, address, kept, dropped, discarded)
+    assert(frozen == 3 and projected == 3 and address == 15 and kept == "" and dropped == guid and discarded == "")
+    return true, "prepared", 0, 1, 0
+end
+function SilverfishApplyPreparedNativeInventory(_, _, target, recipient)
+    assert(target == 7 and recipient == 6)
+    debits = debits + 1
+    return true, "applied"
+end
+function SilverfishProbeNativeGuestStackDrop()
+    return true, "stock_spawn_verified_and_retired", actor, changed, 9, 10, -20, 30, item
+end
+function SilverfishVerifyNativeStashSave() end
+require("native_ground_stack").merge = function() return "append" end
+function SilverfishRecoverNativeInventoryBag(source, target, recipient)
+    assert(source == 15 and target == 7 and recipient == 6 and funded)
+    recovered = recovered + 1
+    return true, "recovered", 1
+end
+
+local function text_row(...) return table.concat({...}, "\t") end
+local function compact(fields)
+    assert(stack_drop.compact(fields))
+    return stack_drop.reply(fields, game, "hosting", text_row)
+end
+local function readback(fields)
+    local retry = {"retry", table.unpack(fields, 2)}
+    retry[#retry + 1] = "readback"
+    return compact(retry)
+end
+local live_drop = {"debit", birth, host_name, slot_live, guid, "9", game.map, "memory"}
+local live_claim = {"credit", settle[2], "reclaim", host_name, settle[5], slot_live, "-", "20", "0", "0",
+    game.map, guid, "9", item, "pending"}
+assert(readback(live_drop):find("receipt_unavailable") and debits == 0 and not funded)
+assert(compact(live_drop):find("stock_spawn_verified_and_retired") and debits == 1 and funded)
+local debit_reply = readback(live_drop)
+assert(debit_reply:find("\tretry\t") and debit_reply:find("stock_spawn_verified_and_retired") and debits == 1)
+assert(compact(live_drop):find("stock_spawn_verified_and_retired") and debits == 1)
+assert(compact(live_claim):find("\trecovered\t") and recovered == 4 and not funded)
+local credit_reply = readback(live_claim)
+assert(credit_reply:find("\tretry\t") and credit_reply:find("\trecovered\t") and recovered == 4)
+live_claim[5] = ("a"):rep(32)
+assert(readback(live_claim):find("receipt_unavailable") and recovered == 4)
+stack_drop.reset()
+assert(readback(live_drop):find("receipt_unavailable") and debits == 1)

@@ -19,9 +19,11 @@ SETTLE = "native-guest-stack-drop-settle"
 SETTLE_KEY = "native_guest_stack_drop_settle"
 REPLY = "native-guest-stack-drop-reply"
 REPLY_BYTES = "native_guest_stack_drop_reply_bytes"
+REPLY_RECOVERED = "native_guest_stack_drop_reply_recovered"
 SUCCESS = "stock_spawn_verified_and_retired"
 REFUSAL = "native_guest_stack_drop_"
 UNSAFE = "mutation_unverified_native_guest_stack_drop_"
+_COMPACT_REPLY_WAIT = 1.0
 _STATUS = re.compile(r"[a-z0-9_]{1,100}\Z")
 
 
@@ -109,7 +111,8 @@ def parse_memory_reply(raw, request):
     rows = raw.splitlines() if len(raw) <= 4096 and raw.endswith("\n") else []
     action = request[1]
     birth = action == BIRTH
-    if not rows or len(request) != (8 if birth else 15):
+    readback = request[-1] == "readback"
+    if not rows or len(request) != (8 if birth else 15) + readback:
         raise RuntimeError("The local stock drop receipt was malformed")
     area = request[6 if birth else 10]
     header = rows[0].split("\t")
@@ -127,8 +130,23 @@ def parse_memory_reply(raw, request):
         proof = parse(row, "hosting", area)
     except ValueError as error:
         raise RuntimeError("The local stock drop result did not verify") from error
-    return {"state": "hosting", "map": area, KEY if birth else SETTLE_KEY: proof,
-            REPLY_BYTES: len(raw.encode("utf-8"))}
+    result = {"state": "hosting", "map": area, KEY if birth else SETTLE_KEY: proof,
+              REPLY_BYTES: len(raw.encode("utf-8"))}
+    if readback:
+        result[REPLY_RECOVERED] = True
+    return result
+
+
+async def memory_command(bridge, action, *arguments, timeout):
+    try:
+        return await bridge.command(action, *arguments, timeout=_COMPACT_REPLY_WAIT, update_status=False)
+    except TimeoutError:
+        try:
+            # The original command may have committed. Ask the game for its
+            # recorded result without running the stock mutation again.
+            return await bridge.command(action, *arguments, "readback", timeout=timeout, update_status=False)
+        except LocalCommandNotSubmitted as error:
+            raise RuntimeError("The game could not verify the timed-out drop command") from error
 
 
 async def perform(host, bridge, character: str, guid: str, count: int, *, fixture: bool = True,
@@ -168,8 +186,11 @@ async def perform(host, bridge, character: str, guid: str, count: int, *, fixtur
     try:
         try:
             compact = memory_slot is not None and getattr(bridge, "local_bridge", None) is not None
-            options = {"update_status": False} if compact else {}
-            snapshot = await bridge.command(ACTION if fixture else BIRTH, *arguments, timeout=6, **options)
+            command = ACTION if fixture else BIRTH
+            if compact:
+                snapshot = await memory_command(bridge, command, *arguments, timeout=6)
+            else:
+                snapshot = await bridge.command(command, *arguments, timeout=6)
         except LocalCommandNotSubmitted as error:
             host.native_checkpoint_unsafe = False
             raise party.RuleError("native_guest_stack_drop_bridge_busy") from error
@@ -210,5 +231,7 @@ async def perform(host, bridge, character: str, guid: str, count: int, *, fixtur
     result = {**proof, "owner": character, "revision": revision}
     if REPLY_BYTES in snapshot:
         result["bridge_reply_bytes"] = snapshot[REPLY_BYTES]
+    if snapshot.get(REPLY_RECOVERED):
+        result["bridge_reply_recovered"] = True
     host.control.event("native_guest_stack_drop_probed", **result)
     return {KEY: result}

@@ -147,6 +147,21 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(bridge.command.await_args.kwargs["update_status"], False)
         host.checkpoint_native.assert_not_awaited()
 
+    async def test_reclaim_can_recover_a_missing_local_reply_without_applying_again(self):
+        host, _, escrow, _, _, row = self.make_world()
+        host.last_game[probe.MEMORY_CAPABILITY] = True
+        host.party[record.STATE] = {DROP: row}
+        proof = self.reply(host, "reclaim", escrow)
+        proof[probe.REPLY_BYTES], proof[probe.REPLY_RECOVERED] = 300, True
+        bridge = SimpleNamespace(local_bridge=object(), command=AsyncMock(side_effect=[TimeoutError(), proof]))
+        with patch.object(drop.native_inventory, "retain_guest_save", AsyncMock(return_value=True)):
+            result = await drop.perform(host, bridge, OWNER, drop.RECLAIM, DROP, CLAIM)
+            self.assertEqual(await drop.perform(host, bridge, OWNER, drop.RECLAIM, DROP, CLAIM), result)
+        self.assertEqual(bridge.command.await_args_list[1].args, (*bridge.command.await_args_list[0].args, "readback"))
+        self.assertEqual(host.party[record.STATE][DROP]["claim_id"], CLAIM)
+        self.assertFalse(host.native_checkpoint_unsafe or host.stopping)
+        host.checkpoint_native.assert_not_awaited()
+
     async def test_reclaim_refuses_inactive_guest_wrong_map_and_distance_before_bridge(self):
         host, _, escrow, _, _, row = self.make_world()
         host.party[record.STATE] = {DROP: row}

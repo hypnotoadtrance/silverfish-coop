@@ -17,6 +17,7 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1" and os.get
 local fixtures = enabled and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
     and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local observation, settlement
+local compact_receipts = {}
 local item_ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 
 local function valid(value)
@@ -294,18 +295,40 @@ local function settlement_row(proof, row)
 end
 
 function stack_drop.compact(fields)
-    return fields[2] == birth and fields[8] == "memory"
-        or fields[2] == settle and (fields[15] == "memory" or fields[15] == "pending")
+    if fields[2] == birth then
+        return fields[8] == "memory" and (#fields == 8 or #fields == 9 and fields[9] == "readback")
+    end
+    return fields[2] == settle and (fields[15] == "memory" or fields[15] == "pending")
+        and (#fields == 15 or #fields == 16 and fields[16] == "readback")
 end
 
 function stack_drop.reply(fields, state, phase, row)
-    local old_observation, old_settlement = observation, settlement
-    observation, settlement = nil, nil
-    local ok, message = pcall(stack_drop.command, fields, state, phase)
-    local proof, format = observation, birth_row
-    if fields[2] == settle then proof, format = settlement, settlement_row end
-    observation, settlement = old_observation, old_settlement
-    local header = row("native-guest-stack-drop-reply", 1, fields[1], fields[2], phase, state.map,
+    local command = fields[2]
+    local count = command == settle and 15 or 8
+    local readback = #fields == count + 1 and fields[count + 1] == "readback"
+    local key = table.concat(fields, "\t", 2, count)
+    local previous = compact_receipts[command]
+    local same_command = previous and previous.key == key and previous.map == state.map
+        and hosting_map(state, phase) and valid(previous.world)
+        and previous.world:GetAddress() == state.world:GetAddress()
+    local ok, message, proof
+    if same_command and (readback or previous.proof and previous.proof.ok) then
+        ok, message, proof = previous.ok, previous.message, previous.proof
+    elseif readback then
+        message = "mutation_unverified_native_guest_stack_drop_receipt_unavailable"
+    else
+        local old_observation, old_settlement = observation, settlement
+        observation, settlement = nil, nil
+        ok, message = pcall(stack_drop.command, fields, state, phase)
+        proof = command == settle and settlement or observation
+        observation, settlement = old_observation, old_settlement
+        if #fields == count and hosting_map(state, phase) then
+            compact_receipts[command] = {key = key, map = state.map, world = state.world,
+                ok = ok, message = message, proof = proof}
+        end
+    end
+    local format = command == settle and settlement_row or birth_row
+    local header = row("native-guest-stack-drop-reply", 1, fields[1], command, phase, state.map,
         ok and proof and "accepted" or "error", message or "") .. "\n"
     return ok and proof and header .. format(proof, row) .. "\n" or header
 end
@@ -325,6 +348,7 @@ end
 
 function stack_drop.reset()
     observation, settlement = nil, nil
+    compact_receipts = {}
 end
 
 return stack_drop

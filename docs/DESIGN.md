@@ -57,6 +57,7 @@ Project Silverfish co-op is a shared, host-run campaign. The party shares the wo
 - Keep the 20 Hz network heartbeat independent of rendered frames. Version a cached door observation when its serialized state changes. An explicit interaction confirmation gets a fresh observation even when the final door pose matches an earlier sample.
 - Keep host control snapshots flowing during a stock Unreal join. If the host starts another transition or authorizes a newer visit, finish waiting on the previous attempt and follow the newer visit. Accept the local join only from the selected guest save scope and a game frame at or after the join command's acknowledgement.
 - Keep routine campaign changes in memory until the next checkpoint. Save on rest, travel, Save and Quit, or an explicit save request.
+- Keep the latest in-memory drop and reclaim receipts for the current world. If the game thread claims a command and its reply times out, recover the receipt using the same command fields. Readback never repeats the inventory change.
 
 ## Gameplay path audit
 

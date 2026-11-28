@@ -191,6 +191,19 @@ class GuestStackDropTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(command.await_args.kwargs["update_status"], False)
         host.checkpoint_native.assert_not_awaited()
 
+        command.reset_mock(side_effect=True)
+        readback = (*request, "readback")
+        command.side_effect = [TimeoutError(), drop.parse_memory_reply(raw, readback)]
+        result = await drop.perform(host, bridge, CHARACTER, GUID, 9, fixture=False, memory_slot=SLOT)
+        self.assertIs(result[drop.KEY]["bridge_reply_recovered"], True)
+        self.assertEqual(command.await_args_list[1].args, (*command.await_args_list[0].args, "readback"))
+        self.assertFalse(host.native_checkpoint_unsafe or host.stopping)
+
+        command.side_effect = [TimeoutError(), LocalCommandNotSubmitted("lane busy")]
+        with self.assertRaisesRegex(RuntimeError, "verify the timed-out drop"):
+            await drop.perform(host, bridge, CHARACTER, GUID, 9, fixture=False, memory_slot=SLOT)
+        self.assertTrue(host.native_checkpoint_unsafe and host.stopping)
+
     async def test_downed_guest_and_wrong_hash_do_not_reach_the_native_spawn(self):
         host, file = self.make_host()
         bridge = SimpleNamespace(command=AsyncMock())

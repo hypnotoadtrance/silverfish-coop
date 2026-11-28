@@ -419,9 +419,12 @@ async def _settle(host, bridge, character: str, action: str, request: str, drop_
     try:
         try:
             compact = defer and getattr(bridge, "local_bridge", None) is not None
-            options = {"update_status": False} if compact else {}
-            snapshot = await bridge.command(probe.SETTLE, verb, pawn, drop_id, source["slot"], replacement or "-",
-                                            *(str(axis) for axis in _position(row)), area, *merge_source, timeout=7, **options)
+            arguments = (verb, pawn, drop_id, source["slot"], replacement or "-",
+                         *(str(axis) for axis in _position(row)), area, *merge_source)
+            if compact:
+                snapshot = await probe.memory_command(bridge, probe.SETTLE, *arguments, timeout=7)
+            else:
+                snapshot = await bridge.command(probe.SETTLE, *arguments, timeout=7)
         except LocalCommandNotSubmitted as error:
             host.native_checkpoint_unsafe = False
             raise party.RuleError("native_guest_stack_drop_bridge_busy") from error
@@ -466,7 +469,8 @@ async def _settle(host, bridge, character: str, action: str, request: str, drop_
         raise
     host.party, host.native_checkpoint_unsafe = candidate, False
     host.control.event("native_guest_stack_drop_committed", phase=verb, revision=revision,
-                       bridge_reply_bytes=snapshot.get(probe.REPLY_BYTES), **result[RESULT])
+                       bridge_reply_bytes=snapshot.get(probe.REPLY_BYTES),
+                       bridge_reply_recovered=snapshot.get(probe.REPLY_RECOVERED, False), **result[RESULT])
     if action == RECLAIM:
         native_pickup_audio.committed(host, pawn, operation, row["class_path"])
     return result
