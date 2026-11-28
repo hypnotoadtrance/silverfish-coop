@@ -1,5 +1,10 @@
     if fields[2]:match("^fixture%-spade%-") and
         os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
+        if fields[2] == "fixture-spade-contact-diagnosis" then
+            assert(phase == "connected")
+            return type(SilverfishInspectNativeGuestShovel) == "function"
+                and SilverfishInspectNativeGuestShovel(state.local_pawn.pawn:GetFullName():match("^Player_FP_C (%S+)$")) or "shovel hooks unavailable"
+        end
         if fields[2] == "fixture-spade-hold-report" then
             assert(phase == "connected" and (fields[3] == "hold" or fields[3] == "release"))
             _G.SilverfishShovelFixtureHoldReport = fields[3] == "hold"

@@ -278,7 +278,7 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
                                 break
                             await asyncio.sleep(.025)
                     preview, = local_holes
-                    assert preview.startswith("3,"), local_holes
+                    assert preview.startswith("3,"), (local_holes, await observe(guest, "contact-diagnosis"))
                     authority_holes = set((await observe(host, "holes")).split(";")) - previous[0] - {"none"}
                     assert not authority_holes, authority_holes
             finally:

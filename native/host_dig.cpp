@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <format>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -543,6 +544,41 @@ namespace
             material->SetObjectPropertyValue(material->ContainerPtrToValuePtr<void>(value), report.material.Get());
         }
     };
+
+    int inspect_guest_contact(const Lua& lua)
+    {
+        if (lua.get_stack_size() != 1 || !lua.is_string(1)) return 0;
+        const std::string path{lua.get_string()};
+        auto* graph = find<U::UFunction>(spade_graph);
+        auto* pawn = find<U::AActor>(RC::to_wstring(path).c_str());
+        if (!exact(pawn, pawn_class)) return 0;
+        auto* spade = object(pawn, STR("EquipedItem"));
+        auto* role = field<U::FByteProperty>(pawn, STR("Role"));
+        auto* entry = field<U::FIntProperty>(graph, STR("EntryPoint"));
+        auto* hit = field<U::FStructProperty>(graph, STR("CallFunc_LineTraceSingle_OutHit"));
+        auto* hit_type = find<U::UScriptStruct>(STR("/Script/Engine.HitResult"));
+        StockDigContact binding;
+        const auto shape = binding.bind(graph);
+        std::array<int, 5> ops{};
+        int size{};
+        if (graph)
+        {
+            const auto& script = graph->GetScript();
+            size = script.Num();
+            if (size > 33) ops = {script[0], script[5], script[15], script[20], script[33]};
+        }
+        lua.set_string(std::format("ready={} driver={} role={} spade={} player={} owner={} held={} graph={} params={}/{} "
+            "entry={}/{} code={}:{},{},{},{},{} result={} phys={} shape={} captured={}",
+            ready(), guest_connection(live(pawn) ? pawn->GetWorld() : nullptr) != nullptr,
+            role ? static_cast<int>(role->GetPropertyValueInContainer(pawn)) : -1,
+            exact(spade, spade_class), object(spade, STR("Player_Ref")) == pawn, object(spade, STR("User")) == pawn,
+            boolean(spade, STR("HeldByPlayer"), true), graph != nullptr, graph ? graph->GetNumParms() : 0,
+            graph ? graph->GetParmsSize() : 0, entry != nullptr, entry ? entry->GetOffset_Internal() : -1, size,
+            ops[0], ops[1], ops[2], ops[3], ops[4], hit && hit->GetStruct().Get() == hit_type,
+            field<U::FWeakObjectProperty>(hit_type, STR("PhysMaterial")) != nullptr, shape,
+            local_guest_dig.contact.has_value()));
+        return 1;
+    }
 
     bool apply_dig_aim(U::UObject* camera, U::UObject* pawn, const std::optional<StockCameraPose>& aim,
                        StockCameraPose& previous)
@@ -1847,6 +1883,11 @@ namespace silverfish::native_host_dig
         }
         if (ordinary)
         {
+            std::array<char, 2> title_fixtures{};
+            std::size_t size{};
+            if (getenv_s(&size, title_fixtures.data(), title_fixtures.size(), "SILVERFISH_COOP_TITLE_FIXTURES") == 0 &&
+                size == title_fixtures.size() && title_fixtures[0] == '1')
+                lua.register_function("SilverfishInspectNativeGuestShovel", inspect_guest_contact);
             lua.register_function("SilverfishDispatchNativeGuestDig", start_guest_dig);
             lua.register_function("SilverfishRenewNativeHostDigScope", renew_live);
             lua.register_function("SilverfishReadNativeHostDigScope", read_live);
