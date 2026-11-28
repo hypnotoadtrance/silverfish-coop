@@ -103,7 +103,8 @@ local function load_widget()
 end
 
 local function probe(current)
-    if not fixtures or not same_context(current, lease) or not read(current)
+    local active = lease
+    if not fixtures or not same_context(current, active) or not read(active)
         or type(SilverfishProbeNativeGuestClock) ~= "function" then error("guest_clock_fixture_scope_unavailable", 0) end
     local class = load_widget()
     local widgets = StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary")
@@ -116,14 +117,14 @@ local function probe(current)
     if not same(widget.GameInstance, current.instance) then error("guest_clock_fixture_instance_unavailable", 0) end
     local ok, status = SilverfishProbeNativeGuestClock(widget:GetAddress())
     if ok ~= true or status ~= "stock_widget_tick_verified" then error(tostring(status), 0) end
-    local report = read(current)
+    local report = read(active)
     local text = widget.TextBlock_Name:GetText():ToString()
     local minutes = report and report.ms // 60000 or 0
     local time = ("%02d:%02d"):format((minutes // 60) % 24, minutes % 60)
     if not report or report.hits < 1 or type(text) ~= "string" or #text > 512 or not text:find(time, 1, true) then
         error("guest_clock_fixture_stock_text_unverified", 0)
     end
-    fixture = { epoch = lease.epoch, sequence = report.sequence, ms = report.ms, hits = report.hits, text = text:gsub("%c", " ") }
+    fixture = { epoch = active.epoch, sequence = report.sequence, ms = report.ms, hits = report.hits, text = text:gsub("%c", " ") }
     return "stock guest time widget verified"
 end
 

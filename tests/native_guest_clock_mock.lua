@@ -71,3 +71,53 @@ verified = true
 state.map = "/Game/Test/Travel"
 clock.sync(state, "connected")
 assert(cleared == 2 and checks == 3 and #clock.rows(state, "connected", row) == 0)
+
+-- A native renewal advances the clock without replacing the Lua lease's original sample.
+state.map = area
+local sequence, milliseconds, hits, epoch = 1, 42000, 0, "epoch"
+local label_class = object({})
+local label = object({
+    GetClass = function() return label_class end,
+    GetText = function()
+        return {ToString = function() return "DAY 0  00:22" end}
+    end,
+})
+local stock_widget = object({
+    GetClass = function() return widget end,
+    GetOwningPlayer = function() return controller end,
+    IsInViewport = function() return false end,
+    TextBlock_Name = label,
+})
+types.TextBlock = label_class
+types.Default__WidgetBlueprintLibrary = object({
+    Create = function(_, owner, class, player)
+        assert(owner == pawn and class == widget and player == controller)
+        return stock_widget
+    end,
+})
+env.SilverfishSetNativeGuestClock = function(p, c, w, seq, time, visit, map, identity)
+    assert(p == pawn.address and c == controller.address and w == world.address
+        and seq == sequence and time == milliseconds and visit == epoch and map == area and identity == name)
+    return true, "armed", true
+end
+env.SilverfishReadNativeGuestClock = function(address)
+    assert(address == pawn.address)
+    return sequence, milliseconds, hits, hits > 0 and 42000 or nil, epoch
+end
+env.SilverfishProbeNativeGuestClock = function(address)
+    assert(address == stock_widget.address and stock_widget.GameInstance == instance)
+    hits = hits + 1
+    return true, "stock_widget_tick_verified"
+end
+
+arm()
+sequence, milliseconds = 2, 1326000
+local fixture_command = {"request", "native-guest-clock-fixture"}
+assert(clock.command(fixture_command, state, "connected") == "stock guest time widget verified")
+local rows = clock.rows(state, "connected", row)
+assert(rows[1] == row("native-guest-clock", area, name, epoch, 2, 1326000, "projected", 1, 42000))
+assert(rows[2] == row("native-guest-clock-fixture", area, name, epoch, 2, 1326000, 1, "DAY 0  00:22"))
+
+epoch = "different_visit"
+local accepted, reason = pcall(clock.command, fixture_command, state, "connected")
+assert(not accepted and reason == "guest_clock_fixture_scope_unavailable" and hits == 1)
