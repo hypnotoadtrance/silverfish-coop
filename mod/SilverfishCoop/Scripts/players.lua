@@ -433,6 +433,15 @@ local function verified_mapping(observed, gate, downed)
     return true
 end
 
+local function observe_standing_mapping(controller, pawn, count, stock)
+    if type(SilverfishReadNativeStandingActionMappings) ~= "function" then return end
+    local actual, mask = SilverfishReadNativeStandingActionMappings(pawn:GetAddress(), controller:GetAddress())
+    if actual ~= count or math.type(mask) ~= "integer" or mask < 0 or mask >= 2 ^ #input_fields then return end
+    local flags = {}
+    for index, label in ipairs(input_fields) do flags[label] = (mask & (1 << (index - 1))) ~= 0 end
+    return {stock = stock, reduced = false, flags = flags}
+end
+
 local function read_local_mapping(controller, pawn, gate, downed)
     local original, player_input = StaticFindObject(gameplay_input_path), controller.PlayerInput
     if not valid(original) or not valid(player_input) then
@@ -451,7 +460,8 @@ local function read_local_mapping(controller, pawn, gate, downed)
         return cached.observed, true
     end
     standing_mapping = nil
-    local observed = observe_mapping(mappings, count, stock, reduced)
+    local observed = not downed and not gate and observe_standing_mapping(controller, pawn, count, stock)
+    if not observed then observed = observe_mapping(mappings, count, stock, reduced) end
     local verified = verified_mapping(observed, gate, downed)
     if verified and not downed and not gate then
         standing_mapping = {pawn = pawn, player_input = player_input, count = count, observed = observed,

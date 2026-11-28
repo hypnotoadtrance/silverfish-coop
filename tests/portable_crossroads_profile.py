@@ -369,14 +369,71 @@ async def compare_lean_reader(seat, probe):
 def instrument_input_mappings(source):
     original = "local function observe_mapping("
     anchor = "local function verified_mapping("
-    if source.count(original) != 1 or source.count(anchor) != 1:
+    insertion = "local function host_inventory_state("
+    if any(source.count(value) != 1 for value in (original, anchor, insertion)):
         raise ValueError("The input mapping timing anchors changed")
     wrapper = (
         "local function observe_mapping(...)\n"
         '    return SilverfishProfileCrossroadsCall("players.observe_mapping", collect_mapping, ...)\n'
         "end\n\n"
     )
-    return source.replace(original, "local function collect_mapping(").replace(anchor, wrapper + anchor)
+    probe = r'''
+function SilverfishProfileStandingMapping(state)
+    local native = SilverfishReadNativeStandingActionMappings
+    if type(native) ~= "function" then return "unavailable" end
+    local pawn = state.local_pawn and state.local_pawn.pawn
+    assert(valid(pawn) and pawn:IsLocallyControlled() and pawn.Dead == false, "expected the standing local pawn")
+    local controller = pawn.Controller
+    local player_input = valid(controller) and controller.PlayerInput or nil
+    local original = StaticFindObject(gameplay_input_path)
+    assert(valid(player_input) and valid(original), "standing Enhanced Input is unavailable")
+    local stock = player_input.AppliedInputContexts:Contains(original)
+    local mappings = player_input.EnhancedActionMappings
+    local count = #mappings
+    local address, owner, world = pawn:GetAddress(), controller:GetAddress(), state.world:GetAddress()
+    local function native_view()
+        return observe_standing_mapping(controller, pawn, count, stock)
+    end
+    local function lua_view()
+        return collect_mapping(mappings, count, stock, false)
+    end
+
+    local measured_count, mask = native(address, owner)
+    local expected, actual = lua_view(), native_view()
+    assert(stock and measured_count == count and count > 0 and math.type(mask) == "integer"
+        and mask >= 0 and mask < (1 << #input_fields), "native standing scope or row count differs")
+    assert(verified_mapping(expected, nil, false) and verified_mapping(actual, nil, false),
+        "standing stock controls did not qualify")
+    for index, label in ipairs(input_fields) do
+        assert(actual.flags[label] == expected.flags[label]
+            and actual.flags[label] == (mask & (1 << (index - 1)) ~= 0), "standing input flag differs: " .. label)
+    end
+    assert(native(0, owner) == nil and native(address, 0) == nil
+        and native(world, owner) == nil and native(address, world) == nil, "accepted an invalid standing identity")
+
+    local function measure(reader)
+        local started, heap = SilverfishBridgeProfileStamp(), collectgarbage("count")
+        for _ = 1, 32 do reader() end
+        return (SilverfishBridgeProfileStamp() - started) / 1000, collectgarbage("count") - heap
+    end
+    local running = collectgarbage("isrunning")
+    collectgarbage("stop")
+    local ok, result = pcall(function()
+        local native_first, native_first_kib = measure(native_view)
+        local lua_first, lua_first_kib = measure(lua_view)
+        local lua_second, lua_second_kib = measure(lua_view)
+        local native_second, native_second_kib = measure(native_view)
+        return ("%d,%d,%d,%.3f,%.3f,%.3f,%.3f"):format(count, mask, 64, native_first + native_second,
+            lua_first + lua_second, native_first_kib + native_second_kib, lua_first_kib + lua_second_kib)
+    end)
+    if running then collectgarbage("restart") end
+    if not ok then error(result, 0) end
+    return result
+end
+
+'''
+    source = source.replace(original, "local function collect_mapping(").replace(anchor, wrapper + anchor)
+    return source.replace(insertion, probe + insertion, 1)
 
 
 def instrument_inline_crate_scan(source):
@@ -1656,6 +1713,17 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
                 "cached_ms": cached_ms, "uncached_ms": uncached_ms,
                 "cached_heap_growth_kib": cached_kib, "uncached_heap_growth_kib": uncached_kib}
 
+    async def compare_status_numbers(seat):
+        reply = await command(seat, "rownumbers")
+        if reply == "unavailable":
+            return None
+        assert not reply.startswith("status number comparison failed"), reply
+        rows, native_ms, baseline_ms, native_kib, baseline_kib = map(float, reply.split(","))
+        assert rows == 130 and native_kib < baseline_kib, reply
+        return {"sample_rows": int(rows), "native_ms": native_ms, "baseline_ms": baseline_ms,
+                "native_heap_growth_kib": native_kib, "baseline_heap_growth_kib": baseline_kib,
+                "all_rows_matched": True}
+
     async def compare_switch_reads(seat):
         reply = await command(seat, "switchreader")
         if reply == "unavailable":
@@ -1922,6 +1990,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
                         "lua_heap_growth_kib": lua_kib, "all_observations_matched": True}}
     rows = await asyncio.gather(*(compare_rows(seat) for seat in seats.values()))
     reused_rows = await asyncio.gather(*(compare_status_reuse(seat) for seat in seats.values()))
+    numeric_rows = await asyncio.gather(*(compare_status_numbers(seat) for seat in seats.values()))
     switches = await asyncio.gather(*(compare_switch_reads(seat) for seat in seats.values()))
     exit_result = await command(host, "exitposition")
     exit_position = None
@@ -1943,7 +2012,26 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     avatar_motion = {}
     avatar_appearance = {}
     avatar_gait = None
+    standing_mapping = {}
     if area == CROSSROADS:
+        def standing_controls(frame):
+            game = frame.get("game", {})
+            inputs = game.get("player_local_input", {})
+            return (game.get("map") == area and inputs.get("state") == "standing"
+                    and inputs.get("verification") == "verified" and inputs.get("stock_context") is True
+                    and inputs.get("reduced_context") is False)
+
+        await asyncio.gather(*(wait_resident_status(run, standing_controls) for run in runs.values()))
+        mappings = await asyncio.gather(*(command(seat, "standingmapping") for seat in seats.values()))
+        for seat, reply in zip(seats, mappings, strict=True):
+            if reply == "unavailable":
+                continue
+            assert not reply.startswith("standing mapping comparison failed"), reply
+            count, mask, reads, native_ms, lua_ms, native_kib, lua_kib = map(float, reply.split(","))
+            standing_mapping[seat] = {"mapping_rows": int(count), "flag_mask": int(mask), "reads_per_path": int(reads),
+                                      "native_ms": native_ms, "lua_ms": lua_ms, "native_heap_growth_kib": native_kib,
+                                      "lua_heap_growth_kib": lua_kib, "all_standing_flags_matched": True,
+                                      "wrong_scope_refused": True}
         gait = await command(host, "avatargait")
         assert gait != "unavailable" and not gait.startswith("avatar gait comparison failed"), gait
         native_ms, lua_ms, native_kib, lua_kib = map(float, gait.split(","))
@@ -2028,6 +2116,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             "pawn_replication_rates": pawn_rates,
             "row_format_comparison": dict(zip(seats, rows, strict=True)),
             "status_row_reuse_comparison": dict(zip(seats, reused_rows, strict=True)),
+            "status_number_comparison": dict(zip(seats, numeric_rows, strict=True)),
             "exit_position_comparison": exit_position,
             "switch_reader_comparison": dict(zip(seats, switches, strict=True)),
             "lean_reader_comparison": dict(zip(seats, lean, strict=True)),
@@ -2041,4 +2130,5 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             "avatar_motion_comparison": avatar_motion,
             "avatar_appearance_comparison": avatar_appearance,
             "avatar_gait_comparison": avatar_gait,
+            "standing_mapping_comparison": standing_mapping,
             "remote_head_rotation_comparison": remote_head_rotation}

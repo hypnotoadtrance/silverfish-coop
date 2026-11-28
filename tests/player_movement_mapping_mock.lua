@@ -9,14 +9,18 @@ local function upvalue(fn, name)
 end
 
 local players = require("players")
-local swap = upvalue(upvalue(players.sync, "sync_local_input"), "switch_mapping_gate")
+local sync_input = upvalue(players.sync, "sync_local_input")
+local swap = upvalue(sync_input, "switch_mapping_gate")
+local read_mapping = upvalue(sync_input, "read_local_mapping")
 local stock, reduced = {}, {}
 local attached = {[stock] = true}
 local input = {AppliedInputContexts = {Contains = function(_, context) return attached[context] end}}
-local function action(address)
-    return {GetAddress = function() return address end, IsValid = function() return true end}
+local function action(address, name)
+    return {GetAddress = function() return address end, IsValid = function() return true end,
+        GetFName = function() return {ToString = function() return name end} end}
 end
-local forward, fire, look, inventory = action(1), action(2), action(3), action(4)
+local forward, fire, look, inventory = action(1, "IA_MoveForward"), action(2, "IA_Use_Primary"),
+    action(3, "IA_Look"), action(4, "IA_Inventory")
 
 local function row(binding, key, ignored)
     return {Action = binding, Key = {KeyName = {ToString = function() return key end}}, bShouldBeIgnored = ignored}
@@ -67,3 +71,40 @@ assert(attached[stock] and not attached[reduced])
 local up = input.EnhancedActionMappings
 assert(not up[1].bShouldBeIgnored and up[2].bShouldBeIgnored and not up[3].bShouldBeIgnored)
 assert(up[4].bShouldBeIgnored and up[5].bShouldBeIgnored and up[6].bShouldBeIgnored)
+
+stock.IsValid, input.IsValid, input.GetAddress = function() return true end, function() return true end, function() return 10 end
+local controller, pawn = action(11), action(12)
+controller.PlayerInput = input
+function StaticFindObject() return stock end
+local clock, native_calls = 10, 0
+local original_clock = os.clock
+os.clock = function() return clock end
+local mask, supported = 255, true
+function SilverfishReadNativeStandingActionMappings(pawn_address, controller_address)
+    assert(pawn_address == 12 and controller_address == 11)
+    native_calls = native_calls + 1
+    if supported then return #input.EnhancedActionMappings, mask end
+end
+local observed, verified = read_mapping(controller, pawn, nil, false)
+assert(verified and observed.stock and observed.flags.move and observed.flags.reload and not observed.active)
+assert(native_calls == 1)
+assert(read_mapping(controller, pawn, nil, false) == observed and native_calls == 1, "keep the standing refresh interval")
+clock, mask = 12, 255 - 64
+local remapped, still_verified = read_mapping(controller, pawn, nil, false)
+assert(native_calls == 2 and not still_verified and not remapped.flags.reload, "detect same-size changes after refresh")
+supported = false
+local fallback, fallback_verified = read_mapping(controller, pawn, nil, false)
+assert(native_calls == 3 and not fallback_verified and fallback.active[1] and fallback.flags.inventory)
+
+gate.clone, gate.blocked = reduced, {[2] = fire, [4] = inventory}
+attached[stock], attached[reduced] = nil, true
+input.EnhancedActionMappings = {row(forward, "W", false), row(look, "MouseX", false)}
+local downed, downed_verified = read_mapping(controller, pawn, gate, true)
+assert(native_calls == 3 and downed_verified and downed.reduced and downed.active[1] and downed.active[3])
+input.EnhancedActionMappings[1] = row(action(99, "IA_MoveForward"), "W", false)
+local different_membership, exact = read_mapping(controller, pawn, gate, true)
+assert(not exact and different_membership.flags.move and not different_membership.active[1],
+    "action names cannot replace exact downed membership")
+read_mapping(controller, pawn, gate, false)
+assert(native_calls == 3, "restoring mappings must use the exact Lua path")
+os.clock = original_clock

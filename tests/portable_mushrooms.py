@@ -52,9 +52,15 @@ async def verify_stock_mushrooms(host, guest, pawn):
     guest_pick = next((key for key, row in rows.items() if key != host_pick and row["patch"] == rows[host_pick]["patch"]), None)
     assert guest_pick, f"No second mushroom near the first stock patch ({rows[host_pick]['patch']})"
     comparison = await host.bridge.command("native-mushroom-compare-fixture", rows[host_pick]["patch"], timeout=8)
-    children, reads, native_ms, lua_ms = comparison["ack"]["message"].removeprefix("mushroom samplers ").split()
-    sampler = {"children_matched": int(children), "reads_per_path": int(reads),
-               "native_ms": float(native_ms), "lua_ms": float(lua_ms), "different_world_refused": True}
+    children, reads, row_bytes, direct, native_ms, raw_ms, lua_ms, native_kib, raw_kib, lua_kib = (
+        comparison["ack"]["message"].removeprefix("mushroom samplers ").split())
+    sampler = {"children_matched": int(children), "reads_per_path": int(reads), "row_bytes_per_pass": int(row_bytes),
+               "native_ms": float(native_ms), "lua_ms": float(lua_ms),
+               "native_heap_growth_kib": float(native_kib), "lua_heap_growth_kib": float(lua_kib),
+               "different_world_refused": True, "lua_fallback_fields_matched": True}
+    if direct == "1":
+        sampler.update(prior_native_plus_lua_ms=float(raw_ms), prior_native_plus_lua_heap_growth_kib=float(raw_kib),
+                       direct_row_bytes_matched=True, different_map_refused=True)
 
     async def host_fixture(action, key, target):
         source = rows[key]

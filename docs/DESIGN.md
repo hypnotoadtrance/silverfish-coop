@@ -64,6 +64,17 @@ Project Silverfish co-op is a shared, host-run campaign. The party shares the wo
 - Keep routine campaign changes in memory until the next checkpoint. Save on rest, travel, Save and Quit, or an explicit save request.
 - Keep the latest in-memory drop and reclaim receipts for the current world. If the game thread claims a command and its reply times out, recover the receipt using the same command fields. Readback never repeats the inventory change.
 
+## Native game-thread migration
+
+The co-op game-thread code can move entirely to the UE4SS C++ interface. The native modules already install many stock Unreal hooks and expose their results to the Lua coordinator. Today that coordinator starts the co-op gameplay loop, dispatches bridge requests, and connects stock menus, inventory, avatars, and world updates. [Native module entry point](../native/native_death.cpp) · [Current coordinator](../mod/SilverfishCoop/Scripts/main.lua)
+
+1. Move recurring input, actor observations, and status generation into C++. Compare exact inputs and outputs with the current path, then measure game-thread time and allocations in the same session.
+2. Move the game-thread scheduler and bridge dispatch into C++. Pass scoped game data through the existing in-memory bridge. Keep network and durable save work on the background worker.
+3. Move the remaining stock UI and gameplay callbacks by feature. Remove each retired Lua callback and its dispatch entries once the C++ path passes the stock entry point, shared result, and recovery checks.
+4. Verify a package with the co-op Lua module disabled. Run normal singleplayer, host and guest startup, Steam and Direct IP joining, travel, pickup and inventory, combat, reconnect, and stock save boundaries before removing the Lua module from the release bundle.
+
+UE4SS still supplies access to the shipped game's reflected objects and functions. The transport and campaign worker can have its own C++ migration based on background CPU, queue, and network measurements. Foreground frame captures will still include Unreal and the game's stock Blueprint work. [UE4SS C++ mod guide](https://docs.ue4ss.com/guides/creating-a-c%2B%2B-mod.html)
+
 ## Gameplay path audit
 
 Use the normal player input and stock result as the starting points for evaluating a gameplay integration. These are the current edges where the actor's experience and party settlement meet.

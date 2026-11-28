@@ -5,7 +5,9 @@
 #include <array>
 #include <chrono>
 #include <cctype>
+#include <clocale>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <deque>
@@ -228,7 +230,28 @@ namespace
         lua_remove(stack, -2);
     }
 
-    template<bool reuse>
+    std::string_view number_field(lua_State* stack, int index, std::array<char, 64>& buffer)
+    {
+        if (lua_isinteger(stack, index))
+        {
+            const auto size = std::snprintf(buffer.data(), buffer.size(), LUA_INTEGER_FMT,
+                static_cast<LUAI_UACINT>(lua_tointeger(stack, index)));
+            if (size > 0 && static_cast<std::size_t>(size) < buffer.size()) return {buffer.data(), std::size_t(size)};
+            return {};
+        }
+        auto size = std::snprintf(buffer.data(), buffer.size(), LUA_NUMBER_FMT,
+            static_cast<LUAI_UACNUMBER>(lua_tonumber(stack, index)));
+        if (size <= 0 || static_cast<std::size_t>(size) >= buffer.size() - 2) return {};
+        // Match Lua's stock presentation for integral floats, including negative zero.
+        if (buffer[std::strspn(buffer.data(), "-0123456789")] == '\0')
+        {
+            buffer[size++] = lua_getlocaledecpoint();
+            buffer[size++] = '0';
+        }
+        return {buffer.data(), std::size_t(size)};
+    }
+
+    template<bool reuse, bool stack_numbers = true>
     int format_status_row(const Lua& lua)
     {
         auto* stack = lua.get_lua_state();
@@ -237,7 +260,8 @@ namespace
         for (int index = 1; index <= count; ++index)
         {
             if (index > 1) row.push_back('\t');
-            switch (lua_type(stack, index))
+            const auto type = lua_type(stack, index);
+            switch (type)
             {
             case LUA_TBOOLEAN:
                 if (lua_toboolean(stack, index)) row.append("true");
@@ -245,10 +269,24 @@ namespace
             case LUA_TNUMBER:
             case LUA_TSTRING:
             {
-                std::size_t length{};
-                const auto* text = lua_tolstring(stack, index, &length);
+                std::array<char, 64> buffer;
+                std::string_view field;
+                if constexpr (stack_numbers)
+                {
+                    if (type == LUA_TNUMBER)
+                    {
+                        field = number_field(stack, index, buffer);
+                        if (field.empty()) return 0;
+                    }
+                }
+                if (!field.data())
+                {
+                    std::size_t length{};
+                    const auto* text = lua_tolstring(stack, index, &length);
+                    field = {text, length};
+                }
                 const auto start = row.size();
-                row.append(text, length);
+                row.append(field);
                 for (std::size_t field_index = start; field_index < row.size(); ++field_index)
                 {
                     auto& byte = row[field_index];
@@ -1192,6 +1230,7 @@ namespace silverfish::local_bridge
             lua.register_function("SilverfishWitnessEngineTickProfile", witness_engine_tick_profile);
             lua.register_function("SilverfishFinishEngineTickProfile", finish_engine_tick_profile);
             lua.register_function("SilverfishFormatLocalStatusRowUncached", format_status_row<false>);
+            lua.register_function("SilverfishFormatLocalStatusRowWithLuaNumbers", format_status_row<true, false>);
         }
     }
 

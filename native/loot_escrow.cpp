@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <exception>
 #include <format>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <span>
@@ -100,13 +101,15 @@ namespace
         return object && !object->HasAnyFlags(excluded) && !object->IsUnreachable();
     }
 
-    bool enabled()
+    bool env_flag(const char* name)
     {
         std::array<char, 2> value{};
         std::size_t size{};
-        return getenv_s(&size, value.data(), value.size(), "SILVERFISH_COOP_NATIVE_LOOT") == 0 &&
+        return getenv_s(&size, value.data(), value.size(), name) == 0 &&
                size == value.size() && value[0] == '1';
     }
+
+    bool enabled() { return env_flag("SILVERFISH_COOP_NATIVE_LOOT"); }
 
     int result(const Lua& lua, bool ok, std::string_view status)
     {
@@ -767,18 +770,28 @@ namespace
             destroying && !destroying->GetPropertyValueInContainer(actor);
     }
 
+    template <bool status_rows>
     int sample_mushroom_patch(const Lua& lua)
     {
         const auto arguments = lua.get_stack_size();
-        if (!Unreal::IsInGameThreadRaw() || arguments < 3 || arguments > 3 + max_party * 3 ||
-            (arguments - 3) % 3 || !lua.is_integer(1) || !lua.is_string(2) || !lua.is_number(3)) return 0;
+        constexpr int headers = 4;
+        if (!Unreal::IsInGameThreadRaw() || arguments < headers || arguments > headers + max_party * 3 ||
+            (arguments - headers) % 3 || !lua.is_integer(1) || !lua.is_string(2) ||
+            !lua.is_string(3) || !lua.is_number(4)) return 0;
         const auto world_address = static_cast<Address>(lua.get_integer());
-        const auto path = RC::to_generic_string(lua.get_string());
+        const std::string path_text{lua.get_string()};
+        const std::string map_name{lua.get_string()};
         const auto radius_squared = lua.get_number();
-        if (!world_address || path.size() > 256 || !path.starts_with(STR("/Game/Classes/Maps/")) ||
+        const auto has_control = [](std::string_view value) {
+            return std::ranges::any_of(value, [](unsigned char character) { return character < 32 || character == 127; });
+        };
+        if (!world_address || path_text.size() > 256 || !map_name.starts_with("/Game/Classes/Maps/") ||
+            map_name.size() >= path_text.size() || !path_text.starts_with(map_name) ||
+            path_text[map_name.size()] != '.' || has_control(path_text) ||
             !std::isfinite(radius_squared) || radius_squared <= 0) return 0;
+        const auto path = RC::to_generic_string(path_text);
         std::array<std::array<double, 3>, max_party> roster{};
-        const auto count = (arguments - 3) / 3;
+        const auto count = (arguments - headers) / 3;
         for (auto& player : std::span{roster}.first(count))
         {
             for (auto& coordinate : player)
@@ -826,11 +839,14 @@ namespace
             const auto name = RC::to_utf8_string(actor->GetPathName());
             auto* ammo = field<Unreal::FIntProperty>(actor, STR("Ammo"));
             if (!ammo || !silverfish::content_paths::item_class(std::string_view{item}) || !name.starts_with("/Game/") ||
-                name.find_first_of("\r\n\t") != std::string::npos)
+                has_control(name))
                 continue;
             const auto angle = actor->K2_GetActorRotation();
             const auto scale = actor->GetActorScale3D();
-            rows += std::format("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n", distance,
+            auto out = std::format_to(std::back_inserter(rows), "{}\t", distance);
+            if constexpr (status_rows)
+                out = std::format_to(out, "native-mushroom\t{}\t{}\t", map_name, path_text);
+            std::format_to(out, "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 print_guid(guid), name, item, ammo->GetPropertyValueInContainer(actor), point.X(), point.Y(), point.Z(),
                 angle.GetPitch(), angle.GetYaw(), angle.GetRoll(), scale.X(), scale.Y(), scale.Z());
         }
@@ -1366,7 +1382,9 @@ namespace silverfish::loot_escrow
         lua.register_function("SilverfishCaptureNativeEnemyLootEscrow", capture<true>);
         lua.register_function("SilverfishCaptureStockEnemyDrop", capture_stock_enemy_drop);
         lua.register_function("SilverfishCaptureNativeMushroom", capture_mushroom);
-        lua.register_function("SilverfishSampleNativeMushroomPatch", sample_mushroom_patch);
+        lua.register_function("SilverfishSampleNativeMushroomRows", sample_mushroom_patch<true>);
+        if (env_flag("SILVERFISH_COOP_HEADLESS") && env_flag("SILVERFISH_COOP_TITLE_FIXTURES"))
+            lua.register_function("SilverfishSampleNativeMushroomPatchRaw", sample_mushroom_patch<false>);
         lua.register_function("SilverfishClaimNativeEnemyLootEscrow", claim<true>);
     }
 }

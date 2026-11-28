@@ -495,6 +495,47 @@ namespace
         return installed.load(std::memory_order_acquire) && Unreal::IsInGameThreadRaw();
     }
 
+    int read_standing_action_mappings(const Lua& lua)
+    {
+        if (lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_integer(2)) return 0;
+        const auto pawn_address = lua.get_integer();
+        const auto controller_address = lua.get_integer();
+        if (pawn_address <= 0 || controller_address <= 0) return 0;
+        auto* pawn = silverfish::native_interaction_input::current_local_pawn(pawn_address);
+        auto* controller = pawn ? scope.controller.Get() : nullptr;
+        if (!controller || reinterpret_cast<Address>(controller) != controller_address || !standing(pawn)) return 0;
+        auto* player_input = object_field(controller, STR("PlayerInput"));
+        auto* input_type = find<Unreal::UClass>(STR("/Script/EnhancedInput.EnhancedPlayerInput"));
+        auto* row_type = find<Unreal::UScriptStruct>(STR("/Script/EnhancedInput.EnhancedActionKeyMapping"));
+        auto* action_type = find<Unreal::UClass>(STR("/Script/EnhancedInput.InputAction"));
+        if (!live(player_input) || !input_type || !player_input->IsA(input_type) || !row_type || !action_type) return 0;
+        auto* mappings = field<Unreal::FArrayProperty>(player_input, STR("EnhancedActionMappings"));
+        auto* row = mappings ? Unreal::CastField<Unreal::FStructProperty>(mappings->GetInner()) : nullptr;
+        auto* action = field<Unreal::FObjectProperty>(row_type, STR("Action"));
+        if (!row || row->GetArrayDim() != 1 || row->GetStruct().Get() != row_type || !action ||
+            action->GetPropertyClass().Get() != action_type || action->GetOffset_Internal() < 0 ||
+            action->GetOffset_Internal() + action->GetSize() > row->GetSize()) return 0;
+
+        Unreal::FScriptArrayHelper rows(mappings, mappings->ContainerPtrToValuePtr<void>(player_input));
+        if (rows.Num() < 0 || rows.Num() > 512) return 0;
+        // Match players.lua input_fields, including the stock movement-name prefix.
+        static constexpr std::array names{STR("IA_Look"), STR("IA_Move"), STR("IA_Jump"), STR("IA_Inventory"),
+            STR("IA_Use_Primary"), STR("IA_Use_Secondary"), STR("IA_Reload"), STR("IA_Interact")};
+        unsigned flags{};
+        for (int index = 0; index < rows.Num(); ++index)
+        {
+            auto* object = action->GetObjectPropertyValue(action->ContainerPtrToValuePtr<void>(rows.GetRawPtr(index)));
+            if (!object) continue;
+            if (!live(object) || !object->IsA(action_type)) return 0;
+            const auto name = object->GetFName().ToString();
+            for (std::size_t bit = 0; bit < names.size(); ++bit)
+                if (bit == 1 ? name.starts_with(names[bit]) : name == names[bit]) flags |= 1u << bit;
+        }
+        lua.set_integer(rows.Num());
+        lua.set_integer(flags);
+        return 2;
+    }
+
     const DialogueProfile* dialogue_profile(Unreal::UObject* world)
     {
         if (!live(world)) return nullptr;
@@ -3256,6 +3297,7 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishSetNativeInteractScope", set_scope);
         lua.register_function("SilverfishTakeNativeInteractPress", take_press);
         lua.register_function("SilverfishClearNativeInteractScope", lua_clear);
+        lua.register_function("SilverfishReadNativeStandingActionMappings", read_standing_action_mappings);
         const auto* grip_filter = std::getenv("SILVERFISH_COOP_PROP_GRIP_FILTER");
         if (!grip_filter || std::string_view{grip_filter} != "0")
         {

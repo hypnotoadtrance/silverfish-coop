@@ -484,6 +484,39 @@ local function compare_status_reuse()
     return result
 end
 
+local function compare_status_numbers()
+    local before = SilverfishFormatLocalStatusRowWithLuaNumbers
+    if type(before) ~= "function" then return "unavailable" end
+    local samples = {
+        {"native-number-format", math.mininteger, math.maxinteger, -0.0, 0.0, -1.0, 1e+300, 1e-300},
+        {"native-number-format", math.huge, -math.huge, 0/0, "control\t\r\n\0"},
+    }
+    for i = 1, 128 do
+        samples[#samples + 1] = {"pawn", "status-number-fixture", i * 34.51 + .12345,
+            -i * 71.92 - .98765, i * 1007, 35.007 / i, true}
+    end
+    for _, fields in ipairs(samples) do
+        local expected = status_publication.lua_row(table.unpack(fields))
+        assert(cached_format(table.unpack(fields)) == expected and before(table.unpack(fields)) == expected)
+    end
+    local function measure(format)
+        collectgarbage("collect")
+        collectgarbage("stop")
+        local heap, start = collectgarbage("count"), stamp()
+        for _, fields in ipairs(samples) do format(table.unpack(fields)) end
+        return (stamp() - start) / 1000, collectgarbage("count") - heap
+    end
+    local running = collectgarbage("isrunning")
+    local ok, result = pcall(function()
+        local now_ms, now_kib = measure(cached_format)
+        local before_ms, before_kib = measure(before)
+        return ("%d,%.3f,%.3f,%.3f,%.3f"):format(#samples, now_ms, before_ms, now_kib, before_kib)
+    end)
+    if running then collectgarbage("restart") end
+    if not ok then error(result, 0) end
+    return result
+end
+
 local function retain_long_interval(active, elapsed, cycles, heap_delta)
     local entries = active.long_intervals
     local index = #entries + 1
@@ -722,6 +755,9 @@ LoopInGameThreadWithDelay(50, function()
     elseif action == "rowreuse" and not capture then
         local ok, value = pcall(compare_status_reuse)
         if ok then message = value else message = "status row reuse comparison failed: " .. tostring(value) end
+    elseif action == "rownumbers" and not capture then
+        local ok, value = pcall(compare_status_numbers)
+        if ok then message = value else message = "status number comparison failed: " .. tostring(value) end
     elseif (action == "rowcacheoff" or action == "rowcacheon") and not capture then
         if type(uncached_format) == "function" then
             SilverfishFormatLocalStatusRow = action == "rowcacheoff" and uncached_format or cached_format
@@ -729,6 +765,9 @@ LoopInGameThreadWithDelay(50, function()
         else
             message = "unavailable"
         end
+    elseif action == "standingmapping" and not capture then
+        local ok, value = pcall(function() return SilverfishProfileStandingMapping(inspect()) end)
+        if ok then message = value else message = "standing mapping comparison failed: " .. tostring(value) end
     elseif action == "lean" and not capture then
         local ok, value = pcall(SilverfishProfileLocalLean)
         if ok then message = value else message = "lean reader comparison failed: " .. tostring(value) end

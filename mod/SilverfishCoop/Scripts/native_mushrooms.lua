@@ -172,18 +172,16 @@ local function begin_sample(state, radius)
 end
 
 local function sample_native(search, path)
-    local scan = SilverfishSampleNativeMushroomPatch
+    local scan = SilverfishSampleNativeMushroomRows
     if type(scan) ~= "function" then return false end
-    local rows = scan(search.world_address, path, search.radius_squared, table.unpack(search.points))
+    local rows = scan(search.world_address, path, search.state.map, search.radius_squared, table.unpack(search.points))
     if type(rows) ~= "string" then return false end
-    for line in rows:gmatch("[^\n]+") do
-        local entry = {}
-        for value in line:gmatch("[^\t]+") do entry[#entry + 1] = value end
-        local actor = StaticFindObject(entry[3])
+    for distance, row, guid, child_path in rows:gmatch(
+        "([^\t\n]+)\t(native%-mushroom\t[^\t\n]+\t[^\t\n]+\t([^\t\n]+)\t([^\t\n]+)\t[^\n]+)\n") do
+        local actor = StaticFindObject(child_path)
         if valid(actor) then
-            entry[1], entry.actor = tonumber(entry[1]), actor
-            table.insert(entry, 2, path)
-            search.values[#search.values + 1] = entry
+            search.values[#search.values + 1] = {distance = tonumber(distance), row = row,
+                path = path, guid = guid, actor = actor}
         end
     end
     return true
@@ -203,9 +201,9 @@ local function sample_lua(search, path, patch)
         local child_path = actor_path(child)
         if not class or not child_path then return end
         local rotation, scale = child:K2_GetActorRotation(), child:GetActorScale3D()
-        search.values[#search.values + 1] = {distance, path, guid, child_path, class, child.Ammo,
-            position.X, position.Y, position.Z, rotation.Pitch, rotation.Yaw, rotation.Roll, scale.X, scale.Y, scale.Z,
-            actor = child}
+        local row = status_row("native-mushroom", search.state.map, path, guid, child_path, class, child.Ammo,
+            position.X, position.Y, position.Z, rotation.Pitch, rotation.Yaw, rotation.Roll, scale.X, scale.Y, scale.Z)
+        search.values[#search.values + 1] = {distance = distance, row = row, path = path, guid = guid, actor = child}
     end
 
     local pending, used = {}, {}
@@ -224,16 +222,11 @@ local function sample_lua(search, path, patch)
 end
 
 local function sample_patch(search, path, patch)
-    local first = #search.values + 1
     if not sample_native(search, path) then sample_lua(search, path, patch) end
-    for index = first, #search.values do
-        local entry = search.values[index]
-        entry.row = status_row("native-mushroom", search.state.map, table.unpack(entry, 2))
-    end
 end
 
 local function publish_sample(search)
-    table.sort(search.values, function(left, right) return left[1] < right[1] end)
+    table.sort(search.values, function(left, right) return left.distance < right.distance end)
     samples = search.values
 end
 
@@ -299,7 +292,7 @@ local function remove_from_sample(path, guid)
     sweep = nil
     for index = #samples, 1, -1 do
         local entry = samples[index]
-        if entry[2] == path and entry[3] == guid then table.remove(samples, index) end
+        if entry.path == path and entry.guid == guid then table.remove(samples, index) end
     end
 end
 
@@ -458,7 +451,7 @@ function mushrooms.command(fields, state, phase)
         for path in pairs(patches or {}) do paths[#paths + 1] = path end
         local nearest = samples[1]
         if not nearest then error("native_mushroom_fixture_no_growth:patches=" .. #paths .. ":" .. tostring(detail), 0) end
-        local source = exact_source(state, nearest[2], nearest[3])
+        local source = exact_source(state, nearest.path, nearest.guid)
         input.approach_world_loot(state, phase, host.pawn, source, source.Box, title_fixtures)
         next_sample = 0
         return "stock player found the nearest populated mushroom patch"
