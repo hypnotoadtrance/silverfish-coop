@@ -3106,10 +3106,18 @@ async def verify_dock_enemy_drop(host: Seat, guest: Seat, arrival: dict) -> dict
     assert max(moving_heights) - resting_heights[0] > 3, heights
     assert math.isclose(resting_heights[0], item["transform"]["position"][2], abs_tol=2), heights
     assert len({actor for _, _, actor in heights}) == 1, heights
+    motion_transport = await asyncio.gather(
+        wait_resident_status(host_run, lambda row: row.get("transport", {}).get("loot_motion_datagrams_queued", 0) > 0),
+        wait_resident_status(guest_run, lambda row: row.get("transport", {}).get("loot_motion_datagrams_received", 0) > 0),
+    )
+    queued, received = (row["transport"] for row in motion_transport)
+    assert 0 < received["loot_motion_bytes_received"] <= queued["loot_motion_bytes_queued"]
     return {"item": item["class_path"], "stock_source": item["source"], "inventory_guid": guid,
             "inventory_receipt": delivered["outcome"], "inventory_receipt_bytes": delivered["item_bytes"],
             "focus_failures_before_pickup": focus_failures,
             "moving_heights_cm": moving_heights, "resting_height_cm": resting_heights[0],
+            "motion_transport": {"host_queued_bytes": queued["loot_motion_bytes_queued"],
+                                 "guest_received_bytes": received["loot_motion_bytes_received"]},
             "pickup_preview": await verified_drop_preview(guest, identity),
             "duplicate": refused["error"], "checkpoint_unchanged": True}
 

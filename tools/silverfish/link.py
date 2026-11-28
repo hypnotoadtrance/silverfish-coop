@@ -131,6 +131,7 @@ _CATALOG_KEEPALIVE_INTERVAL = 3.0
 _MAX_KEEPALIVE_PROBES = 8
 _MAX_GAME_PACKET = 65507
 _FRAGMENT_SIZE = 1024
+LOOT_MOTION_MAX_PACKET = _FRAGMENT_SIZE
 _FRAGMENT_HEADER = struct.Struct("!IHH")
 _COMPRESSED_FRAGMENT = 1 << 15
 _COMPRESS_GAME_MINIMUM = 256
@@ -448,6 +449,10 @@ class _TransportStatistics:
     avatar_pose_datagrams_queued: int = 0
     avatar_pose_datagrams_replaced: int = 0
     avatar_pose_datagrams_received: int = 0
+    loot_motion_datagrams_queued: int = 0
+    loot_motion_datagrams_received: int = 0
+    loot_motion_bytes_queued: int = 0
+    loot_motion_bytes_received: int = 0
     reassembly_expired_packets: int = 0
     reassembly_max_pending_packets: int = 0
     snapshot_responses_encoded: int = 0
@@ -778,6 +783,9 @@ class _LinkProtocol(QuicConnectionProtocol):
             self._stats.prop_pose_datagrams_queued += 1
         elif header == _AVATAR_POSE_HEADER:
             self._stats.avatar_pose_datagrams_queued += 1
+        elif header == _LOOT_MOTION_HEADER:
+            self._stats.loot_motion_datagrams_queued += 1
+            self._stats.loot_motion_bytes_queued += len(frame)
         self._stats.relay_queue_max_frames = max(self._stats.relay_queue_max_frames, len(pending))
         return True
 
@@ -1393,8 +1401,8 @@ class HostLink:
     def send_weapon_shots(self, cues: Sequence[bytes], allowed: Callable[[str], bool]) -> None:
         self._send_presentation(_WEAPON_SHOT_HEADER, cues, allowed)
 
-    def send_loot_motion(self, data: bytes, allowed: Callable[[str], bool]) -> None:
-        self._send_presentation(_LOOT_MOTION_HEADER, (data,), allowed)
+    def send_loot_motion(self, frames: Sequence[bytes], allowed: Callable[[str], bool]) -> None:
+        self._send_presentation(_LOOT_MOTION_HEADER, frames, allowed)
 
     def send_gameplay_change(self, epoch: str) -> None:
         """Hint that the current visit has newer authoritative snapshot state."""
@@ -1928,7 +1936,9 @@ class ClientLink:
         return None
 
     def _receive_loot_motion(self, data: bytes, now: float) -> None:
-        if 0 < len(data) <= _FRAGMENT_SIZE:
+        if 0 < len(data) <= LOOT_MOTION_MAX_PACKET:
+            self._stats.loot_motion_datagrams_received += 1
+            self._stats.loot_motion_bytes_received += len(_LOOT_MOTION_HEADER) + len(data)
             self._loot_motion.append((now, data))
 
     def gameplay_changed(self, epoch: str) -> bool:

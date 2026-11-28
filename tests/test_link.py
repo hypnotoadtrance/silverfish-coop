@@ -1210,17 +1210,23 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         guest_id = self.request["guest_id"]
         self.assertTrue((await self.connect_guest())["accepted"])
         self.host.send_weapon_shots((b"wrong guest",), lambda _: False)
-        self.host.send_loot_motion(b"wrong guest", lambda _: False)
+        self.host.send_loot_motion((b"wrong guest",), lambda _: False)
         self.host.restrict_game_routes(set())
         self.host.send_weapon_shots((b"during travel",), lambda _: True)
-        self.host.send_loot_motion(b"during travel", lambda _: True)
+        self.host.send_loot_motion((b"during travel",), lambda _: True)
         self.host.restrict_game_routes(None)
         self.host.send_weapon_shots((b"live cue",), lambda admitted: admitted == guest_id)
-        self.host.send_loot_motion(b"falling item", lambda admitted: admitted == guest_id)
+        motion = (b"falling item", b"second motion batch")
+        self.host.send_loot_motion(motion, lambda admitted: admitted == guest_id)
         await self.exchange(1200)
         self.assertEqual(self.client.take_weapon_shots(), [b"live cue"])
         self.assertEqual(self.client.take_weapon_shots(), [])
-        self.assertEqual([packet for _, packet in self.client.take_loot_motion()], [b"falling item"])
+        self.assertEqual([packet for _, packet in self.client.take_loot_motion()], list(motion))
+        self.assertEqual(self.host.statistics()["loot_motion_datagrams_queued"], 2)
+        self.assertEqual(self.client.statistics()["loot_motion_datagrams_received"], 2)
+        size = sum(len(link._LOOT_MOTION_HEADER) + len(packet) for packet in motion)
+        self.assertEqual(self.host.statistics()["loot_motion_bytes_queued"], size)
+        self.assertEqual(self.client.statistics()["loot_motion_bytes_received"], size)
 
         self.host.send_weapon_shots((b"queued cue",), lambda _: True)
         await asyncio.wait_for(self.client.wait_weapon_shots(), 1)
@@ -1228,7 +1234,7 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.take_weapon_shots(), [])
 
         self.host.send_weapon_shots((b"before disconnect",), lambda _: True)
-        self.host.send_loot_motion(b"before disconnect", lambda _: True)
+        self.host.send_loot_motion((b"before disconnect",), lambda _: True)
         async with asyncio.timeout(1):
             while not self.client.weapon_shots_ready() or not self.client.loot_motion_ready():
                 await asyncio.sleep(.01)

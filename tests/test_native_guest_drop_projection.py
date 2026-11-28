@@ -1,8 +1,9 @@
-import json
 from types import SimpleNamespace
 import time
 import unittest
 from unittest.mock import AsyncMock, patch
+import uuid
+import zlib
 
 from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as record, native_world_loot, party
 from tools.silverfish import native_guest_drop_projection as projection
@@ -199,11 +200,12 @@ class DropProjectionTests(unittest.IsolatedAsyncioTestCase):
         source = f"Ammo_Pistol_BP_C {WORLD}Ammo_Pistol_BP_C_8"
         identity = native_stock_enemy_drops.motion_identity(zone, source)
         pose = {"position": [10, 20, 140], "rotation": [10, 20, 30], "scale": [1, 1, 1]}
-        packet = [MAP, zone, 3, identity, record.ITEM, [10, 20, 140, 10, 20, 30, 1, 1, 1]]
-        earlier = [*packet]
-        earlier[2], earlier[5] = 2, [10, 20, 170, 10, 20, 30, 1, 1, 1]
+        current = [[identity, record.ITEM, [10, 20, 140, 10, 20, 30, 1, 1, 1]]]
+        earlier = [[identity, record.ITEM, [10, 20, 170, 10, 20, 30, 1, 1, 1]]]
+        packets = (*native_stock_enemy_drops.motion_packets(MAP, zone, 3, current),
+                   *native_stock_enemy_drops.motion_packets(MAP, zone, 2, earlier))
         playback = native_stock_enemy_drops.MotionPlayback()
-        moving = playback.frame([(10, json.dumps(row)) for row in (packet, earlier)], MAP, zone, active=True, now=10.1)
+        moving = playback.frame([(10, packet) for packet in packets], MAP, zone, active=True, now=10.1)
         self.assertEqual(moving["items"][identity]["transform"], pose)
         bridge = SimpleNamespace(command=AsyncMock(return_value=game))
         await view.sync(bridge, game, {}, "first", zone, active=True, enemy_motion=moving)
@@ -228,9 +230,10 @@ class DropProjectionTests(unittest.IsolatedAsyncioTestCase):
         rows = client.gameplay[record.STATE]
         position = [12, 20, 90]
         zone = client.zone_epoch
-        packet = [MAP, zone, 1, identity, record.ITEM, [*position, 0, 10, 0, 1, 1, 1], "carry"]
+        packets = native_stock_enemy_drops.motion_packets(MAP, zone, 1,
+                                                          [[identity, record.ITEM, [*position, 0, 10, 0, 1, 1, 1], "carry"]])
         motion = native_stock_enemy_drops.MotionPlayback().frame(
-            [(10, json.dumps(packet))], MAP, zone, active=True, now=10.1)
+            [(10, packet) for packet in packets], MAP, zone, active=True, now=10.1)
         moving, = native_world_loot.nearby(client.last_game, {}, zone, player_drops=rows,
                                           enemy_motion=motion, carried=[identity]).values()
         self.assertEqual(moving.transform["position"], position)
@@ -240,6 +243,52 @@ class DropProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(landed.claim_action, drop.RECLAIM)
         self.assertEqual(native_world_loot.nearby(client.last_game, {}, zone, enemy_motion=motion,
                                                 carried=[identity]), {})
+
+    def test_motion_batches_reassemble_out_of_order_and_keep_the_current_visit(self):
+        drops = native_stock_enemy_drops
+        zone = self.client().zone_epoch
+        rows = [[f"{index:032x}", record.ITEM, [index, 20, 90, 0, 10, 0, 1, 1, 1]]
+                for index in range(drops.MOTION_LIMIT)]
+        rows[-1].append("carry")
+        packets = drops.motion_packets(MAP, zone, 1, rows)
+        self.assertEqual(len(packets), 2)
+        self.assertTrue(all(len(packet) <= drops.LOOT_MOTION_MAX_PACKET for packet in packets))
+
+        playback = drops.MotionPlayback()
+        self.assertEqual(playback.frame([(10, packet) for packet in packets], MAP, "f" * 32,
+                                        active=True, now=10.1)["items"], {})
+        update = drops.motion_packets(MAP, zone, 2, [[rows[-1][0], record.ITEM, [80, 20, 90, 0, 10, 0, 1, 1, 1]]])
+        observed = playback.frame([(10, packet) for packet in (*update, *reversed(packets))], MAP, zone,
+                                  active=True, now=10.1)["items"]
+        self.assertEqual(set(observed), {row[0] for row in rows})
+        self.assertEqual(observed[rows[-1][0]]["transform"]["position"], [80, 20, 90])
+        self.assertFalse(observed[rows[-1][0]].get("carried", False))
+
+    def test_motion_decoder_rejects_unbounded_or_trailing_compressed_data(self):
+        drops = native_stock_enemy_drops
+        scope = MAP, self.client().zone_epoch
+        burst = drops.motion_packets(*scope, 1, [["a" * 32, record.ITEM, [10, 20, 90, 0, 10, 0, 1, 1, 1]]])[0]
+        self.assertIsNotNone(drops.read_motion_packet(burst, scope))
+        self.assertIsNone(drops.read_motion_packet(burst + b"extra", scope))
+        oversized = drops._MOTION_COMPRESSED + zlib.compress(b" " * (drops._MOTION_MAX_BODY + 1))
+        self.assertIsNone(drops.read_motion_packet(oversized, scope))
+
+    def test_motion_packet_limit_splits_a_batch_of_different_long_asset_paths(self):
+        drops = native_stock_enemy_drops
+        scope = MAP, self.client().zone_epoch
+        rows = []
+        for index in range(16):
+            label = uuid.uuid5(uuid.NAMESPACE_OID, str(index)).hex
+            directory = uuid.uuid5(uuid.NAMESPACE_URL, label).hex
+            asset = uuid.uuid5(uuid.NAMESPACE_DNS, label).hex
+            path = f"/Game/Classes/Items/{directory}/Item_{asset}.Item_{asset}_C"
+            rows.append([label, path, [index, 20, 90, 0, 10, 0, 1, 1, 1]])
+        frames = drops.motion_packets(*scope, 1, rows)
+        self.assertGreater(len(frames), 1)
+        self.assertTrue(all(len(packet) <= drops.LOOT_MOTION_MAX_PACKET for packet in frames))
+        observed = drops.MotionPlayback().frame([(10, packet) for packet in frames], *scope, active=True, now=10.1)
+        self.assertEqual({key: row["class_path"] for key, row in observed["items"].items()},
+                         {key: path for key, path, _ in rows})
 
     async def test_guest_can_collect_nearest_stock_drop_from_another_guest(self):
         client, view = self.client(), projection.Projection()

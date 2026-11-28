@@ -6,10 +6,12 @@ import math
 import re
 import time
 import uuid
+import zlib
 
 from . import native_pickup_audio, party
 from .authored_loot import valid_item_transform
 from .content_paths import item_class_name, named_actor
+from .link import LOOT_MOTION_MAX_PACKET
 from .native_gold import valid_guid
 from .native_map_preflight import valid_campaign_package
 from .travel import BLACK_MARKET
@@ -39,6 +41,9 @@ _SERIAL = re.compile(r"[1-9][0-9]{0,15}")
 MOTION_INTERVAL = .08
 MOTION_TTL = .75
 MOTION_LIMIT = 32
+_MOTION_BATCH_ROWS = 16
+_MOTION_MAX_BODY = 8192
+_MOTION_COMPRESSED = b"SFM\x01"
 _MEMORY_BANK_TURN_SECONDS = .012
 _BANK_REFUSALS_BEFORE_RETIREMENT = frozenset({
     "stock_enemy_escrow_actor_unavailable", "stock_enemy_escrow_actor_unverified",
@@ -271,6 +276,47 @@ def moving_frame(game, zone, processed, *, observed=None):
     return {"map": area, "epoch": zone, "items": moving} if moving else None
 
 
+def motion_packets(area, epoch, serial, rows):
+    """Pack independent bursts under the unreliable datagram limit."""
+    def encode(batch):
+        message = json.dumps([area, epoch, serial, batch], separators=(",", ":"), allow_nan=False).encode("ascii")
+        encoded = message
+        if len(message) >= 160:
+            compressed = _MOTION_COMPRESSED + zlib.compress(message, level=1)
+            if len(compressed) < len(message):
+                encoded = compressed
+        if len(message) <= _MOTION_MAX_BODY and len(encoded) <= LOOT_MOTION_MAX_PACKET:
+            yield encoded
+        elif len(batch) > 1:
+            midpoint = len(batch) // 2
+            yield from encode(batch[:midpoint])
+            yield from encode(batch[midpoint:])
+
+    return tuple(packet for start in range(0, len(rows), _MOTION_BATCH_ROWS)
+                 for packet in encode(rows[start:start + _MOTION_BATCH_ROWS]))
+
+
+def read_motion_packet(packet, scope):
+    if not isinstance(packet, bytes) or not 0 < len(packet) <= LOOT_MOTION_MAX_PACKET:
+        return None
+    try:
+        if packet.startswith(_MOTION_COMPRESSED):
+            stream = zlib.decompressobj()
+            packet = stream.decompress(packet[len(_MOTION_COMPRESSED):], _MOTION_MAX_BODY + 1)
+            if not stream.eof or stream.unused_data or len(packet) > _MOTION_MAX_BODY:
+                return None
+        frame = json.loads(packet)
+    except (ValueError, UnicodeError, RecursionError, zlib.error):
+        return None
+    if not isinstance(frame, list) or len(frame) != 4 or tuple(frame[:2]) != scope:
+        return None
+    _, _, serial, rows = frame
+    if (type(serial) is not int or not 0 < serial < 2**53
+            or not isinstance(rows, list) or not 0 < len(rows) <= _MOTION_BATCH_ROWS):
+        return None
+    return serial, rows
+
+
 async def relay_motion(host, bridge, transport):
     previous = {}
     sequence = 0
@@ -312,6 +358,7 @@ async def relay_motion(host, bridge, transport):
 
         items = frame["items"]
         previous = {identity: state for identity, state in previous.items() if identity in items}
+        rows = []
         for identity, item in items.items():
             transform = item["transform"]
             pose = [*(round(value, 1) for field in ("position", "rotation") for value in transform[field]),
@@ -319,14 +366,14 @@ async def relay_motion(host, bridge, transport):
             prior, last = previous.get(identity, (None, 0.0))
             if pose == prior and now - last < .3:
                 continue
-            sequence += 1
-            packet = [frame["map"], frame["epoch"], sequence, identity, item["class_path"], pose]
+            row = [identity, item["class_path"], pose]
             if identity in carried:
-                packet.append("carry")
-            data = json.dumps(packet,
-                              separators=(",", ":")).encode("ascii")
-            transport.send_loot_motion(data, allowed)
+                row.append("carry")
+            rows.append(row)
             previous[identity] = pose, now
+        if rows:
+            sequence += 1
+            transport.send_loot_motion(motion_packets(frame["map"], frame["epoch"], sequence, rows), allowed)
 
 
 class MotionPlayback:
@@ -345,27 +392,27 @@ class MotionPlayback:
         for received, packet in packets:
             if now - received >= MOTION_TTL:
                 continue
-            try:
-                frame = json.loads(packet)
-            except (ValueError, UnicodeError, RecursionError):
+            decoded = read_motion_packet(packet, scope)
+            if decoded is None:
                 continue
-            if (not isinstance(frame, list) or len(frame) not in (6, 7) or tuple(frame[:2]) != scope
-                    or (len(frame) == 7 and frame[6] != "carry")):
-                continue
-            _, _, serial, identity, class_path, axes = frame[:6]
-            if (type(serial) is not int or not 0 < serial < 2**53 or not isinstance(identity, str)
-                    or not party.REQUEST_ID.fullmatch(identity) or not item_class_name(class_path)
-                    or not isinstance(axes, list) or len(axes) != 9):
-                continue
-            last = self.items.get(identity)
-            if (last and serial <= last[1]) or (not last and len(self.items) >= MOTION_LIMIT):
-                continue
-            pose = {"position": axes[:3], "rotation": axes[3:6], "scale": axes[6:]}
-            if valid_item_transform(pose):
-                row = {"class_path": class_path, "transform": pose}
-                if len(frame) == 7:
-                    row["carried"] = True
-                self.items[identity] = received, serial, row
+            serial, rows = decoded
+            for fields in rows:
+                if (not isinstance(fields, list) or len(fields) not in (3, 4)
+                        or (len(fields) == 4 and fields[3] != "carry")):
+                    continue
+                identity, class_path, axes = fields[:3]
+                if (not isinstance(identity, str) or not party.REQUEST_ID.fullmatch(identity)
+                        or not item_class_name(class_path) or not isinstance(axes, list) or len(axes) != 9):
+                    continue
+                last = self.items.get(identity)
+                if (last and serial <= last[1]) or (not last and len(self.items) >= MOTION_LIMIT):
+                    continue
+                pose = {"position": axes[:3], "rotation": axes[3:6], "scale": axes[6:]}
+                if valid_item_transform(pose):
+                    row = {"class_path": class_path, "transform": pose}
+                    if len(fields) == 4:
+                        row["carried"] = True
+                    self.items[identity] = received, serial, row
         return {"map": area, "epoch": epoch, "items": {identity: state[2] for identity, state in self.items.items()}}
 
 
