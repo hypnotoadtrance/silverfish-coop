@@ -2210,7 +2210,7 @@ namespace
         return 3;
     }
 
-    Unreal::UObject* remote_avatar_pawn(std::int64_t world_address, std::int64_t pawn_address, bool allow_scan = true)
+    Unreal::UObject* remote_avatar_pawn(std::int64_t world_address, std::int64_t pawn_address)
     {
         auto* world = static_cast<Unreal::UWorld*>(scope.world.Get());
         auto* local = scope.pawn.Get();
@@ -2246,7 +2246,7 @@ namespace
             return nullptr;
         };
         auto* pawn = remote();
-        if (!pawn && allow_scan && now >= census.next_scan)
+        if (!pawn && now >= census.next_scan)
         {
             census.next_scan = now + std::chrono::milliseconds(250);
             census.remotes = {};
@@ -2283,8 +2283,12 @@ namespace
         return true;
     }
 
-    int push_remote_aim(const Lua& lua, Unreal::UObject* pawn)
+    int read_remote_aim(const Lua& lua)
     {
+        if (!available() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_integer(2)) return 0;
+        const auto world_address = lua.get_integer();
+        const auto pawn_address = lua.get_integer();
+        auto* pawn = remote_avatar_pawn(world_address, pawn_address);
         if (!pawn) return 0;
         static Unreal::FWeakObjectPtr cached_aim;
         auto* aim = static_cast<Unreal::UFunction*>(cached_aim.Get());
@@ -2304,13 +2308,6 @@ namespace
         lua.set_number(rotation[0]);
         lua.set_number(rotation[1]);
         return 2;
-    }
-
-    int read_remote_aim(const Lua& lua)
-    {
-        auto* stack = lua.get_lua_state();
-        if (!available() || lua_gettop(stack) != 2 || !lua_isinteger(stack, 1) || !lua_isinteger(stack, 2)) return 0;
-        return push_remote_aim(lua, remote_avatar_pawn(lua_tointeger(stack, 1), lua_tointeger(stack, 2)));
     }
 
     int read_avatar_seconds(const Lua& lua)
@@ -2666,7 +2663,7 @@ namespace
         const HeadRotationWriter* writer{};
     };
 
-    RemoteHead remote_head(Unreal::UObject* pawn, std::string_view path, bool allow_lookup = true)
+    RemoteHead remote_head(Unreal::UObject* pawn, std::string_view path)
     {
         constexpr std::size_t max_path_size = 512;
         if (!pawn || path.empty() || path.size() > max_path_size || path.find('\0') != std::string_view::npos)
@@ -2682,7 +2679,6 @@ namespace
         static std::uint64_t binding_generation{};
         if (binding_generation != scope.generation)
         {
-            if (!allow_lookup) return {};
             writer = {};
             writer.bind();
             bindings = {};
@@ -2705,7 +2701,6 @@ namespace
         Unreal::UObject* body = nullptr;
         if (!pivot)
         {
-            if (!allow_lookup) return {};
             const auto now = Clock::now();
             if (now < binding->next_lookup) return {};
             binding->pawn = pawn;
@@ -2720,20 +2715,6 @@ namespace
         }
         else body = writer.display_body(pawn, pivot);
         return body ? RemoteHead{pivot, body, &writer} : RemoteHead{};
-    }
-
-    int read_remote_head_aim(const Lua& lua)
-    {
-        auto* stack = lua.get_lua_state();
-        if (!available() || lua_gettop(stack) != 3 || !lua_isinteger(stack, 1) || !lua_isinteger(stack, 2) ||
-            lua_type(stack, 3) != LUA_TSTRING) return 0;
-        auto* pawn = remote_avatar_pawn(lua_tointeger(stack, 1), lua_tointeger(stack, 2), false);
-        std::size_t size{};
-        const auto* path = lua_tolstring(stack, 3, &size);
-        // The first stock head write establishes the exact attachment binding.
-        // During travel or recreation, leave cold discovery to the existing paths.
-        const auto head = remote_head(pawn, {path, size}, false);
-        return head.pivot ? push_remote_aim(lua, pawn) : 0;
     }
 
     int write_remote_head_rotation(const Lua& lua)
@@ -3348,7 +3329,6 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishTakeNativeStashPress", take_stash_press);
         lua.register_function("SilverfishReadNativeLocalLean", read_local_lean);
         lua.register_function("SilverfishReadNativeRemoteAim", read_remote_aim);
-        lua.register_function("SilverfishReadNativeRemoteHeadAim", read_remote_head_aim);
         lua.register_function("SilverfishReadNativeAvatarSeconds", read_avatar_seconds);
         lua.register_function("SilverfishReadNativeAvatarMotion", read_avatar_motion);
         lua.register_function("SilverfishNativeAvatarAppearanceMatches", avatar_appearance_matches);

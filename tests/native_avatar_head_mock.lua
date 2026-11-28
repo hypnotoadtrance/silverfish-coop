@@ -124,28 +124,3 @@ entry.lean_rotation = {Pitch = 0, Yaw = 0, Roll = 18}
 now, accept, expected_roll = .25, true, 18
 animate()
 assert(native_writes == 3 and #writes == 6, "The native write preserves the composed lean roll")
-
-local native_reads, validity_reads, qualify = 0, 0, true
-function SilverfishReadNativeRemoteHeadAim(scope, actor, path)
-    assert(scope == world and actor == pawn and path == entry.head_pivot_path)
-    native_reads = native_reads + 1
-    if qualify then return 76, -172 end
-end
-local function count_valid(current)
-    validity_reads = validity_reads + 1
-    return not current.retired
-end
-pawn.IsValid, pivot.IsValid = count_valid, count_valid
-entry.lean_rotation, expected_roll, now = nil, 0, .3
-local prior_stock_reads = stock_reads
-animate()
-assert(native_reads == 1 and validity_reads == 0 and stock_reads == prior_stock_reads,
-    "A qualified native aim should not reread Lua Unreal objects")
-qualify, now = false, .35
-animate()
-assert(native_reads == 2 and validity_reads == 2 and stock_reads == prior_stock_reads + 1,
-    "A stale native binding must use the usual Lua validity and stock aim fallback")
-pivot.retired, now = true, .4
-animate()
-assert(native_reads == 3 and validity_reads == 3 and stock_reads == prior_stock_reads + 1,
-    "The fallback must stop when the avatar pivot retires")

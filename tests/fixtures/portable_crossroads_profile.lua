@@ -851,12 +851,6 @@ LoopInGameThreadWithDelay(50, function()
             return SilverfishProfileCrossroadsWallSources(state.world, state.map)
         end)
         if ok then message = value else message = "zone wall comparison failed: " .. tostring(value) end
-    elseif action == "headscope" and not capture then
-        local ok, value = pcall(function()
-            local state = inspect()
-            return SilverfishProfileRemoteHeadScope(state.local_pawn and state.local_pawn.pawn)
-        end)
-        if ok then message = value else message = "remote head scope comparison failed: " .. tostring(value) end
     elseif action == "gameclock" and not capture then
         local ok, value = pcall(compare_save_game_clock)
         if ok then message = value else message = "stock save clock comparison failed: " .. tostring(value) end

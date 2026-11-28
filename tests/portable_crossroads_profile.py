@@ -1260,45 +1260,6 @@ function SilverfishProfileAvatarClock()
     return "unavailable"
 end
 
-function SilverfishProfileRemoteHeadScope(local_pawn)
-    local read, stock = SilverfishReadNativeRemoteHeadAim, SilverfishReadNativeRemoteAim
-    local write = SilverfishWriteNativeRemoteHeadRotation
-    if type(read) ~= "function" then return "unavailable" end
-    assert(type(stock) == "function" and type(write) == "function", "missing existing remote aim and head writer")
-    local local_address = assert(valid(local_pawn) and local_pawn:GetAddress(), "missing local pawn")
-    for address, entry in pairs(avatars) do
-        local path, pivot = entry.head_pivot_path, entry.head_pivot
-        if path and valid(pivot) and valid(entry.pawn) then
-            local original = pivot:K2_GetComponentRotation()
-            assert(write(entry.world, address, path, original.Pitch, original.Yaw, original.Roll) == true,
-                "could not warm the scoped head binding")
-            local warmed = pivot:K2_GetComponentRotation()
-            local function legacy()
-                if valid(entry.head_pivot) and valid(entry.pawn) then return stock(entry.world, address) end
-            end
-            local function qualified()
-                return read(entry.world, address, path)
-            end
-            local pitch, yaw = legacy()
-            local observed_pitch, observed_yaw = qualified()
-            assert(type(pitch) == "number" and type(yaw) == "number"
-                and observed_pitch == pitch and observed_yaw == yaw, "scoped head aim differed from current stock")
-            assert(read(0, address, path) == nil and read(entry.world, 0, path) == nil
-                and read(entry.world, local_address, path) == nil
-                and read(entry.world, address, path .. "_missing") == nil,
-                "native head aim accepted another scope or pivot")
-            local after = pivot:K2_GetComponentRotation()
-            assert(warmed.Pitch == after.Pitch and warmed.Yaw == after.Yaw and warmed.Roll == after.Roll,
-                "read-only head probe changed the pivot")
-            assert(qualified() == pitch, "native head reader lost its original scope")
-            local count = 128
-            local native_ms, lua_ms, native_kib, lua_kib = SilverfishProfileCrossroadsCompare(count, qualified, legacy)
-            return ("%d,%.3f,%.3f,%.3f,%.3f"):format(count, native_ms, lua_ms, native_kib, lua_kib)
-        end
-    end
-    error("no ready remote head pivot was observed", 0)
-end
-
 function SilverfishProfileRemoteHeadRotation()
     local native, stamp = SilverfishWriteNativeRemoteHeadRotation, SilverfishBridgeProfileStamp
     if type(native) ~= "function" then return "unavailable" end
@@ -2250,7 +2211,6 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     controller_inspection = {}
     pawn_values = {}
     remote_head_rotation = {}
-    remote_head_scope = {}
     zone_wall_sources = {}
     save_clock = {}
     save_clock_continuity = {}
@@ -2320,8 +2280,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             remote_head_rotation[seat] = {"writes_per_path": 32, "native_ms": native_ms, "lua_ms": lua_ms,
                                           "native_heap_growth_kib": native_kib, "lua_heap_growth_kib": lua_kib,
                                           "all_angles_matched": True}
-        for action, result in (("headscope", remote_head_scope), ("wallsources", zone_wall_sources),
-                               ("gameclock", save_clock)):
+        for action, result in (("wallsources", zone_wall_sources), ("gameclock", save_clock)):
             replies = await asyncio.gather(*(command(seat, action) for seat in seats.values()))
             for seat, reply in zip(seats, replies, strict=True):
                 if reply == "unavailable":
@@ -2334,7 +2293,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
                 if action == "wallsources":
                     sources, = scope
                     record["authored_overlap_sources"] = int(sources)
-                elif action == "gameclock":
+                else:
                     game_seconds, verified_sequence = scope
                     record["local_save_game_seconds"] = game_seconds
                     if seat == "guest":
@@ -2343,8 +2302,6 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
                         record["other_connection_and_sequence_refused"] = True
                     else:
                         assert verified_sequence == 0, reply
-                else:
-                    assert not scope, scope
                 result[seat] = record
             assert not result or set(result) == set(seats), (action, result)
         if save_clock:
@@ -2449,7 +2406,6 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             "standing_mapping_comparison": standing_mapping,
             "local_bridge_scheduler": scheduler,
             "remote_head_rotation_comparison": remote_head_rotation,
-            "remote_head_scope_comparison": remote_head_scope,
             "zone_wall_source_comparison": zone_wall_sources,
             "save_game_clock_comparison": save_clock,
             "save_game_clock_continuity": save_clock_continuity}
