@@ -379,16 +379,46 @@ end
 
 -- The portable fixture observes the stock session teardown in memory. The
 -- separate same-name canary proof runs only when its explicit command arms it.
+local diagnostics = {}
+local function save_lifecycle_failure(name, rows)
+    if diagnostics[name] then return end
+    diagnostics[name] = true
+    pcall(function()
+        local path = mailbox .. "/native-save-" .. name .. "-failure.tsv"
+        local stream = assert(io.open(path .. ".tmp", "wb"))
+        for _, row in ipairs(rows) do
+            assert(stream:write(row[1], "\t", tostring(row[2]):gsub("[\r\n\t]", " "):sub(1, 512), "\n"))
+        end
+        stream:close()
+        assert(os.rename(path .. ".tmp", path))
+    end)
+end
+
 local function install_lifecycle_witness()
-    local prepare, remember, restore = SilverfishPrepareNativeGuestSaveView,
-        SilverfishRememberNativeGuestTravelStep, SilverfishRestoreNativeGuestSaveView
+    local prepare, rebind, remember, restore = SilverfishPrepareNativeGuestSaveView,
+        SilverfishRebindNativeGuestSaveView, SilverfishRememberNativeGuestTravelStep, SilverfishRestoreNativeGuestSaveView
     local release, refresh, selected = SilverfishReleaseNativeSaveScope,
         SilverfishRefreshNativeTitleSingleplayer, SilverfishSelectedNativeSaveScope
-    if type(prepare) ~= "function" or type(remember) ~= "function" or type(restore) ~= "function"
+    if type(prepare) ~= "function" or type(rebind) ~= "function" or type(remember) ~= "function" or type(restore) ~= "function"
         or type(release) ~= "function" or type(refresh) ~= "function" or type(selected) ~= "function" then return end
 
     local pending_guest, finished
+    local save_type = "BlueprintGeneratedClass " .. save_path
+    local crossroads_world = "World /Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
+    local inside_prepare, stock_allocations, hook_entries, hook_error = false, 0, 0, nil
     local function address(value) return valid(value) and value:GetAddress() or 0 end
+
+    RegisterHook("/Script/Engine.GameplayStatics:CreateSaveGameObject", function(context, parameter)
+        if not inside_prepare then return end
+        hook_entries = hook_entries + 1
+        local ok, qualified = pcall(function()
+            local statics, class = context:get(), parameter:get()
+            return valid(statics) and statics:GetFullName() == "GameplayStatics " .. statics_path
+                and valid(class) and class:GetFullName() == save_type
+        end)
+        if not ok then hook_error = qualified
+        elseif qualified then stock_allocations = stock_allocations + 1 end
+    end)
     local function fields(world)
         local instance = valid(world) and world.OwningGameInstance
         if not valid(instance) then return end
@@ -403,16 +433,78 @@ local function install_lifecycle_witness()
         return accepted and snapshot or nil
     end
 
-    SilverfishPrepareNativeGuestSaveView = function(world, instance, save, id)
+    local function references(world, save_address)
+        local accepted, matches = pcall(function()
+            local objects = world.OwningGameInstance.ReferencedObjects
+            local count = objects and math.tointeger(objects:GetArrayNum())
+            if not count or count < 0 or count > 8192 then return end
+            local found = 0
+            for index = 1, count do
+                if address(objects[index]) == save_address then found = found + 1 end
+            end
+            return found
+        end)
+        return accepted and matches or nil
+    end
+
+    SilverfishPrepareNativeGuestSaveView = function(world, id)
         local first = not pending_guest or pending_guest.id ~= id
         local before = first and capture(world)
-        local accepted = prepare(world, instance, save, id)
-        if accepted == true and first then
+        local prior_allocations, prior_entries = stock_allocations, hook_entries
+        hook_error, inside_prepare = nil, true
+        local result = table.pack(pcall(prepare, world, id))
+        inside_prepare = false
+        local ok, view, reason = result[1], result[2], result[3]
+        local allocations = stock_allocations - prior_allocations
+        if not ok or not valid(view) then
+            save_lifecycle_failure("prepare", {{"scope", id}, {"result", ok and "declined" or "threw"},
+                {"reason", ok and reason or view}, {"stock_hook_entries", hook_entries - prior_entries},
+                {"stock_hook_allocations", allocations}, {"stock_hook_error", hook_error},
+                {"prior_save_class", before and before.save_class}})
+        end
+        if not ok then error(view, 0) end
+        if not valid(view) then return table.unpack(result, 2, result.n) end
+
+        local world_address, view_address = address(world), address(view)
+        if first then
             local after = capture(world)
-            pending_guest = {id = id, before = before, isolated = after,
-                installed = before and after and before.instance == after.instance and after.instance == address(instance)
-                    and before.save ~= after.save and after.save == address(save)
+            pending_guest = {id = id, before = before, isolated = after, world = world_address, view = view_address,
+                allocations = allocations, preparations = 1, rebindings = 0, same_view = true,
+                allocated_in_title = world:GetFullName() == stock_world and allocations == 1,
+                retained_at_title = references(world, view_address) == 1,
+                solo_distinct = before and before.save ~= 0 and before.save_class == save_type
+                    and before.save ~= view_address,
+                installed = before and after and before.instance == after.instance and before.save ~= after.save
+                    and after.save == view_address and after.save_class == save_type
                     and after.slot == "SFCoopGuest_" .. id and after.autosave == false and selected() == id}
+        else
+            local guest = pending_guest
+            guest.allocations, guest.preparations = guest.allocations + allocations, guest.preparations + 1
+            guest.same_view = guest.same_view and guest.view == view_address
+        end
+        return table.unpack(result, 2, result.n)
+    end
+
+    SilverfishRebindNativeGuestSaveView = function(world, id)
+        local accepted = rebind(world, id)
+        if accepted ~= true or not pending_guest or pending_guest.id ~= id then return accepted end
+        local guest = pending_guest
+        guest.rebindings = guest.rebindings + 1
+        local world_address = address(world)
+        if guest.world == world_address then return accepted end
+
+        guest.world = world_address
+        local after = capture(world)
+        local installed = after and guest.isolated and after.instance == guest.isolated.instance
+            and after.save == guest.view and after.save_class == save_type and after.slot == guest.isolated.slot
+            and after.autosave == false and selected() == id
+        guest.same_view = guest.same_view and installed
+        local name = world:GetFullName()
+        if installed and name == destination_world then
+            guest.observatory, guest.retained_in_observatory = world_address, references(world, guest.view) == 1
+        end
+        if installed and name == crossroads_world then
+            guest.crossroads, guest.retained_in_crossroads = world_address, references(world, guest.view) == 1
         end
         return accepted
     end
@@ -427,15 +519,23 @@ local function install_lifecycle_witness()
 
     SilverfishRestoreNativeGuestSaveView = function(world, id)
         local guest = pending_guest and pending_guest.id == id and pending_guest
-        local before, route = guest and capture(world), guest and selected()
-        local accepted = restore(world, id)
-        if guest and accepted == true and not guest.restore then
+        local first = guest and not guest.restore
+        local before, route = first and capture(world), first and selected()
+        local retained = first and references(world, guest.view)
+        local result = table.pack(restore(world, id))
+        if result[1] ~= true then
+            save_lifecycle_failure("restore", {{"scope", id}, {"reason", result[2]},
+                {"retained", retained}, {"pending_guest", guest ~= nil}, {"private_route", route == id}})
+        end
+        if first and result[1] == true then
             local after = capture(world)
             local original = guest.before and guest.before.save_object
+            local known, original_address = pcall(address, original)
             guest.restore = {route = route == id and selected() == id, before = before, after = after,
-                original_save = address(original)}
+                original_save = known and original_address or 0,
+                released_reference = retained == 1 and references(world, guest.view) == 0}
         end
-        return accepted
+        return table.unpack(result, 1, result.n)
     end
 
     SilverfishReleaseNativeSaveScope = function(id)
@@ -456,7 +556,7 @@ local function install_lifecycle_witness()
             local after = capture(world)
             finished.continued = {accepted = accepted == true and route == nil and selected() == nil,
                 cached = after and after.slot == "" and after.listed == true and after.save ~= 0
-                    and after.save_class == "BlueprintGeneratedClass " .. save_path}
+                    and after.save_class == save_type}
         end
         return accepted, reason
     end
@@ -482,17 +582,32 @@ local function install_lifecycle_witness()
                 restored_travel = travel and before.travel == 0 and after.travel ~= 0
             end
         end
-        local stale = restore(world, id) ~= true and release(id) ~= true and selected() == nil
+        local stale = restore(world, id) ~= true and release(id) ~= true and prepare(world, id) == nil
+            and rebind(world, id) ~= true and selected() == nil
         local function bit(value) return value and "1" or "0" end
         return table.concat({guest and "guest" or "host", bit(guest and guest.installed),
             bit(guest and guest.restore and guest.restore.route), bit(save), bit(slot), bit(autosave), bit(travel),
             bit(guest and guest.travel_before ~= nil), bit(restored_save), bit(restored_slot), bit(restored_travel),
             bit(finished.released), bit(finished.continued.accepted),
-            bit(finished.continued.cached), bit(stale)}, ":")
+            bit(finished.continued.cached), bit(stale), bit(guest and guest.allocated_in_title),
+            bit(guest and guest.solo_distinct), bit(guest and guest.same_view),
+            bit(guest and guest.observatory and guest.crossroads and guest.observatory ~= guest.crossroads),
+            bit(guest and guest.retained_at_title and guest.retained_in_observatory and guest.retained_in_crossroads),
+            bit(guest and guest.restore and guest.restore.released_reference),
+            tostring(guest and guest.allocations or 0), tostring(guest and guest.preparations or 0),
+            tostring(guest and guest.rebindings or 0)}, ":")
     end
 end
 
 if grouped then
+    function SilverfishRecordSameProcessSaveCommandFailure(command, id, map, phase, message)
+        local kind = command == "join" and "join-command"
+            or command == "native-save-scope-release" and "release-command"
+        if kind then
+            save_lifecycle_failure(kind, {{"id", id}, {"map", map}, {"phase", phase}, {"message", message}})
+        end
+    end
+
     install_lifecycle_witness()
     function SilverfishStartSameProcessSaveProof(request, first, second, expected_profile)
         local function token(value)

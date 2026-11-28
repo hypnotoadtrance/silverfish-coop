@@ -166,45 +166,51 @@ namespace
         }
     };
 
-    std::optional<GuestFields> guest_fields(U::UWorld* world)
+    std::optional<GuestFields> guest_fields(U::UWorld* world, std::string_view* reason = nullptr)
     {
-        if (!U::UnrealInitializer::ShouldUseHashTables() || !live(world)) return {};
+        const auto refuse = [reason](std::string_view error) -> std::optional<GuestFields> {
+            if (reason) *reason = error;
+            return {};
+        };
+        if (!U::UnrealInitializer::ShouldUseHashTables() || !live(world)) return refuse("guest_save_world_unavailable");
         static U::FWeakObjectPtr world_type, instance_type, save_type, local_type, viewport_type;
-        if (world->GetClassPrivate() != loaded_class(world_type, STR("/Script/Engine.World"))) return {};
+        if (world->GetClassPrivate() != loaded_class(world_type, STR("/Script/Engine.World"))) return refuse("guest_save_world_class");
         auto* instance = object(world, STR("OwningGameInstance"));
         if (!live(instance) || instance->GetClassPrivate() != loaded_class(instance_type,
-            STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C"))) return {};
+            STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C"))) return refuse("guest_save_game_instance");
 
         auto* local_players = field<U::FArrayProperty>(instance, STR("LocalPlayers"));
         auto* entry = local_players ? U::CastField<U::FObjectProperty>(local_players->GetInner()) : nullptr;
-        if (!entry || entry->GetArrayDim() != 1) return {};
+        if (!entry || entry->GetArrayDim() != 1) return refuse("guest_save_local_player_schema");
         U::FScriptArrayHelper players(local_players, local_players->ContainerPtrToValuePtr<void>(instance));
-        if (players.Num() != 1) return {};
+        if (players.Num() != 1) return refuse("guest_save_local_player_count");
         auto* local = entry->GetObjectPropertyValue(players.GetRawPtr(0));
         auto* local_class = loaded_class(local_type, STR("/Script/Engine.LocalPlayer"));
         auto* viewport = live(local) && local_class && local->IsA(local_class) ? object(local, STR("ViewportClient")) : nullptr;
         if (!live(viewport) || viewport->GetClassPrivate() != loaded_class(viewport_type, STR("/Script/Engine.GameViewportClient")) ||
             viewport->GetOuterPrivate() != instance->GetOuterPrivate() || object(viewport, STR("World")) != world ||
-            object(viewport, STR("GameInstance")) != instance) return {};
+            object(viewport, STR("GameInstance")) != instance) return refuse("guest_save_current_viewport");
 
         auto* driver_field = field<U::FObjectProperty>(world, STR("NetDriver"));
-        if (!driver_field) return {};
+        if (!driver_field) return refuse("guest_save_net_driver_schema");
         auto* driver = driver_field->GetObjectPropertyValue(driver_field->ContainerPtrToValuePtr<void>(world));
         const bool at_title = world->GetPathName() == STR("/Game/Classes/Maps/MainMenu_P.MainMenu_P");
         if (at_title ? driver != nullptr : !live(driver) || object(driver, STR("World")) != world ||
-            !live(object(driver, STR("ServerConnection")))) return {};
+            !live(object(driver, STR("ServerConnection")))) return refuse("guest_save_net_driver_scope");
 
         auto* save_class = loaded_class(save_type, STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"));
         auto* save = field<U::FObjectProperty>(instance, STR("SaveSlot_Ref"));
         auto* slot = field<U::FStrProperty>(instance, STR("CurrentSaveSlot"));
         auto* autosave = field<U::FBoolProperty>(instance, STR("SaveAfterTransition"));
         auto* step = field<U::FDoubleProperty>(instance, STR("Travel_TimeStep"));
-        if (!save_class || !save || save->GetPropertyClass().Get() != save_class || !slot || !autosave) return {};
+        if (!save_class || !save || save->GetPropertyClass().Get() != save_class || !slot || !autosave)
+            return refuse("guest_save_view_schema");
         return GuestFields{instance, save_class, save, slot, autosave, step, at_title};
     }
 
-    U::UObject* create_guest_save(U::UClass* save_class)
+    U::UObject* create_guest_save(U::UClass* save_class, std::string_view& reason)
     {
+        const auto refuse = [&reason](std::string_view error) -> U::UObject* { reason = error; return nullptr; };
         static U::FWeakObjectPtr receiver_cache, function_cache, save_type;
         const auto resolve = [](U::FWeakObjectPtr& cache, const U::TCHAR* path) {
             if (auto* value = cache.Get()) return value;
@@ -218,18 +224,22 @@ namespace
         auto* input = field<U::FClassProperty>(function, STR("SaveGameClass"));
         auto* output = field<U::FObjectProperty>(function, STR("ReturnValue"));
         struct Arguments { U::UClass* type; U::UObject* result{}; } args{save_class};
-        if (!receiver || !receiver->HasAnyFlags(U::RF_ClassDefaultObject) || !function || !base || !save_class->IsChildOf(base) ||
-            function->GetOuterPrivate() != receiver->GetClassPrivate() ||
-            !function->HasAllFunctionFlags(U::FUNC_Native | U::FUNC_Static) || function->GetNumParms() != 2 ||
-            function->GetParmsSize() != sizeof(Arguments) || !input || !input->HasAnyPropertyFlags(U::CPF_Parm) ||
-            input->GetSize() != sizeof(args.type) || input->GetOffset_Internal() != offsetof(Arguments, type) ||
-            input->GetMetaClass().Get() != base || !output || output != function->GetReturnProperty() ||
-            output->GetSize() != sizeof(args.result) || output->GetOffset_Internal() != offsetof(Arguments, result) ||
-            output->GetPropertyClass().Get() != base) return nullptr;
+        if (!receiver || !receiver->HasAnyFlags(U::RF_ClassDefaultObject) || !function ||
+            function->GetOuterPrivate() != receiver->GetClassPrivate()) return refuse("guest_save_factory_owner");
+        if (!base || !save_class->IsChildOf(base)) return refuse("guest_save_factory_base_class");
+        if (!function->HasAllFunctionFlags(U::FUNC_Native | U::FUNC_Static) || function->GetNumParms() != 2 ||
+            function->GetParmsSize() != sizeof(Arguments)) return refuse("guest_save_factory_signature");
+        if (!input || !input->HasAnyPropertyFlags(U::CPF_Parm) || input->GetSize() != sizeof(args.type) ||
+            input->GetOffset_Internal() != offsetof(Arguments, type)) return refuse("guest_save_factory_input");
+        if (input->GetMetaClass().Get() != base) return refuse("guest_save_factory_input_class");
+        if (!output || output != function->GetReturnProperty() || output->GetSize() != sizeof(args.result) ||
+            output->GetOffset_Internal() != offsetof(Arguments, result)) return refuse("guest_save_factory_output");
+        if (output->GetPropertyClass().Get() != base) return refuse("guest_save_factory_output_class");
         receiver->ProcessEvent(function, &args);
-        auto* outer = live(args.result) ? args.result->GetOuterPrivate() : nullptr;
-        return live(outer) && outer->GetPathName() == STR("/Engine/Transient") &&
-            args.result->GetClassPrivate() == save_class ? args.result : nullptr;
+        if (!live(args.result) || args.result->GetClassPrivate() != save_class) return refuse("guest_save_factory_result");
+        auto* outer = args.result->GetOuterPrivate();
+        if (!live(outer) || outer->GetPathName() != STR("/Engine/Transient")) return refuse("guest_save_factory_result_outer");
+        return args.result;
     }
 
     U::FArrayProperty* save_references(U::UObject* instance)
@@ -292,16 +302,22 @@ namespace
         return fields.installed(save, guest->slot) ? save : nullptr;
     }
 
-    U::UObject* prepare_guest(U::UWorld* world, std::string_view id)
+    U::UObject* prepare_guest(U::UWorld* world, std::string_view id, std::string_view& reason)
     {
-        const auto fields = guest_fields(world);
+        const auto refuse = [&reason](std::string_view error) -> U::UObject* { reason = error; return nullptr; };
+        const auto fields = guest_fields(world, &reason);
         if (!fields) return nullptr;
         std::shared_ptr<const Route> lease;
         {
             std::scoped_lock lock{lifecycle};
-            if (!selected || selected->id != id || creating_guest || guest_restored) return nullptr;
-            if (guest) return install_guest(*fields);
-            if (!fields->at_title || !save_references(fields->instance)) return nullptr;
+            if (!selected || selected->id != id || creating_guest || guest_restored) return refuse("guest_save_route_unavailable");
+            if (guest)
+            {
+                auto* save = install_guest(*fields);
+                return save ? save : refuse("guest_save_reinstall");
+            }
+            if (!fields->at_title) return refuse("guest_save_prepare_title_required");
+            if (!save_references(fields->instance)) return refuse("guest_save_reference_schema");
             lease = selected;
             creating_guest = true;
         }
@@ -317,19 +333,22 @@ namespace
         // Release the lifecycle lock while the engine executes the reflected
         // constructor. Recheck the route and live objects before installing.
         U::FWeakObjectPtr owning_world{world}, owning_instance{fields->instance};
-        auto* save = create_guest_save(fields->save_class);
-        const auto current = guest_fields(U::Cast<U::UWorld>(owning_world.Get()));
-        if (!save || !current || !current->at_title || current->instance != owning_instance.Get() ||
-            current->save_class != fields->save_class) return nullptr;
+        auto* save = create_guest_save(fields->save_class, reason);
+        if (!save) return nullptr;
+        const auto current = guest_fields(U::Cast<U::UWorld>(owning_world.Get()), &reason);
+        if (!current) return nullptr;
+        if (!current->at_title || current->instance != owning_instance.Get() || current->save_class != fields->save_class)
+            return refuse("guest_save_factory_changed_world");
 
         std::scoped_lock lock{lifecycle};
-        if (selected != lease || guest || !live(save) || current->current_save() == save) return nullptr;
+        if (selected != lease || guest || !live(save) || current->current_save() == save)
+            return refuse("guest_save_factory_changed_scope");
         auto* previous = current->current_save();
         GuestView snapshot{current->instance, save, live(previous) ? previous : nullptr,
             L"SFCoopGuest_" + RC::to_wstring(id), std::wstring{current->current_slot()}, current->current_autosave()};
-        if (!reference_guest(current->instance, save, true)) return nullptr;
+        if (!reference_guest(current->instance, save, true)) return refuse("guest_save_reference_readback");
         guest.emplace(std::move(snapshot));
-        return install_guest(*current);
+        return install_guest(*current) ? save : refuse("guest_save_install_readback");
     }
 
     bool remember_travel_step(const GuestFields& fields, U::UObject* save, std::string_view id, double step)
@@ -343,13 +362,15 @@ namespace
         return true;
     }
 
-    bool restore_guest(const GuestFields& fields, std::string_view id)
+    bool restore_guest(const GuestFields& fields, std::string_view id, std::string_view& reason)
     {
-        if (!fields.at_title) return false;
+        const auto refuse = [&reason](std::string_view error) { reason = error; return false; };
+        if (!fields.at_title) return refuse("guest_save_restore_title_required");
         std::scoped_lock lock{lifecycle};
-        if (!selected || selected->id != id) return false;
+        if (!selected || selected->id != id) return refuse("guest_save_route_unavailable");
         if (!guest) return true;
-        if (guest->instance.Get() != fields.instance || (guest->previous_travel_step && !fields.travel_step)) return false;
+        if (guest->instance.Get() != fields.instance) return refuse("guest_save_restore_instance");
+        if (guest->previous_travel_step && !fields.travel_step) return refuse("guest_save_travel_schema");
 
         auto* save = guest->save.Get();
         auto* previous = guest->previous_save.Get();
@@ -366,8 +387,8 @@ namespace
         if ((restore_slot && fields.current_slot() != guest->previous_slot) ||
             (restore_save && fields.current_save() != previous) || fields.current_autosave() != guest->previous_autosave ||
             (restore_travel && fields.travel_step->GetPropertyValueInContainer(fields.instance) != *guest->previous_travel_step))
-            return false;
-        if (!reference_guest(fields.instance, save, false)) return false;
+            return refuse("guest_save_restore_readback");
+        if (!reference_guest(fields.instance, save, false)) return refuse("guest_save_reference_release");
         guest.reset();
         guest_restored = true;
         return true;
@@ -529,8 +550,14 @@ namespace
         if (!U::IsInGameThreadRaw()) return 0;
         auto* stack = lua.get_lua_state();
         const auto id = stack_id(stack, 2, 2);
-        auto* save = scope_id(id) ? prepare_guest(wrapped<RC::LuaType::UWorld>(lua, 1, "UWorld"), id) : nullptr;
-        if (!save) return 0;
+        std::string_view reason = "guest_save_invalid_scope_id";
+        auto* save = scope_id(id) ? prepare_guest(wrapped<RC::LuaType::UWorld>(lua, 1, "UWorld"), id, reason) : nullptr;
+        if (!save)
+        {
+            lua_pushnil(stack);
+            lua_pushlstring(stack, reason.data(), reason.size());
+            return 2;
+        }
         RC::LuaType::auto_construct_object(lua, save);
         return 1;
     }
@@ -575,9 +602,13 @@ namespace
         if (!U::IsInGameThreadRaw()) return 0;
         auto* stack = lua.get_lua_state();
         const auto id = stack_id(stack, 2, 2);
-        const auto fields = scope_id(id) ? guest_fields(wrapped<RC::LuaType::UWorld>(lua, 1, "UWorld")) : std::nullopt;
-        lua_pushboolean(stack, fields && restore_guest(*fields, id));
-        return 1;
+        std::string_view reason = "guest_save_invalid_scope_id";
+        const auto fields = scope_id(id) ? guest_fields(wrapped<RC::LuaType::UWorld>(lua, 1, "UWorld"), &reason) : std::nullopt;
+        const bool restored = fields && restore_guest(*fields, id, reason);
+        lua_pushboolean(stack, restored);
+        if (restored) return 1;
+        lua_pushlstring(stack, reason.data(), reason.size());
+        return 2;
     }
 
     int push_text(lua_State* stack, std::string_view result)

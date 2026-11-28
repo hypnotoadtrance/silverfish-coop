@@ -78,8 +78,22 @@ def same_process_save_overlay(source: str) -> str:
     end
 
 '''
+    dispatch = """            accepted, message = pcall(run_command, fields, state, current_phase)
+        end
+        acknowledged_id = fields[1]
+"""
+    diagnostic = """            accepted, message = pcall(run_command, fields, state, current_phase)
+            if not accepted and type(SilverfishRecordSameProcessSaveCommandFailure) == "function" then
+                SilverfishRecordSameProcessSaveCommandFailure(fields[2], fields[1], state.map, current_phase, message)
+            end
+        end
+        acknowledged_id = fields[1]
+"""
+    if source.count(dispatch) != 1:
+        raise ValueError("The private save lifecycle command dispatch anchor changed")
     fixture = Path(__file__).with_name("fixtures").joinpath("same_process_save.lua").read_text(encoding="utf-8")
-    return source.replace(anchor, action + anchor) + "\n;(function()\n" + fixture + "\nend)()\n"
+    source = source.replace(anchor, action + anchor).replace(dispatch, diagnostic)
+    return source + "\n;(function()\n" + fixture + "\nend)()\n"
 
 
 async def _wait_proof(proc, case):
@@ -113,23 +127,32 @@ def _proof_hashes(case):
 
 
 async def verify_installed_save_lifecycle(host, guest, session) -> dict:
-    """Check ordinary native scope release and stock Continue on both portable seats."""
+    """Check native guest allocation, travel, scope release and stock Continue."""
     keys = ("guest_view_installed", "guest_restored_while_scoped", "save", "slot", "autosave",
             "travel_step", "travel_step_remembered", "previous_save_rebound", "previous_slot_rebound",
             "previous_travel_rebound", "scope_released", "native_continue", "continue_cache", "stale_scope_refused")
+
+    allocation_keys = ("allocated_at_stock_title", "distinct_from_solo_save", "same_guest_save",
+                       "same_save_in_observatory_and_crossroads", "retained_through_travel",
+                       "reference_removed_before_scope_release")
 
     async def verify_seat(seat, role, identifier, pid):
         assert seat.bridge.process.pid == pid
         scope = uuid.UUID(identifier).hex
         response = await seat.bridge.command("native-save-lifecycle-proof", scope)
-        observed_role, *flags = response["ack"]["message"].split(":")
+        observed_role, *flags, allocations, preparations, rebindings = response["ack"]["message"].split(":")
         assert observed_role == role and all(flag in {"0", "1"} for flag in flags), response["ack"]
-        report = dict(zip(keys, (flag == "1" for flag in flags), strict=True))
+        report = dict(zip((*keys, *allocation_keys), (flag == "1" for flag in flags), strict=True))
+        report.update(stock_save_allocations=int(allocations), native_preparations=int(preparations),
+                      native_rebindings=int(rebindings))
         assert all(report[key] for key in keys[-4:]), report
         if role == "guest":
-            assert all(report[key] for key in keys[:6]), report
+            assert all(report[key] for key in (*keys[:6], *allocation_keys)), report
+            assert report["stock_save_allocations"] == 1 and report["native_preparations"] >= 1, report
+            assert report["native_rebindings"] >= 2, report
         else:
-            assert not any(report[key] for key in keys[:-4]), report
+            assert not any(report[key] for key in (*keys[:-4], *allocation_keys)), report
+            assert report["stock_save_allocations"] == report["native_preparations"] == report["native_rebindings"] == 0, report
         cache = await seat.bridge.command("native-title-stock-profile-fixture", "cache")
         assert cache["ack"]["message"], cache["ack"]
         return {"pid": pid, "scope_id": scope, "stock_profile_cache": cache["ack"]["message"], **report}

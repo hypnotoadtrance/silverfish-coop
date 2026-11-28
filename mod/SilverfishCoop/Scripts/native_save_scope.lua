@@ -29,8 +29,9 @@ end
 
 local function prepare_native_guest(world)
     local prepare = SilverfishPrepareNativeGuestSaveView
-    local save = type(prepare) == "function" and prepare(world, active.id)
-    if not valid(save) then error("The game did not retain the isolated co-op guest view", 0) end
+    local save, reason
+    if type(prepare) == "function" then save, reason = prepare(world, active.id) end
+    if not valid(save) then error(reason or "The game did not retain the isolated co-op guest view", 0) end
     local guest = active.guest
     if guest then
         if not same(guest.save, save) then error("The isolated co-op guest view changed identity", 0) end
@@ -273,8 +274,9 @@ function scope.release(id, world)
     end
     local guest = active.guest
     if active.native then
-        if (guest or valid(world)) and SilverfishRestoreNativeGuestSaveView(world, id) ~= true then
-            error("The isolated co-op guest view could not be restored", 0)
+        if guest or valid(world) then
+            local restored, reason = SilverfishRestoreNativeGuestSaveView(world, id)
+            if restored ~= true then error(reason or "The isolated co-op guest view could not be restored", 0) end
         end
     elseif guest and valid(guest.instance) then
         local instance = guest.instance
