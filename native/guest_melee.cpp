@@ -59,6 +59,7 @@ namespace
     constexpr auto sequence_path = STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Assets/MeleWep_Anim/Melee_Slash_01.Melee_Slash_01");
     constexpr auto attack_path = STR("/Game/Classes/Libraries/Structs/MeleeAttack_Struct.MeleeAttack_Struct");
     constexpr auto damage_type_path = STR("/Game/Classes/Libraries/Structs/Damage_Struct.Damage_Struct");
+    constexpr auto damage_calc = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_GameEffects.FL_GameEffects_C:MeleeDmgCalc");
     constexpr auto row_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto character_path = STR("/Game/Classes/Libraries/Structs/PlayerCharacter_Struct.PlayerCharacter_Struct");
     constexpr auto item_base = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
@@ -69,6 +70,20 @@ namespace
     constexpr auto radius_name = STR("Radius_9_4CAB95D84DE379A3C49DFD9CE1A93643");
     constexpr auto damage_name = STR("Damage_14_3B344B294DE0247300DB6F9513CDE617");
     constexpr auto blunt_name = STR("BluntForce_6_6923B3964740DE281BD773BCCAAC2772");
+    constexpr auto knockback_name = STR("Knockback_13_04A798E74D2CC4ACD0DFFCA34FEEACFE");
+    constexpr std::array damage_channels{
+        STR("Kenetic_2_47ECE93447043FC41017B8B98F2C7DE5"),
+        STR("ArmorPenitration_4_E48DD35840D3699D8F37E48678EF29E4"),
+        blunt_name,
+        STR("Stabbing_8_64710D2D4AB4232B4DD604AC3CD0219C"),
+        STR("Slashing_10_58FFFE444BD41CE5D15EAA80BC0D9DF1"),
+        STR("Fire_12_2B415A724C533C075B6BB390B76BF247"),
+        STR("Poison_14_68E96E324AD705A7F95362BBC781E220"),
+        STR("Electric_16_8F945E8C491C5825EC19E3837E266D48"),
+        STR("Radiation_18_E8FC71B2490E3C6050B6E999C65A13CB"),
+        STR("Acid_20_F4C551B34F620FDF72D2F2A64DE15F3E"),
+        STR("OverPressure_22_3355FA8E45511902B20DD69D844D5020"),
+    };
     constexpr auto breach_name = STR("Breach_21_E0B1E3A34ACBB341494DE885CECBF89B");
     constexpr auto attack_timeout = std::chrono::milliseconds{2500};
     constexpr auto hold_timeout = std::chrono::seconds{9};
@@ -654,6 +669,17 @@ namespace
     struct PipeFence { U::FWeakObjectPtr pipe, contact; };
     std::vector<PipeFence> fenced_pipes;
 
+    using DamageChannels = std::array<double, damage_channels.size()>;
+
+    struct GuestMeleeContact
+    {
+        std::string identity, component;
+        Vector offset{}, direction{};
+        DamageChannels damage{};
+        double knockback{};
+        bool breach{};
+    };
+
     struct GuestContactProbe
     {
         U::FWeakObjectPtr pawn, weapon;
@@ -662,6 +688,7 @@ namespace
         std::string identity;
         std::string_view status{"awaiting_contact"};
         std::optional<TraceProof> trace;
+        std::optional<GuestMeleeContact> contact;
     };
 
     GuestContactProbe guest_contact_probe;
@@ -1211,6 +1238,72 @@ namespace
         ++swing.qualified;
     }
 
+    struct DamageFields
+    {
+        U::UScriptStruct* type = find<U::UScriptStruct>(damage_type_path);
+        std::array<U::FDoubleProperty*, damage_channels.size()> field_by_channel{};
+
+        DamageFields()
+        {
+            for (std::size_t i = 0; i < damage_channels.size(); ++i)
+                field_by_channel[i] = field<U::FDoubleProperty>(type, damage_channels[i]);
+        }
+
+        bool matches(U::FStructProperty* property) const
+        {
+            return type && property && property->GetStruct().Get() == type && property->GetSize() == sizeof(DamageChannels) &&
+                std::ranges::none_of(field_by_channel, [](auto* channel) { return channel == nullptr; });
+        }
+    };
+
+    std::optional<GuestMeleeContact> guest_stock_damage(U::UObject* pawn, U::UObject* weapon,
+        U::FFrame& frame, const TraceProof& trace, std::string identity)
+    {
+        auto* receiver = trace.first->GetOuterPrivate();
+        const auto center = enemy_origin(receiver);
+        auto* library = find<U::UObject>(effects_default);
+        auto* function = find<U::UFunction>(damage_calc);
+        auto* attack_value = parameter<U::FStructProperty>(frame.Node(), STR("Attack"));
+        auto* attack = find<U::UScriptStruct>(attack_path);
+        auto* damage = field<U::FStructProperty>(attack, damage_name);
+        auto* knockback = field<U::FDoubleProperty>(attack, knockback_name);
+        auto* breach = field<U::FBoolProperty>(attack, breach_name);
+        auto* input = parameter<U::FStructProperty>(function, STR("Damage_Input"));
+        auto* output = parameter<U::FStructProperty>(function, STR("Damage_Output"));
+        auto* instigator = parameter<U::FObjectProperty>(function, STR("Instigator"));
+        auto* context = parameter<U::FObjectProperty>(function, STR("__WorldContext"));
+        const DamageFields fields;
+        if (!center || !library || !function || !library->HasAnyFlags(U::RF_ClassDefaultObject) ||
+            function->GetOuterPrivate() != library->GetClassPrivate() || function->GetNumParms() != 4 ||
+            function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) || function->GetReturnProperty() ||
+            function->GetParmsSize() > sizeof(TraceBuffer::values) || !output ||
+            !output->HasAnyPropertyFlags(U::CPF_OutParm) || !fields.matches(input) ||
+            !fields.matches(output) || !fields.matches(damage) || !instigator || !context ||
+            !attack_value || attack_value->GetStruct().Get() != attack || !knockback || !breach) return {};
+
+        TraceBuffer args;
+        auto* storage = args.values.data();
+        args.initialize(input);
+        args.initialize(output);
+        const auto* row = attack_value->ContainerPtrToValuePtr<void>(frame.Locals());
+        input->CopyCompleteValue(input->ContainerPtrToValuePtr<void>(storage), damage->ContainerPtrToValuePtr<void>(row));
+        instigator->SetObjectPropertyValue(instigator->ContainerPtrToValuePtr<void>(storage), pawn);
+        context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(storage), weapon);
+        library->ProcessEvent(function, storage);
+
+        GuestMeleeContact report;
+        report.identity = std::move(identity);
+        report.component = RC::to_utf8_string(trace.first->GetFName().ToString());
+        report.direction = trace.direction;
+        for (std::size_t i = 0; i < report.offset.size(); ++i) report.offset[i] = trace.impact[i] - (*center)[i];
+        report.knockback = knockback->GetPropertyValueInContainer(row);
+        report.breach = breach->GetPropertyValueInContainer(row);
+        const auto* result = output->ContainerPtrToValuePtr<void>(storage);
+        for (std::size_t i = 0; i < report.damage.size(); ++i)
+            report.damage[i] = fields.field_by_channel[i]->GetPropertyValueInContainer(result);
+        return report;
+    }
+
     // Read the authored animation's Contact on the owning client. Probe mode
     // retains the fence so the isolated guest cannot mutate the replica.
     void sample_guest_contact(U::UObject* weapon, U::FFrame& frame)
@@ -1230,6 +1323,7 @@ namespace
         ++probe.sequence;
         probe.identity.clear();
         probe.trace.reset();
+        probe.contact.reset();
         Swing attack;
         attack.mode = SwingMode::ordinary;
         attack.input.active = true;
@@ -1250,6 +1344,8 @@ namespace
             probe.status = "contact_identity_unavailable";
             return;
         }
+        if (auto* receiver = selected->first->GetOuterPrivate(); field<U::FBoolProperty>(receiver, STR("Alive")))
+            probe.contact = guest_stock_damage(pawn, weapon, frame, *selected, probe.identity);
         // The reflected component is only valid in this call.
         selected->first = nullptr;
         probe.trace = std::move(selected);
@@ -1772,6 +1868,162 @@ namespace
         return 13;
     }
 
+    int read_guest_melee_result(const Lua& lua)
+    {
+        if (!U::IsInGameThreadRaw() || !guest_contact_probe.contact) return 0;
+        const auto& report = *guest_contact_probe.contact;
+        lua.set_string(report.identity);
+        lua.set_string(report.component);
+        for (const auto& vector : {report.offset, report.direction})
+            for (double value : vector) lua.set_number(value);
+        lua.set_number(report.knockback);
+        lua.set_integer(report.breach ? 1 : 0);
+        for (double value : report.damage) lua.set_number(value);
+        return 10 + static_cast<int>(report.damage.size());
+    }
+
+    bool copy_reported_melee_hit(U::UObject* target, const GuestMeleeContact& report,
+                                U::FStructProperty* result, void* destination)
+    {
+        auto* component_type = find<U::UClass>(STR("/Script/Engine.PrimitiveComponent"));
+        const auto center = enemy_origin(target);
+        if (!component_type || !center) return false;
+        auto* trace = find<U::UFunction>(STR("/Script/Engine.PrimitiveComponent:K2_LineTraceComponent"));
+        auto* start = parameter<U::FStructProperty>(trace, STR("TraceStart"));
+        auto* end = parameter<U::FStructProperty>(trace, STR("TraceEnd"));
+        auto* hit = parameter<U::FStructProperty>(trace, STR("OutHit"));
+        auto* complex = parameter<U::FBoolProperty>(trace, STR("bTraceComplex"));
+        auto* found = parameter<U::FBoolProperty>(trace, STR("ReturnValue"));
+        const SweepHit fields;
+        if (!trace || trace->GetOuterPrivate() != component_type || !trace->HasAnyFunctionFlags(U::FUNC_Native) ||
+            trace->GetNumParms() != 10 || trace->GetParmsSize() > sizeof(TraceBuffer::values) ||
+            !vector_field(start) || !vector_field(end) || !hit || !fields.bound() ||
+            !hit->HasAnyPropertyFlags(U::CPF_OutParm) || hit->GetStruct().Get() != fields.type ||
+            result->GetStruct().Get() != fields.type || !complex || !found || trace->GetReturnProperty() != found)
+            return false;
+        const auto components = static_cast<U::AActor*>(target)->K2_GetComponentsByClass(component_type);
+        if (components.Num() <= 0 || components.Num() > 128) return false;
+        const auto name = RC::to_generic_string(report.component);
+        U::UObject* component{};
+        for (int i = 0; i < components.Num(); ++i)
+        {
+            auto* candidate = components[i];
+            if (!live(candidate) || candidate->GetOuterPrivate() != target || candidate->GetFName().ToString() != name) continue;
+            if (component) return false;
+            component = candidate;
+        }
+        if (!component) return false;
+
+        // Keep the same stock component for damage and resistance selection. A
+        // second trace against only that component rebuilds the local HitResult.
+        const Vector contact{(*center)[0] + report.offset[0], (*center)[1] + report.offset[1],
+            (*center)[2] + report.offset[2]};
+        const auto component_center = component_vector(component, STR("/Script/Engine.SceneComponent:K2_GetComponentLocation"));
+        for (const auto& anchor : {std::optional{contact}, component_center})
+        {
+            if (!anchor) continue;
+            for (const auto& direction : {report.direction, Vector{1, 0, 0}, Vector{0, 1, 0}})
+            {
+                TraceBuffer args;
+                args.initialize(hit);
+                auto* storage = args.values.data();
+                const auto from = ahead(*anchor, direction, -180.0);
+                const auto to = ahead(*anchor, direction, 180.0);
+                std::memcpy(start->ContainerPtrToValuePtr<void>(storage), from.data(), sizeof(Vector));
+                std::memcpy(end->ContainerPtrToValuePtr<void>(storage), to.data(), sizeof(Vector));
+                complex->SetPropertyValueInContainer(storage, false);
+                component->ProcessEvent(trace, storage);
+                const auto* row = hit->ContainerPtrToValuePtr<void>(storage);
+                if (!found->GetPropertyValueInContainer(storage) ||
+                    fields.component->GetPropertyValueInContainer(row).Get() != component) continue;
+                result->CopyCompleteValue(destination, row);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    int apply_reported_melee(const Lua& lua)
+    {
+        const auto reply = [&](std::string_view status) {
+            lua.set_string(status);
+            return 1;
+        };
+        if (!U::IsInGameThreadRaw() || lua.get_stack_size() != 23 || !lua.is_integer(1) ||
+            !lua.is_integer(2) || !lua.is_string(3) || !lua.is_string(4) || !lua.is_integer(12))
+            return reply("reported_contact_arguments");
+        const auto pawn_address = lua.get_integer();
+        const auto save_address = lua.get_integer();
+        GuestMeleeContact report;
+        report.identity = lua.get_string();
+        report.component = lua.get_string();
+        const auto read = [&](double& value, double limit) {
+            if (!lua.is_number()) return false;
+            value = lua.get_number();
+            return std::isfinite(value) && std::abs(value) <= limit;
+        };
+        for (auto& value : report.offset) if (!read(value, 1000.0)) return reply("reported_contact_point");
+        for (auto& value : report.direction) if (!read(value, 1.001)) return reply("reported_contact_direction");
+        if (std::abs(std::hypot(report.direction[0], report.direction[1], report.direction[2]) - 1.0) > 0.002 ||
+            !read(report.knockback, 100000.0)) return reply("reported_contact_force");
+        const auto breach = lua.get_integer();
+        if ((breach != 0 && breach != 1) || report.identity.size() > 256 || report.component.empty() ||
+            report.component.size() > 127) return reply("reported_contact_identity");
+        report.breach = breach == 1;
+        for (auto& value : report.damage) if (!read(value, 100000.0)) return reply("reported_contact_damage");
+
+        auto* pawn = pawn_at(pawn_address);
+        if (!pawn) return reply("reported_contact_guest");
+        auto* save = object(pawn, STR("Save"));
+        auto* game = object(pawn, STR("As Game Instance FP"));
+        auto* world = static_cast<U::AActor*>(pawn)->GetWorld();
+        if (reinterpret_cast<std::uintptr_t>(save) != static_cast<std::uintptr_t>(save_address) ||
+            !silverfish::native_guest_regen::qualifies_detached_guest(pawn, save, object(game, STR("SaveSlot_Ref"))) ||
+            !silverfish::native_guest_melee::ordinary_world(world)) return reply("reported_contact_guest");
+        auto* target = silverfish::native_guest_item::shared_npc_target(report.identity, world);
+        auto* base = find<U::UClass>(npc_class);
+        if (!base || !target || !target->IsA(base) || !combat_target(target, world, true, pawn))
+            return reply("reported_contact_target");
+        auto* call = combat_damage(target, false, false);
+        auto* damage = parameter<U::FStructProperty>(call, STR("Damage"));
+        auto* hit = parameter<U::FStructProperty>(call, STR("Hit"));
+        auto* force = parameter<U::FStructProperty>(call, STR("ImpactForce"));
+        auto* instigator = parameter<U::FObjectProperty>(call, STR("Instigator"));
+        auto* breacher = parameter<U::FBoolProperty>(call, STR("BreacherDmg"));
+        auto* total = parameter<U::FDoubleProperty>(call, STR("TotalDamage"));
+        auto* lethal = parameter<U::FBoolProperty>(call, STR("IsLethal"));
+        const DamageFields fields;
+        if (!call || call->GetParmsSize() > sizeof(TraceBuffer::values) || !fields.matches(damage) ||
+            !hit || !vector_field(force) || !instigator || !breacher || !total || !lethal ||
+            !total->HasAnyPropertyFlags(U::CPF_OutParm) || !lethal->HasAnyPropertyFlags(U::CPF_OutParm))
+            return reply("reported_contact_stock_damage_abi");
+
+        TraceBuffer args;
+        args.initialize(damage);
+        args.initialize(hit);
+        auto* storage = args.values.data();
+        if (!copy_reported_melee_hit(target, report, hit, hit->ContainerPtrToValuePtr<void>(storage)))
+            return reply("reported_contact_component");
+        auto* channels = damage->ContainerPtrToValuePtr<void>(storage);
+        for (std::size_t i = 0; i < report.damage.size(); ++i)
+            fields.field_by_channel[i]->SetPropertyValueInContainer(channels, report.damage[i]);
+        Vector impulse{};
+        for (std::size_t i = 0; i < impulse.size(); ++i) impulse[i] = report.direction[i] * report.knockback;
+        std::memcpy(force->ContainerPtrToValuePtr<void>(storage), impulse.data(), sizeof(Vector));
+        instigator->SetObjectPropertyValue(instigator->ContainerPtrToValuePtr<void>(storage), pawn);
+        breacher->SetPropertyValueInContainer(storage, report.breach);
+        const U::FWeakObjectPtr lifetime{target};
+        const auto before = enemy_health(target);
+        target->ProcessEvent(call, storage);
+        auto* remaining = lifetime.Get();
+        lua.set_string("reported_contact_applied");
+        lua.set_number(before);
+        lua.set_number(live(remaining) ? enemy_health(remaining) : 0.0);
+        lua.set_number(total->GetPropertyValueInContainer(storage));
+        lua.set_bool(lethal->GetPropertyValueInContainer(storage));
+        return 5;
+    }
+
     int observe_fixture(const Lua& lua)
     {
         if (!fixture_enabled() || !U::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1) ||
@@ -1878,6 +2130,8 @@ void silverfish::native_guest_melee::register_lua(RC::LuaMadeSimple::Lua& lua)
     {
         lua.register_function("SilverfishArmGuestMeleeContactProbe", arm_guest_contact_probe);
         lua.register_function("SilverfishReadGuestMeleeContactProbe", read_guest_contact_probe);
+        lua.register_function("SilverfishReadGuestMeleeResult", read_guest_melee_result);
+        lua.register_function("SilverfishApplyGuestMeleeResult", apply_reported_melee);
         lua.register_function("SilverfishReadNativeGuestMeleeContactGeometry", [](const Lua& state) {
             if (!headless_contact || !headless_contact->origin || !headless_contact->direction) return 0;
             for (auto axis : *headless_contact->origin) state.set_number(axis);

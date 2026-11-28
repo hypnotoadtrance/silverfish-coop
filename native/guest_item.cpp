@@ -1601,9 +1601,10 @@ namespace
         return 0;
     }
 
-    Unreal::UObject* reported_npc(const ShotView& view, Unreal::UWorld* world)
+    Unreal::UObject* resolve_shared_npc(std::string_view identity, Unreal::UWorld* world)
     {
-        const auto number = contact_number(view.contact_actor);
+        if (!valid_contact_path(identity)) return nullptr;
+        const auto number = contact_number(identity);
         Unreal::UObject* target{};
         if (number)
         {
@@ -1620,7 +1621,7 @@ namespace
         }
         else
         {
-            const auto path = RC::to_generic_string(view.contact_actor);
+            const auto path = RC::to_generic_string(identity);
             auto* candidate = find<Unreal::UObject>(path.c_str());
             if (live(candidate) && candidate->GetPathName() == path &&
                 !silverfish::campaign_npc::is_spawned_stock_npc(candidate)) target = candidate;
@@ -1646,7 +1647,7 @@ namespace
         const auto axis = shot_axis(*view.muzzle, *view.target, view.direction);
         if (!(distance >= 1.0 && speed >= 1.0 && life > 0.0 && distance <= std::min(sight, speed * life)) ||
             squared_length(difference(ahead(*origin, axis, distance), *view.contact)) > 1.0) return {};
-        auto* target = reported_npc(view, projectile->GetWorld());
+        auto* target = resolve_shared_npc(view.contact_actor, projectile->GetWorld());
         if (!target) return {};
         return {Unreal::FWeakObjectPtr(projectile), Unreal::FWeakObjectPtr(target), axis};
     }
@@ -4987,6 +4988,11 @@ std::string silverfish::native_guest_item::local_equipped_identity(Unreal::UObje
     if (inventory.row_class(row) != receiver->GetClassPrivate()) return {};
     const auto guid = inventory.identity(row);
     return guid != Guid{} ? std::format("{:08X}{:08X}{:08X}{:08X}", guid[0], guid[1], guid[2], guid[3]) : std::string{};
+}
+
+Unreal::UObject* silverfish::native_guest_item::shared_npc_target(std::string_view identity, Unreal::UWorld* world)
+{
+    return resolve_shared_npc(identity, world);
 }
 
 std::string silverfish::native_guest_item::shared_contact_identity(Unreal::UObject* target)

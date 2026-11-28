@@ -2046,6 +2046,31 @@ local function run(action, actor_path)
         local target = melee_target(world, true)
         local key = valid(target) and require("native_npc_barter_identity").key(target)
         return key and ("npc:%d"):format(tonumber(key:sub(-4), 16)) or "waiting"
+    elseif action == "melee-contact-probe-health" then
+        assert(host, "the host holds the test NPC health")
+        local target = melee_target(world, true)
+        assert(valid(target) and target.Alive and target.Max_Health >= 100)
+        target.Health = 100
+        return "ready"
+    elseif action == "melee-contact-probe-result" then
+        assert(not host, "the damage result comes from the guest")
+        local row = {SilverfishReadGuestMeleeResult()}
+        for i, value in ipairs(row) do
+            row[i] = type(value) == "number" and ("%.7f"):format(value) or value
+        end
+        return #row > 0 and table.concat(row, ";") or "unavailable"
+    elseif action == "melee-contact-probe-apply" then
+        assert(host, "the host applies damage to the test NPC")
+        local attacker = authoritative_guest(world)
+        local payload = {}
+        for token in actor_path:gmatch("[^;]+") do
+            payload[#payload + 1] = #payload >= 2 and tonumber(token) or token
+        end
+        assert(#payload == 21, "unexpected contact result: " .. actor_path)
+        payload[10] = math.tointeger(payload[10])
+        local result = {SilverfishApplyGuestMeleeResult(attacker:GetAddress(), attacker.Save:GetAddress(), table.unpack(payload))}
+        for i, value in ipairs(result) do result[i] = tostring(value) end
+        return table.concat(result, ";")
     elseif action == "melee-contact-probe-read" then
         assert(not host, "the contact probe requires the owning guest")
         local row = {SilverfishReadGuestMeleeContactProbe()}

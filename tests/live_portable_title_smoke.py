@@ -1272,6 +1272,7 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
             try:
                 assert await command(guest, f"face-melee\t{center}") == "ready"
                 assert await command(guest, "melee-contact-probe-arm") == "armed"
+                assert await command(host, "melee-contact-probe-health") == "ready"
                 async with asyncio.timeout(5):
                     while (reference := await command(host, "melee-contact-probe-target")) == "waiting":
                         await asyncio.sleep(.05)
@@ -1284,10 +1285,20 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
                 assert host_contact["contacts"] == 1 and host_contact["hits"] == 0, (host_contact, local_contact)
                 assert (local_contact["serial"], local_contact["status"], local_contact.get("attack"),
                         local_contact.get("identity")) == (1, "ready", 0, reference), local_contact
-                assert (await command(host, f"melee-state\t{center}")).startswith("true;false;7.000;")
-                local_contact.update(host_hits=host_contact["hits"], expected_target=name, shared_target=reference)
+                assert (await command(host, f"melee-state\t{center}")).startswith("true;false;100.000;")
+                report = await command(guest, "melee-contact-probe-result")
+                assert report.startswith(reference + ";"), (report, local_contact)
+                applied = (await command(host, f"melee-contact-probe-apply\t{report}")).split(";")
+                assert len(applied) == 5 and applied[0] == "reported_contact_applied", (report, applied)
+                before, after, damage = map(float, applied[1:4])
+                assert before == 100 and 0 < after < before and math.isclose(before - after, damage, abs_tol=.001), applied
+                assert applied[4] == "false" and (await command(host, f"melee-state\t{center}")).startswith(f"true;false;{after:.3f};")
+                local_contact.update(host_hits=host_contact["hits"], expected_target=name, shared_target=reference,
+                                     reported_component=report.split(";")[1], health_before=before,
+                                     health_after=after, stock_damage=damage)
             finally:
                 await asyncio.gather(*(command(seat, "clear-melee-aim") for seat in (host, guest)))
+            center, name = (await command(host, f"stage-melee\t{attempt}")).split(";", 1)
         try:
             watching = await asyncio.gather(*(command(seat, "watch-melee-motion") for seat in (host, guest)))
             assert watching == ["watching", "watching"], watching
