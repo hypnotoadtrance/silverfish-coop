@@ -2306,17 +2306,20 @@ namespace
         return 1;
     }
 
+    Unreal::UObject* host_avatar_pawn(Address world_address, Address pawn_address)
+    {
+        if (!available() || !scope.host || world_address <= 0 || pawn_address <= 0 ||
+            address(scope.world.Get()) != world_address) return nullptr;
+        return address(scope.pawn.Get()) == pawn_address
+            ? silverfish::native_interaction_input::current_local_pawn(pawn_address)
+            : remote_avatar_pawn(world_address, pawn_address);
+    }
+
     int read_avatar_motion(const Lua& lua)
     {
         auto* stack = lua.get_lua_state();
-        if (!available() || !scope.host || lua_gettop(stack) != 2 ||
-            !lua_isinteger(stack, 1) || !lua_isinteger(stack, 2)) return 0;
-        const auto world_address = lua_tointeger(stack, 1);
-        const auto pawn_address = lua_tointeger(stack, 2);
-        if (address(scope.world.Get()) != world_address || world_address <= 0 || pawn_address <= 0) return 0;
-        auto* pawn = address(scope.pawn.Get()) == pawn_address
-            ? silverfish::native_interaction_input::current_local_pawn(pawn_address)
-            : remote_avatar_pawn(world_address, pawn_address);
+        if (lua_gettop(stack) != 2 || !lua_isinteger(stack, 1) || !lua_isinteger(stack, 2)) return 0;
+        auto* pawn = host_avatar_pawn(lua_tointeger(stack, 1), lua_tointeger(stack, 2));
         if (!pawn) return 0;
 
         struct MotionReader
@@ -2356,6 +2359,162 @@ namespace
         lua_pushboolean(stack, reader.sprinting->GetPropertyValueInContainer(pawn));
         lua_pushboolean(stack, speed[0] * speed[0] + speed[1] * speed[1] > 400.0);
         return 3;
+    }
+
+    struct AvatarAppearance
+    {
+        Unreal::FWeakObjectPtr save_class{}, character_type{}, color_type{};
+        Unreal::FStructProperty* character{};
+        std::array<Unreal::FObjectProperty*, 6> assets{};
+        std::array<Unreal::FStructProperty*, 3> colors{};
+        std::array<Unreal::FFloatProperty*, 4> channels{};
+        Unreal::FProperty* eye{};
+        Unreal::FNumericProperty* eye_storage{};
+        bool unsigned_eye{};
+        std::uint64_t bound_generation{};
+
+        static bool within(Unreal::FProperty* property, int size)
+        {
+            return property && property->GetArrayDim() == 1 && property->GetSize() > 0 &&
+                property->GetOffset_Internal() >= 0 && property->GetOffset_Internal() <= size - property->GetSize();
+        }
+
+        bool bind(Unreal::UClass* type)
+        {
+            auto* stock = find<Unreal::UClass>(STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"));
+            auto* appearance = find<Unreal::UScriptStruct>(
+                STR("/Game/Classes/Libraries/Structs/PlayerCharacter_Struct.PlayerCharacter_Struct"));
+            auto* linear_color = find<Unreal::UScriptStruct>(STR("/Script/CoreUObject.LinearColor"));
+            if (!stock || stock != type || !appearance || !linear_color) return false;
+            character = field<Unreal::FStructProperty>(stock, STR("Character"));
+            if (!within(character, stock->GetPropertiesSize()) || character->GetStruct().Get() != appearance) return false;
+            constexpr std::array asset_names{
+                STR("Mesh_Head_60_630BB776410363C64BE2C89A3F72B1C5"),
+                STR("Mesh_Plumage_80_4B6C3DD94D27DEC901D6829472D5F546"),
+                STR("Mesh_SK_Nude_63_AD8A03C54B40D56768EBA7AAA1E67E6D"),
+                STR("Mesh_Tail_SM_74_4FD875FB4D8D71A94E98888810B6EA64"),
+                STR("Mesh_Tail_SK_77_F2B7A1A441682020D88D3AA95D84A47E"),
+                STR("ScalePattern_89_1A2997C4406AB83801A3CAA377A49D3A"),
+            };
+            auto* mesh = find<Unreal::UClass>(STR("/Script/Engine.StaticMesh"));
+            auto* skeletal = find<Unreal::UClass>(STR("/Script/Engine.SkeletalMesh"));
+            auto* texture = find<Unreal::UClass>(STR("/Script/Engine.Texture2D"));
+            if (!mesh || !skeletal || !texture) return false;
+            const std::array asset_classes{mesh, mesh, skeletal, mesh, skeletal, texture};
+            for (std::size_t i = 0; i < asset_names.size(); ++i)
+            {
+                auto* property = field<Unreal::FObjectProperty>(appearance, asset_names[i]);
+                if (!within(property, character->GetSize()) || property->GetPropertyClass().Get() != asset_classes[i])
+                    return false;
+                assets[i] = property;
+            }
+            constexpr std::array color_names{
+                STR("Color_Skin_53_0B756DAC41D1CF33A2BB2480770F4445"),
+                STR("Color_Plumage_57_ACF2841E464A4898A5B12393FB251ADD"),
+                STR("Color_Eyes_55_02AD749F4DFCA95AC2AF72B4F045099B"),
+            };
+            constexpr std::array channel_names{STR("R"), STR("G"), STR("B"), STR("A")};
+            for (std::size_t i = 0; i < color_names.size(); ++i)
+            {
+                auto* property = field<Unreal::FStructProperty>(appearance, color_names[i]);
+                if (!within(property, character->GetSize()) || property->GetStruct().Get() != linear_color ||
+                    property->GetSize() != sizeof(float) * channels.size()) return false;
+                colors[i] = property;
+            }
+            for (std::size_t i = 0; i < channel_names.size(); ++i)
+            {
+                auto* property = field<Unreal::FFloatProperty>(linear_color, channel_names[i]);
+                if (!within(property, colors.front()->GetSize()) || property->GetSize() != sizeof(float) ||
+                    property->GetOffset_Internal() != static_cast<int>(i * sizeof(float))) return false;
+                channels[i] = property;
+            }
+            eye = field<Unreal::FProperty>(appearance, STR("EyeType_83_470E782541AF25166B548AA28A834625"));
+            if (!within(eye, character->GetSize())) return false;
+            auto* enumeration = Unreal::CastField<Unreal::FEnumProperty>(eye);
+            eye_storage = enumeration ? enumeration->GetUnderlyingProperty() : Unreal::CastField<Unreal::FNumericProperty>(eye);
+            if (!eye_storage || !eye_storage->IsInteger() || eye_storage->GetArrayDim() != 1 ||
+                eye_storage->GetSize() != eye->GetSize() || eye->GetSize() > sizeof(std::int32_t)) return false;
+            constexpr auto unsigned_types = Unreal::CASTCLASS_FByteProperty | Unreal::CASTCLASS_FUInt16Property |
+                                            Unreal::CASTCLASS_FUInt32Property;
+            unsigned_eye = (eye_storage->GetClass().GetClassCastFlags() & unsigned_types) != 0;
+            character_type = appearance;
+            color_type = linear_color;
+            return true;
+        }
+    };
+
+    int avatar_appearance_matches(const Lua& lua)
+    {
+        auto* stack = lua.get_lua_state();
+        constexpr int sample_index = 4;
+        if (lua_gettop(stack) != sample_index || !lua_isinteger(stack, 1) || !lua_isinteger(stack, 2) ||
+            !lua_isinteger(stack, 3) || !lua_istable(stack, sample_index) || !lua_checkstack(stack, 3)) return 0;
+        auto* pawn = host_avatar_pawn(lua_tointeger(stack, 1), lua_tointeger(stack, 2));
+        auto* host = scope.pawn.Get();
+        auto* instance = scope.instance.Get();
+        if (!pawn || !live(host) || !live(instance) || object_field(scope.world.Get(), STR("OwningGameInstance")) != instance)
+            return 0;
+        auto* save = object_field(pawn, STR("Save"));
+        auto* canonical = object_field(instance, STR("SaveSlot_Ref"));
+        if (address(save) != lua_tointeger(stack, 3) || !live(save) || !live(canonical) ||
+            (pawn == host ? save != canonical : save == canonical || object_field(host, STR("Save")) != canonical))
+            return 0;
+
+        static AvatarAppearance schema;
+        auto* save_class = save->GetClassPrivate();
+        if (save_class != canonical->GetClassPrivate()) return 0;
+        if (schema.save_class.Get() != save_class || schema.bound_generation != scope.generation)
+        {
+            schema = {};
+            schema.save_class = save_class;
+            schema.bound_generation = scope.generation;
+            if (!schema.bind(save_class)) return 0;
+        }
+        if (!schema.character_type.Get() || !schema.color_type.Get()) return 0;
+        auto* appearance = schema.character->ContainerPtrToValuePtr<void>(save);
+        const auto respond = [&](bool matches) {
+            lua_settop(stack, sample_index);
+            lua_pushboolean(stack, matches);
+            return 1;
+        };
+        lua_pushliteral(stack, "addresses");
+        if (lua_rawget(stack, sample_index) != LUA_TTABLE) return 0;
+        for (std::size_t i = 0; i < schema.assets.size(); ++i)
+        {
+            auto* field = schema.assets[i];
+            auto* asset = field->GetObjectPropertyValue(field->ContainerPtrToValuePtr<void>(appearance));
+            if (asset && !live(asset)) return 0;
+            const auto type = lua_rawgeti(stack, -1, static_cast<lua_Integer>(i + 1));
+            const bool missing = type == LUA_TBOOLEAN && !lua_toboolean(stack, -1);
+            if (!missing && !lua_isinteger(stack, -1)) return 0;
+            const bool matches = asset ? !missing && lua_tointeger(stack, -1) == address(asset) : missing;
+            if (!matches) return respond(false);
+            lua_pop(stack, 1);
+        }
+        lua_pop(stack, 1);
+        lua_pushliteral(stack, "colors");
+        if (lua_rawget(stack, sample_index) != LUA_TTABLE) return 0;
+        for (std::size_t i = 0; i < schema.colors.size(); ++i)
+        {
+            if (lua_rawgeti(stack, -1, static_cast<lua_Integer>(i + 1)) != LUA_TTABLE) return 0;
+            const auto* color = schema.colors[i]->ContainerPtrToValuePtr<void>(appearance);
+            for (std::size_t j = 0; j < schema.channels.size(); ++j)
+            {
+                if (lua_rawgeti(stack, -1, static_cast<lua_Integer>(j + 1)) != LUA_TNUMBER) return 0;
+                if (schema.channels[j]->GetPropertyValueInContainer(color) != lua_tonumber(stack, -1))
+                    return respond(false);
+                lua_pop(stack, 1);
+            }
+            lua_pop(stack, 1);
+        }
+        lua_pop(stack, 1);
+        lua_pushliteral(stack, "eye");
+        lua_rawget(stack, sample_index);
+        if (!lua_isinteger(stack, -1)) return 0;
+        auto* eye = schema.eye->ContainerPtrToValuePtr<void>(appearance);
+        const auto actual = schema.unsigned_eye ? static_cast<std::int64_t>(schema.eye_storage->GetUnsignedIntPropertyValue(eye))
+                                               : schema.eye_storage->GetSignedIntPropertyValue(eye);
+        return respond(actual == lua_tointeger(stack, -1));
     }
 
     struct HeadRotationWriter
@@ -3124,6 +3283,7 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishReadNativeRemoteAim", read_remote_aim);
         lua.register_function("SilverfishReadNativeAvatarSeconds", read_avatar_seconds);
         lua.register_function("SilverfishReadNativeAvatarMotion", read_avatar_motion);
+        lua.register_function("SilverfishNativeAvatarAppearanceMatches", avatar_appearance_matches);
         lua.register_function("SilverfishWriteNativeRemoteHeadRotation", write_remote_head_rotation);
         lua.register_function("SilverfishAdvanceNativeRemoteGait", advance_remote_gait);
         lua.register_function("SilverfishReadNativeReadyRoster", read_ready_roster);

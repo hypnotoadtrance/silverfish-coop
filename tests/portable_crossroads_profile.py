@@ -605,6 +605,35 @@ return gait
 """)
 
 
+def instrument_avatar_appearance(source):
+    boundary = "\nreturn view\n"
+    if source.count(boundary) != 1:
+        raise ValueError("The avatar appearance comparison anchor changed")
+    return source.replace(boundary, """
+function SilverfishProfileAppearanceEdits(character, check)
+    local function edit(set, original, changed)
+        local _, before = view.observe(character)
+        local ok, result = pcall(function()
+            set(changed)
+            check(before)
+        end)
+        set(original)
+        assert(ok, result)
+    end
+    local skin = character[color_fields[1]]
+    edit(function(value) skin.R = value end, skin.R, skin.R == .25 and .75 or .25)
+    local eye = character[eye_field]
+    edit(function(value) character[eye_field] = value end, eye, eye == 1 and 2 or 1)
+    local head = asset_fields[1][1]
+    local mesh = character[head]
+    assert(valid(mesh), "The stock test character needs a head asset")
+    edit(function(value) character[head] = value end, mesh, nil)
+end
+
+return view
+""")
+
+
 def instrument_avatar_observer(source):
     front, boundary, rest = source.partition("local function observe(state, phase)\n")
     observe, following, after = rest.partition("local function attach_component(")
@@ -616,7 +645,7 @@ def instrument_avatar_observer(source):
         if observe.count(anchor) != (2 if label == "outfit" else 1):
             raise ValueError(f"The host avatar observation call changed: {call}")
         observe = observe.replace(anchor, f'SilverfishProfileCrossroadsCall("avatar.{label}", {call}, ')
-    for label, call in (("observe_appearance", "character_view.observe"), ("observe_weapon", "weapon_view.observe")):
+    for label, call in (("observe_appearance", "observe_appearance"), ("observe_weapon", "weapon_view.observe")):
         anchor = f"pcall({call}, "
         if observe.count(anchor) != 1:
             raise ValueError(f"The host avatar observation callback changed: {call}")
@@ -645,6 +674,54 @@ def instrument_avatar_observer(source):
         sync = sync.replace(anchor, f'SilverfishProfileCrossroadsCall("avatar.{call}", {call}, ')
     source = start + boundary + sync + end + after
     return source.replace("\nreturn avatar\n", """
+function SilverfishProfileAvatarAppearance()
+    local matches, stamp = SilverfishNativeAvatarAppearanceMatches, SilverfishBridgeProfileStamp
+    local state = avatar_motion_sample
+    if not state or #state.pawns < 2 or type(matches) ~= "function" then return "unavailable" end
+    local world = state.world:GetAddress()
+    local function measure(reader, expected)
+        local heap, started = collectgarbage("count"), stamp()
+        for _ = 1, 128 do assert(reader() == expected) end
+        return (stamp() - started) / 1000, collectgarbage("count") - heap
+    end
+    local function compare(pawn)
+        local address = pawn:GetAddress()
+        local sample = assert(observed_characters[address], "Missing qualified appearance sample")
+        local save = sample.save
+        local save_address = save:GetAddress()
+        assert(matches(world, address, save_address, sample) == true, "Native appearance did not match stock")
+        assert(matches(world + 1, address, save_address, sample) == nil
+            and matches(world, address + 1, save_address, sample) == nil
+            and matches(world, address, save_address + 1, sample) == nil,
+            "Native appearance accepted the wrong world, pawn, or save")
+        local expected = sample.model
+        local function fast() return observe_appearance(world, address, save, sample) end
+        local function stock() return character_view.observe(save.Character, sample) end
+        SilverfishProfileAppearanceEdits(save.Character, function(before)
+            assert(before.model == expected)
+            assert(matches(world, address, save_address, before) == false, "Native appearance missed an in-place change")
+            local edited, updated = observe_appearance(world, address, save, before)
+            assert(edited ~= expected and edited == character_view.observe(save.Character), "Edited appearance mismatch")
+            assert(matches(world, address, save_address, updated) == true)
+        end)
+        assert(matches(world, address, save_address, sample) == true, "Appearance edits were not restored")
+        local native_ms, native_kib = measure(fast, expected)
+        local lua_ms, lua_kib = measure(stock, expected)
+        local seat = pawn:IsLocallyControlled() and "host" or "guest"
+        return ("%s,%.3f,%.3f,%.3f,%.3f"):format(seat, native_ms, lua_ms, native_kib, lua_kib)
+    end
+    local running = collectgarbage("isrunning")
+    collectgarbage("stop")
+    local ok, result = pcall(function()
+        local rows = {}
+        for _, detail in ipairs(state.pawns) do rows[#rows + 1] = compare(detail.pawn) end
+        return table.concat(rows, ";")
+    end)
+    if running then collectgarbage("restart") end
+    assert(ok, result)
+    return result
+end
+
 function SilverfishProfileAvatarGait()
     for _, entry in pairs(avatars) do
         local result = SilverfishProfileAvatarGaitWrite(entry)
@@ -1487,6 +1564,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     remote_head_rotation = {}
     avatar_clock = {}
     avatar_motion = {}
+    avatar_appearance = {}
     avatar_gait = None
     if area == CROSSROADS:
         gait = await command(host, "avatargait")
@@ -1506,6 +1584,15 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
                                    "aiming": aiming == "1", "sprinting": sprinting == "1", "moving": pawn_moving == "1",
                                    "stock_values_matched": True, "wrong_scope_refused": True}
         assert set(avatar_motion) == {"host", "guest"}, avatar_motion
+        appearance = await command(host, "avatarappearance")
+        assert appearance != "unavailable" and not appearance.startswith("avatar appearance comparison failed"), appearance
+        for row in appearance.split(";"):
+            seat, native_ms, lua_ms, native_kib, lua_kib = row.split(",")
+            avatar_appearance[seat] = {"reads_per_path": 128, "native_ms": float(native_ms), "lua_ms": float(lua_ms),
+                                       "native_heap_growth_kib": float(native_kib), "lua_heap_growth_kib": float(lua_kib),
+                                       "unchanged_models_matched": True, "in_place_edits": ["color", "eye", "head"],
+                                       "wrong_scope_refused": True}
+        assert set(avatar_appearance) == {"host", "guest"}, avatar_appearance
         clock_replies = await asyncio.gather(*(command(seat, "avatarclock") for seat in seats.values()))
         for seat, reply in zip(seats, clock_replies, strict=True):
             assert reply != "unavailable" and not reply.startswith("avatar clock comparison failed"), reply
@@ -1575,5 +1662,6 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             "controller_inspection_comparison": controller_inspection,
             "avatar_clock_comparison": avatar_clock,
             "avatar_motion_comparison": avatar_motion,
+            "avatar_appearance_comparison": avatar_appearance,
             "avatar_gait_comparison": avatar_gait,
             "remote_head_rotation_comparison": remote_head_rotation}

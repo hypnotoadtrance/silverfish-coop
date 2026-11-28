@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 import time
 
 from .control import resident_status
+from .link import measure_quic_packet_mix
 from .native_map_preflight import valid_campaign_package
 from .runtime import write_json
 
@@ -61,11 +62,12 @@ class _Traffic:
     peak_heartbeat_rtt_us: int = 0
     link_activity: dict[str, int] = field(default_factory=dict)
     steam_activity: dict[str, int] = field(default_factory=dict)
+    quic_packet_mix: dict[str, int] = field(default_factory=dict)
     by_peer: dict[str, dict[str, int]] = field(default_factory=dict)
     peak_send_interval: dict | None = None
     peak_receive_interval: dict | None = None
 
-    def add(self, seconds, counters, rtt, group, link_activity, steam_activity, peers):
+    def add(self, seconds, counters, rtt, group, link_activity, steam_activity, peers, packet_mix):
         sent, send_bytes, received, receive_bytes = counters
         self.seconds += seconds
         self.samples += 1
@@ -83,6 +85,8 @@ class _Traffic:
                 interval = {"seconds": round(seconds, 3), "map": group[0], "lobby_members": group[1],
                             "sent_bytes": send_bytes, "received_bytes": receive_bytes, "heartbeat_rtt_us": rtt or None,
                             "link_activity": link_activity, "steam_activity": steam_activity, "by_peer": peers}
+                if packet_mix:
+                    interval["quic_packet_mix"] = packet_mix
             if send_peak:
                 self.peak_send_bps = send_bps
                 self.peak_send_interval = interval
@@ -94,6 +98,8 @@ class _Traffic:
             self.link_activity[key] = self.link_activity.get(key, 0) + amount
         for key, amount in steam_activity.items():
             self.steam_activity[key] = self.steam_activity.get(key, 0) + amount
+        for key, amount in packet_mix.items():
+            self.quic_packet_mix[key] = self.quic_packet_mix.get(key, 0) + amount
         for peer, amounts in peers.items():
             totals = self.by_peer.setdefault(peer, dict.fromkeys(MESSAGE_FIELDS, 0))
             for key, amount in amounts.items():
@@ -102,8 +108,11 @@ class _Traffic:
     def result(self):
         departed = self.link_activity.get("relay_queue_departed_frames", 0)
         wait = self.link_activity.get("relay_queue_wait_total_ns", 0)
+        totals = asdict(self)
+        if not self.quic_packet_mix:
+            del totals["quic_packet_mix"]
         return {
-            **asdict(self),
+            **totals,
             "seconds": round(self.seconds, 3),
             "mean_send_bps": round(self.sent_bytes * 8 / self.seconds),
             "mean_receive_bps": round(self.received_bytes * 8 / self.seconds),
@@ -118,7 +127,7 @@ class _Report:
         self.groups = {}
         self.previous = None
 
-    def sample(self, now, frame, counters, pressure, peers=None):
+    def sample(self, now, frame, counters, pressure, peers=None, *, packet_mix=None):
         packets, lobby_members = counters[:4], counters[4]
         area = frame.get("game", {}).get("map")
         if (not frame.get("link_connected") or frame.get("state") not in ("hosting", "connected")
@@ -128,15 +137,18 @@ class _Report:
         transport = frame.get("transport", {})
         observation = frame.get("generation"), frame.get("zone_epoch")
         peers = peers or {}
-        previous, self.previous = self.previous, (now, packets, group, observation, transport, pressure, peers)
+        packet_mix = packet_mix or {}
+        previous, self.previous = self.previous, (now, packets, group, observation, transport, pressure, peers, packet_mix)
         if not previous or now <= previous[0]:
             return
-        last_time, last_packets, last_group, last_observation, last_transport, last_pressure, last_peers = previous
+        last_time, last_packets, last_group, last_observation, last_transport, last_pressure, last_peers, last_mix = previous
         elapsed = now - last_time
         delta = tuple(after - before for after, before in zip(packets, last_packets, strict=True))
         steam_activity = {key: after - before for key, before in last_pressure.items()
                           if (after := pressure.get(key, before)) > before}
-        if not (lobby_members or last_group[1] or any(delta) or steam_activity):
+        mix_activity = {key: after - last_mix.get(key, 0) for key, after in packet_mix.items()
+                        if after > last_mix.get(key, 0)}
+        if not (lobby_members or last_group[1] or any(delta) or steam_activity or mix_activity):
             return
         peer_activity = {}
         for peer, totals in peers.items():
@@ -161,8 +173,8 @@ class _Report:
             group = None, None
         if group not in self.groups:
             self.groups[group] = _Traffic()
-        self.groups[group].add(elapsed, delta, rtt, group, activity, steam_activity, peer_activity)
-        self.total.add(elapsed, delta, rtt, group, activity, steam_activity, peer_activity)
+        self.groups[group].add(elapsed, delta, rtt, group, activity, steam_activity, peer_activity, mix_activity)
+        self.total.add(elapsed, delta, rtt, group, activity, steam_activity, peer_activity, mix_activity)
 
     def result(self, role, version):
         return {
@@ -186,14 +198,14 @@ async def capture(work, run, transport, role):
 
     def sample():
         report.sample(time.monotonic(), resident_status(run) or {}, transport.traffic_counters(),
-                      transport.pressure_counters(), transport.peer_traffic_counters())
+                      transport.pressure_counters(), transport.peer_traffic_counters(), packet_mix=packet_mix())
 
     async def watch():
         while True:
             await asyncio.sleep(SAMPLE_SECONDS)
             sample()
 
-    with transport.measure_peer_traffic():
+    with transport.measure_peer_traffic(), measure_quic_packet_mix() as packet_mix:
         sample()
         watcher = asyncio.create_task(watch())
         try:
@@ -203,7 +215,8 @@ async def capture(work, run, transport, role):
             with suppress(asyncio.CancelledError):
                 await watcher
             sample()
-            if report.total.sent_messages or report.total.received_messages or report.total.steam_activity:
+            total = report.total
+            if total.sent_messages or total.received_messages or total.steam_activity or total.quic_packet_mix:
                 # The opt-in report is written once after the session, outside the engine thread.
                 with suppress(OSError):
                     await asyncio.to_thread(write_json, work / REPORT_FILE, report.result(role, transport.version))

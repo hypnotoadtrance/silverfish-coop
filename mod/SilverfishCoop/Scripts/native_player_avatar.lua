@@ -193,6 +193,14 @@ local function observe_motion(world_address, pawn, address)
     return stock_motion(pawn)
 end
 
+local function observe_appearance(world_address, pawn_address, save, sample)
+    if sample and sample.model and type(SilverfishNativeAvatarAppearanceMatches) == "function"
+        and SilverfishNativeAvatarAppearanceMatches(world_address, pawn_address, save:GetAddress(), sample) then
+        return sample.model, sample
+    end
+    return character_view.observe(save.Character, sample)
+end
+
 local function observe(state, phase)
     observations = {}
     if phase ~= "hosting" then
@@ -231,7 +239,8 @@ local function observe(state, phase)
                     local read_weapon, weapon, cached = pcall(weapon_view.observe, pawn, save, observed_weapons[address])
                     local previous = observed_characters[address]
                     local sample = previous and same(previous.save, save) and previous or nil
-                    local read_appearance, appearance, appearance_sample = pcall(character_view.observe, save.Character, sample)
+                    local read_appearance, appearance, appearance_sample =
+                        pcall(observe_appearance, world_address, address, save, sample)
                     if read_appearance and appearance_sample then
                         appearance_sample.save = save
                         characters[address] = appearance_sample

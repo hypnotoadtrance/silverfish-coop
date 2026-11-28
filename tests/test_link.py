@@ -158,6 +158,37 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(returned, reply)
         self.assertEqual(endpoint, self.client.address)
 
+    async def test_quic_packet_mix_is_opt_in_and_classifies_both_directions(self):
+        self.assertIsNone(link._configuration(is_client=True).quic_logger)
+        with link.measure_quic_packet_mix() as packet_mix:
+            await self.host_for_guests(self.request)
+            self.assertTrue((await self.connect_guest())["accepted"])
+            await self.exchange(48)
+            counts = packet_mix()
+            for direction in ("sent", "received"):
+                self.assertGreaterEqual(counts[f"{direction}_datagram_packets"], 2)
+                self.assertGreater(counts[f"{direction}_datagram_bytes"], 96)
+                self.assertGreater(counts[f"{direction}_stream_packets"], 0)
+        self.assertIsNone(link._configuration(is_client=True).quic_logger)
+        await self.exchange(48)
+        self.assertEqual(packet_mix(), counts)
+
+    def test_quic_packet_mix_classifies_control_and_combined_frames(self):
+        with link.measure_quic_packet_mix() as packet_mix:
+            logger = link._configuration(is_client=True).quic_logger
+            trace = logger.start_trace(is_client=True, odcid=b"test-cid")
+            for frames, length in ((["ack", "padding"], 32), (["ack", "ping"], 44),
+                                   (["ack", "stream", "datagram"], 56)):
+                trace.log_event(category="transport", event="packet_sent",
+                                data={"frames": [{"frame_type": kind} for kind in frames],
+                                      "raw": {"length": length}, "header": {"packet_number": "9"}})
+            self.assertEqual(packet_mix(), {
+                "sent_ack_only_packets": 1, "sent_ack_only_bytes": 32,
+                "sent_control_only_packets": 1, "sent_control_only_bytes": 44,
+                "sent_mixed_packets": 1, "sent_mixed_bytes": 56,
+            })
+            self.assertEqual(trace.to_dict()["events"], [])
+
     async def test_link_exchanges_unreal_sized_and_fragmented_packets(self):
         self.assertTrue((await self.connect_guest())["accepted"])
         self.assertTrue(self.client.connected)

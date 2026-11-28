@@ -701,6 +701,9 @@ LoopInGameThreadWithDelay(50, function()
         if ok then message = value else message = "avatar gait comparison failed: " .. tostring(value) end
     elseif action == "avatargaitcounts" and not capture then
         message = SilverfishProfileAvatarGaitCounts()
+    elseif action == "avatarappearance" and not capture then
+        local ok, value = pcall(SilverfishProfileAvatarAppearance)
+        if ok then message = value else message = "avatar appearance comparison failed: " .. tostring(value) end
     elseif action == "avatarmotion" and not capture then
         local ok, value = pcall(SilverfishProfileAvatarMotion)
         if ok then message = value else message = "avatar motion comparison failed: " .. tostring(value) end

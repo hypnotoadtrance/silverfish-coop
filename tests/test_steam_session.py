@@ -120,16 +120,25 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
                       {"receive_unforwarded_bytes": 0})
         report.sample(2, {**frame, "transport": totals}, (8, 800, 750, 820_000, 4),
                       {"receive_unforwarded_bytes": 5_000},
-                      {"1": (3, 300, 500, 650_000), "2": (5, 500, 250, 170_000)})
+                      {"1": (3, 300, 500, 650_000), "2": (5, 500, 250, 170_000)},
+                      packet_mix={"received_datagram_bytes": 420_000, "sent_ack_only_packets": 6})
         report.sample(3, {**frame, "transport": totals}, (8, 800, 751, 820_150, 4),
                       {"receive_unforwarded_bytes": 5_000},
-                      {"1": (3, 300, 500, 650_000), "2": (5, 500, 251, 170_150)})
+                      {"1": (3, 300, 500, 650_000), "2": (5, 500, 251, 170_150)},
+                      packet_mix={"received_datagram_bytes": 420_000, "sent_ack_only_packets": 6,
+                                  "received_control_only_bytes": 150})
         overall = report.result("guest", VERSION)["overall"]
         self.assertEqual(overall["mean_relay_queue_wait_us"], 20_000)
         peak = overall["peak_receive_interval"]
         self.assertEqual(peak["received_bytes"], 820_000)
         self.assertEqual(peak["link_activity"], totals)
         self.assertEqual(peak["steam_activity"], {"receive_unforwarded_bytes": 5_000})
+        self.assertEqual(peak["quic_packet_mix"],
+                         {"received_datagram_bytes": 420_000, "sent_ack_only_packets": 6})
+        self.assertEqual(overall["quic_packet_mix"], {
+            "received_datagram_bytes": 420_000, "sent_ack_only_packets": 6,
+            "received_control_only_bytes": 150,
+        })
         self.assertEqual({peer: row["received_bytes"] for peer, row in peak["by_peer"].items()},
                          {"1": 650_000, "2": 170_000})
         self.assertEqual({peer: row["received_bytes"] for peer, row in overall["by_peer"].items()},

@@ -15,6 +15,7 @@ import zlib
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Sequence
 from contextlib import asynccontextmanager, contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from time import perf_counter_ns
@@ -25,6 +26,7 @@ from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.quic import events
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
+from aioquic.quic.logger import QuicLogger, QuicLoggerTrace
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
@@ -300,10 +302,79 @@ def _address(transport: asyncio.BaseTransport) -> Address:
     return host, port
 
 
+class _PacketMixTrace(QuicLoggerTrace):
+    def __init__(self, capture: _PacketMixLogger, is_client: bool) -> None:
+        super().__init__(is_client=is_client, odcid=b"")
+        self.capture = capture
+        self.received = None
+
+    def _count(self, direction, frames, length):
+        if not self.capture.active or type(length) is not int or length <= 0:
+            return
+        kinds = {frame["frame_type"] for frame in frames if "frame_type" in frame}
+        if "datagram" in kinds:
+            kind = "mixed" if "stream" in kinds else "datagram"
+        elif "stream" in kinds:
+            kind = "stream"
+        else:
+            kind = "ack_only" if kinds - {"padding"} == {"ack"} else "control_only"
+        counts = self.capture.counts
+        for key, amount in ((f"{direction}_{kind}_packets", 1), (f"{direction}_{kind}_bytes", length)):
+            counts[key] = counts.get(key, 0) + amount
+
+    def log_event(self, *, category: str, event: str, data: dict) -> None:
+        if category != "transport" or event not in {"packet_sent", "packet_received"} or not self.capture.active:
+            return
+        frames = data.get("frames", ())
+        length = data.get("raw", {}).get("length")
+        if event == "packet_sent":
+            self._count("sent", frames, length)
+        else:
+            # aioquic populates this list after announcing a received packet.
+            self.finish_receive()
+            self.received = frames, length
+
+    def finish_receive(self) -> None:
+        if self.received is not None:
+            frames, length = self.received
+            self.received = None
+            self._count("received", frames, length)
+
+
+class _PacketMixLogger(QuicLogger):
+    def __init__(self) -> None:
+        super().__init__()
+        self.active = True
+        self.counts: dict[str, int] = {}
+
+    def start_trace(self, is_client: bool, odcid: bytes) -> QuicLoggerTrace:
+        return _PacketMixTrace(self, is_client)
+
+    def end_trace(self, trace: QuicLoggerTrace) -> None:
+        # Neither completed nor active connection traces are retained here.
+        pass
+
+
+_packet_mix_logger: ContextVar[_PacketMixLogger | None] = ContextVar("packet_mix_logger", default=None)
+
+
+@contextmanager
+def measure_quic_packet_mix() -> Iterator[Callable[[], dict[str, int]]]:
+    """Collect only aggregate QUIC packet counts and bytes in this diagnostic session."""
+    logger = _PacketMixLogger()
+    token = _packet_mix_logger.set(logger)
+    try:
+        yield logger.counts.copy
+    finally:
+        logger.active = False
+        _packet_mix_logger.reset(token)
+
+
 def _configuration(is_client: bool) -> QuicConfiguration:
     # A rebuilding guest can receive one large world baseline alongside its
     # ordinary action replies. The host still advertises the smaller request window.
     frame = _MAX_SNAPSHOT_FRAME if is_client else _MAX_ACTION_FRAME
+    packet_mix = _packet_mix_logger.get()
     return QuicConfiguration(
         is_client=is_client,
         alpn_protocols=[_ALPN],
@@ -312,6 +383,7 @@ def _configuration(is_client: bool) -> QuicConfiguration:
         max_stream_data=frame,
         max_datagram_size=1200,
         max_datagram_frame_size=_FRAGMENT_SIZE + _FRAGMENT_HEADER.size + 16,
+        quic_logger=packet_mix if packet_mix is not None and packet_mix.active else None,
     )
 
 
@@ -660,6 +732,8 @@ class _LinkProtocol(QuicConnectionProtocol):
         self._game_enqueued: deque[float] = deque()
         self._next_game_expiry: float | None = None
         self._interaction_streams: dict[int, int] = {}
+        trace = self._quic._quic_logger
+        self._packet_mix_trace = trace if isinstance(trace, _PacketMixTrace) else None
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         super().connection_made(_MeasuredDatagramTransport(transport, self._stats))
@@ -667,7 +741,11 @@ class _LinkProtocol(QuicConnectionProtocol):
     def datagram_received(self, data: bytes, addr: Any) -> None:
         self._stats.quic_datagrams_received += 1
         self._stats.quic_payload_bytes_received += len(data)
-        super().datagram_received(data, addr)
+        try:
+            super().datagram_received(data, addr)
+        finally:
+            if self._packet_mix_trace is not None:
+                self._packet_mix_trace.finish_receive()
 
     def _handle_timer(self) -> None:
         stats = self._stats
