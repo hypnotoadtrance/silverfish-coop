@@ -48,8 +48,8 @@
             local path, level = assert(entry.marker_path), assert(entry.level_address)
             local component, expected = actor.StaticMesh, actor.Mesh_Normal
             local original = component.StaticMesh
-            assert(not actor.CharacterMovement:IsFalling() and same(original, expected)
-                and not same(actor.Mesh_Hopping, expected), "the native critter fixture needs a settled frog")
+            assert(not same(actor.Mesh_Hopping, expected), "the native critter fixture needs distinct frog meshes")
+            if actor.CharacterMovement:IsFalling() or not same(original, expected) then return "waiting" end
             assert(native(scope + 1, address, path, level) == nil
                 and native(scope, address + 1, path, level) == nil
                 and native(scope, address, path .. "_missing", level) == nil

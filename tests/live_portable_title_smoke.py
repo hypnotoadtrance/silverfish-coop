@@ -2877,9 +2877,12 @@ async def verify_stock_critters(host: Seat, guest: Seat, pawn: str) -> dict:
             guest_rest = await probe(guest, "view", number)
             if guest_rest.startswith("1,false,idle,") and math.dist(
                     tuple(map(float, guest_rest.split(",")[-3:])), settled) < 30:
-                break
+                # The replica can move between the view query and the native check.
+                native_view = await probe(guest, "native-view", number)
+                if native_view != "waiting":
+                    break
             await asyncio.sleep(.05)
-    verified, readings = (await probe(guest, "native-view", number)).split(";", 1)
+    verified, readings = native_view.split(";", 1)
     assert verified == "native critter idle verified", verified
     reads, native_ms, lua_ms, native_kib, lua_kib = map(float, readings.split(","))
     assert reads == 64
