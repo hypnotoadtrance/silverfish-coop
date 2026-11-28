@@ -1916,7 +1916,7 @@ status_publication.board_actions = {
     ["native-wire-board-stock-open"] = native_wire_board.open_reply,
 }
 
-local function tick(fields, pending, periodic)
+local function tick(fields, pending, periodic, fast_only)
     if fields and pending and fields[2] == "native-guest-smg-hold-aim" then
         if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
         pending.dispatched = true
@@ -2187,6 +2187,8 @@ local function tick(fields, pending, periodic)
         if not periodic then return true end
         fields, pending = nil, nil
     end
+    -- A compact command can lose its qualified world or phase between updates.
+    if fast_only then return true end
     native_mindcore_replication.sync(state, current_phase)
     native_datasilo_lift.sync(state, current_phase)
     native_datasilo_door.sync(state, current_phase)
@@ -2388,31 +2390,54 @@ native_guest_smg_hold.start_fast(bridge, status_row, function(state)
 end)
 status_publication.next_snapshot = 0
 
-function status_publication.dispatch(now, fields, pending, periodic)
+function status_publication.dispatch(now, fields, pending, periodic, fast_only)
     if not fields and not periodic then return end
-    local ok, result = pcall(tick, fields, pending, periodic)
+    local ok, result = pcall(tick, fields, pending, periodic, fast_only)
     if not ok or result ~= true then status_publication.next_snapshot = now + 0.25 end
     if not ok then print("[SilverfishCoop] " .. tostring(result) .. "\n") end
 end
 
--- Check the resident ticket between maintenance ticks. A queued ordinary
--- command remains with the main loop and keeps its place in the bridge.
-if resident_title and status_publication.installed then
-    LoopInGameThreadWithDelay(8, function()
+-- A resident compact command can use the bridge between maintenance ticks.
+function status_publication.start_fast()
+    if not resident_title or not status_publication.installed then return end
+    local fast_actions = {
+        ["native-world-loot-frame"] = true,
+        ["native-loot-open"] = true,
+        ["native-loot-inspect"] = true,
+        ["native-guest-save-retain"] = true,
+    }
+    for _, actions in ipairs({status_publication.stock_interactions, status_publication.pickup_presentation,
+        status_publication.pickup_actions, status_publication.guest_combat_actions,
+        status_publication.placed_view_actions, status_publication.prop_carry_actions}) do
+        for action in pairs(actions) do fast_actions[action] = true end
+    end
+    local use_native = false
+    local function dispatch_fast()
         if leaving or not status_publication.memory_live or (role ~= "host" and role ~= "client") then return end
         if status_publication.listen_departing() then return end
-        local fields, pending = read_command(false, true)
-        if not fields or not pending then return end
-        local action = fields[2]
-        if action == "native-world-loot-frame" or action == "native-loot-open" or action == "native-loot-inspect"
-            or action == "native-guest-save-retain"
-            or status_publication.stock_interactions[action] or status_publication.pickup_presentation[action]
-            or status_publication.pickup_actions[action] or status_publication.guest_combat_actions[action]
-            or status_publication.placed_view_actions[action] or status_publication.prop_carry_actions[action] then
-            status_publication.dispatch(os.clock(), fields, pending, false)
+        local fields, pending
+        if use_native then
+            local ticket
+            ticket, fields = SilverfishTakeFastLocalBridgeCommand()
+            if not fields or seen_commands[fields[1]] then return end
+            pending = {ticket = ticket, fields = fields, dispatched = false}
+            pending_local = pending
+        else
+            fields, pending = read_command(false, true)
+            if fields and not fast_actions[fields[2]] then return end
         end
-    end)
+        if not fields or not pending then return end
+        status_publication.dispatch(os.clock(), fields, pending, false, true)
+    end
+    local native_callback
+    if type(SilverfishMakeFastLocalBridgeCallback) == "function"
+        and type(SilverfishTakeFastLocalBridgeCommand) == "function" then
+        native_callback = SilverfishMakeFastLocalBridgeCallback(fast_actions, dispatch_fast)
+        use_native = type(native_callback) == "function"
+    end
+    LoopInGameThreadWithDelay(8, native_callback or dispatch_fast)
 end
+status_publication.start_fast()
 
 function status_publication.get_observer_world()
     if not status_publication.observer_world_read then

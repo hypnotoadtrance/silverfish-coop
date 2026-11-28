@@ -213,6 +213,68 @@ int main()
                 measured_count, lua_bytes, native_bytes);
     luaL_unref(stack, LUA_REGISTRYINDEX, rows);
 
+    int dispatched{};
+    lua_newtable(stack);
+    lua_pushboolean(stack, true);
+    lua_setfield(stack, 1, "fast-inspect");
+    lua_pushlightuserdata(stack, &dispatched);
+    lua_pushcclosure(stack, [](lua_State* callback) {
+        ++*static_cast<int*>(lua_touserdata(callback, lua_upvalueindex(1)));
+        return 0;
+    }, 1);
+    assert(make_fast_command_callback(lua) == 1 && lua_iscfunction(stack, -1));
+    const auto fast_callback = luaL_ref(stack, LUA_REGISTRYINDEX);
+    lua_settop(stack, 0);
+    const auto pump_fast = [&] {
+        lua_rawgeti(stack, LUA_REGISTRYINDEX, fast_callback);
+        assert(lua_pcall(stack, 0, 0, 0) == LUA_OK);
+    };
+    const auto submit = [](std::string_view text) {
+        return SilverfishBridgeSubmitV1(text.data(), static_cast<std::uint32_t>(text.size()));
+    };
+    {
+        // An empty fast check does not acquire the native queue lock.
+        std::lock_guard lock(mutex);
+        pump_fast();
+    }
+    assert(dispatched == 0 && take_fast_command(lua) == 0);
+    for (const auto text : std::array<std::string_view, 4>{"id\tordinary\t1\n", "id\tfast-inspect\t1\nbody\n",
+                                                         "bad id\tfast-inspect\tx", {"id\tfast-inspect\t\0x\n", 19}})
+    {
+        const auto ordinary = submit(text);
+        assert(ordinary > 0 && take_fast_command(lua) == 0);
+        pump_fast();
+        assert(dispatched == 0 && take(lua) == 3 && lua_tointeger(stack, 2) == ordinary);
+        std::size_t size{};
+        const auto* copied = lua_tolstring(stack, 3, &size);
+        assert(std::string_view(copied, size) == text);
+        lua_settop(stack, 0);
+        assert(SilverfishBridgeWaitV1(ordinary, 0) == -2);
+    }
+
+    const auto fast = submit("test.id\tfast-inspect\t\tone\t\r\n\r\n");
+    assert(fast > 0 && !submit("another\tfast-inspect"));
+    pump_fast();
+    assert(dispatched == 1 && take_fast_command(lua) == 2 && lua_tointeger(stack, 1) == fast);
+    const std::array<std::string_view, 5> fields{"test.id", "fast-inspect", "", "one", ""};
+    assert(lua_rawlen(stack, 2) == fields.size());
+    for (std::size_t index = 0; index < fields.size(); ++index)
+    {
+        assert(lua_rawgeti(stack, 2, static_cast<lua_Integer>(index + 1)) == LUA_TSTRING);
+        assert(fields[index] == lua_tostring(stack, -1));
+        lua_pop(stack, 1);
+    }
+    lua_settop(stack, 0);
+    pump_fast();
+    assert(dispatched == 1 && take_fast_command(lua) == 0);
+    assert(take(lua) == 2 && lua_tointeger(stack, 2) == fast);
+    lua_settop(stack, 0);
+    assert(SilverfishBridgeWaitV1(fast, 0) == -2);
+    lua.set_integer(fast);
+    assert(claim_command(lua) == 1 && !lua_toboolean(stack, 1));
+    lua_settop(stack, 0);
+    luaL_unref(stack, LUA_REGISTRYINDEX, fast_callback);
+
     const auto queued = SilverfishBridgeSubmitV1("queued", 6);
     assert(queued > 0 && SilverfishBridgeWaitV1(queued, 0) == -2);
     assert(take(lua) == 1);

@@ -8,6 +8,7 @@ local gc_window_us = 12000000
 local gc_suspended_growth_limit_kib = 96 * 1024
 local gc_pause, gc_step_multiplier = 120, 160
 local stock_receipts = {}
+local scheduler_probe
 local long_interval_limit = 5
 local cached_format = SilverfishFormatLocalStatusRow
 local uncached_format = SilverfishFormatLocalStatusRowUncached
@@ -116,6 +117,14 @@ function probe.command(fields, periodic, publishes_snapshot)
     local counts = publishes_snapshot and capture.snapshot_sources or capture.tick_sources
     local key = (periodic and "due/" or "between/") .. action
     counts[key] = (counts[key] or 0) + 1
+end
+
+function probe.scheduler_inspection(fields, native, fast)
+    local active = scheduler_probe
+    if active and fields[4] == active.crate then
+        local take = fast and (native and "native-fast" or "lua-fast") or "maintenance"
+        active.inspections[#active.inspections + 1] = ("%s,%d,%s"):format(fields[1], stamp(), take)
+    end
 end
 
 function probe.stock_receipt(action, bytes)
@@ -771,6 +780,24 @@ LoopInGameThreadWithDelay(50, function()
     elseif action == "lean" and not capture then
         local ok, value = pcall(SilverfishProfileLocalLean)
         if ok then message = value else message = "lean reader comparison failed: " .. tostring(value) end
+    elseif action == "schedulerstart" then
+        if not native_fast_expected then
+            message = "legacy"
+        else
+            local read = assert(SilverfishReadFastLocalBridgeProfile, "native fast bridge counters unavailable")
+            local state = inspect()
+            scheduler_probe = {counts = {read()}, started = stamp(), inspections = {},
+                crate = "LootCrate_Small_BP_C " .. state.map .. ".CrossRoads_P:PersistentLevel.LootCrate_Small_BP_C_9"}
+            assert(#scheduler_probe.counts == 4, "unexpected native fast bridge counters")
+            message = "armed"
+        end
+    elseif action == "schedulerread" then
+        local active = assert(scheduler_probe, "no scheduler sample")
+        local counts = {SilverfishReadFastLocalBridgeProfile()}
+        for index, baseline in ipairs(active.counts) do counts[index] = counts[index] - baseline end
+        message = table.concat({stamp() - active.started, table.unpack(counts)}, ",")
+            .. ";" .. table.concat(active.inspections, ";")
+        scheduler_probe = nil
     elseif action == "stockreceipts" and not capture then
         local summary = {}
         for command, report in pairs(stock_receipts) do

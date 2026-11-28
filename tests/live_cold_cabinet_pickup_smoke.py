@@ -100,8 +100,14 @@ CURRENT_MAIN_PROBES = {
 def source_with_probe(name: str, before: bytes, *, combined: bool = False) -> bytes:
     text = before.decode("utf-8")
     anchors = PROBES.get(name) or RESIDENT_PROBES[name]
-    if name == "main.lua" and "local function tick(fields, pending, periodic)" in text:
-        anchors = CURRENT_MAIN_PROBES
+    if name == "main.lua":
+        if "local function tick(fields, pending, periodic, fast_only)" in text:
+            old_args = "tick, fields, pending, periodic)"
+            new_args = "tick, fields, pending, periodic, fast_only)"
+            anchors = {key.replace(old_args, new_args): value.replace(old_args, new_args)
+                       for key, value in CURRENT_MAIN_PROBES.items()}
+        elif "local function tick(fields, pending, periodic)" in text:
+            anchors = CURRENT_MAIN_PROBES
     if name == "native_loot_actions.lua" and "function actions.claim_reply(" in text:
         command = "pcall(actions.command, fields, state, phase"
         anchors = {**anchors, command:

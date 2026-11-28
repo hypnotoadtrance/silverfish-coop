@@ -5,9 +5,11 @@ from pathlib import Path
 import math
 import re
 import struct
+import time
 
 from portable_guest_world_start import wait_resident_status
-from tools.silverfish import native_downed_markers, native_kill_volume, native_package_handoff_journal
+from tools.silverfish import native_downed_markers, native_kill_volume, native_loot, native_package_handoff_journal
+from tools.silverfish.authored_loot import full_name
 from tools.silverfish.control import current_status, submit
 from tools.silverfish.travel import CROSSROADS
 
@@ -26,6 +28,16 @@ async def compare_acid_reader(seat, probe, *, dynamic):
 
 def instrument_profile(source, *, stock_receipts=False):
     code = (Path(__file__).with_name("fixtures") / "portable_crossroads_profile.lua").read_text(encoding="utf-8")
+    native_fast = "SilverfishMakeFastLocalBridgeCallback(fast_actions, dispatch_fast)" in source
+    code = "local native_fast_expected = " + ("true" if native_fast else "false") + "\n" + code
+    if native_fast:
+        inspection = ("        pending.dispatched = true\n        SilverfishPublishLocalBridgeReply(pending.ticket,\n"
+                      "            native_loot_actions.local_reply(fields, state, current_phase, status_row))")
+        assert source.count(inspection) == 1
+        source = source.replace(inspection, inspection.replace("        SilverfishPublishLocalBridgeReply",
+            '        if fields[2] == "native-loot-inspect" then\n'
+            "            status_publication.profile.scheduler_inspection(fields, pending.profile_native_fast, fast_only)\n"
+            "        end\n        SilverfishPublishLocalBridgeReply", 1), 1)
     anchor = "local function write_status("
     before, separator, rest = source.partition(anchor)
     if not separator:
@@ -71,9 +83,11 @@ def instrument_profile(source, *, stock_receipts=False):
                                 + '        if status_publication.memory_live then\n'
                                 '            status_publication.profile.stock_receipt("native-status-publication", 0)\n'
                                 '        end\n', 1)
-        fast_dispatch = "            status_publication.dispatch(os.clock(), fields, pending, false)\n"
+        fast_dispatch = ("        status_publication.dispatch(os.clock(), fields, pending, false, true)\n" if native_fast
+                         else "            status_publication.dispatch(os.clock(), fields, pending, false)\n")
         if fast_dispatch in rest:
-            rest = rest.replace(fast_dispatch, '            status_publication.profile.stock_receipt("fast/" .. action, 0)\n'
+            indent = fast_dispatch[:len(fast_dispatch) - len(fast_dispatch.lstrip())]
+            rest = rest.replace(fast_dispatch, indent + 'status_publication.profile.stock_receipt("fast/" .. fields[2], 0)\n'
                                 + fast_dispatch, 1)
         # Keep the private status mirror available to the runner while exercising the
         # installed compact interaction branch. Scope validation still runs normally.
@@ -114,8 +128,13 @@ def instrument_profile(source, *, stock_receipts=False):
             assert rest.count(host_receipt) == 1
             rest = rest.replace(host_receipt, host_receipt
                                 + '        if accepted then status_publication.profile.stock_receipt(fields[2], #reply + 1) end\n')
-    tick = "local function tick(fields, pending, periodic)\n"
+    tick = ("local function tick(fields, pending, periodic, fast_only)\n" if native_fast
+            else "local function tick(fields, pending, periodic)\n")
     assert rest.count(tick) == 1
+    if native_fast:
+        pending = "            pending = {ticket = ticket, fields = fields, dispatched = false}\n"
+        assert rest.count(pending) == 1
+        rest = rest.replace(pending, pending + "            pending.profile_native_fast = true\n")
     rest = rest.replace(tick, tick + "    local profile_fields = fields\n"
                         "    status_publication.profile.command(profile_fields, periodic, false)\n")
     final_write = '    status_publication.profile.call("write_status", write_status, state, current_phase, not projected'
@@ -1609,6 +1628,83 @@ async def capture_rendered_frame(seat, probe):
             await asyncio.sleep(.15)
 
 
+def read_scheduler_sample(raw):
+    counts, *records = raw.split(";")
+    fields = ("elapsed_us", "idle_skips", "lua_invocations", "fast_takes", "fast_claims")
+    sample = dict(zip(fields, map(int, counts.split(",")), strict=True))
+    assert sample["elapsed_us"] > 0 and sample["idle_skips"] > 0, sample
+    assert 0 <= sample["fast_claims"] <= sample["fast_takes"] <= sample["lua_invocations"], sample
+    sample["fast_deferrals"] = sample["lua_invocations"] - sample["fast_claims"]
+    sample["inspections"] = []
+    for record in filter(None, records):
+        ticket, started, lane = record.split(",")
+        assert re.fullmatch(r"[0-9a-f]{32}", ticket) and lane in {"native-fast", "lua-fast", "maintenance"}, record
+        sample["inspections"].append({"ticket": ticket, "claimed_us": int(started), "lane": lane})
+    return sample
+
+
+async def verify_bridge_scheduler_commands(host, guest, command, area):
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    before, guest_before = await asyncio.gather(current_status(host_run), current_status(guest_run))
+    original = before["game"]["pawns"]["guest"]
+    pawn = original["name"]
+    crate = full_name(area, "LootCrate_Small_BP_C_9")
+
+    def visitor_near(point):
+        return lambda state: (state.get("game", {}).get("map") == area
+                              and (local := state["game"].get("pawns", {}).get("local", {}).get("location"))
+                              and math.dist(local, point) < 35)
+
+    async def measure():
+        assert await command(host, "schedulerstart") == "armed"
+        requests = []
+        # Run through the resident guest service and authenticated host worker.
+        # Seat.bridge itself is the test process's file-backed compatibility route.
+        for _ in range(3):
+            started = time.monotonic_ns() // 1000
+            reply = await submit(guest_run, "native-loot-inspect", target=crate)
+            complete = time.monotonic_ns() // 1000
+            proof = reply["native_loot"]
+            assert reply["ok"] and (proof["ok"], proof["pawn"], proof["crate"]) == (True, pawn, crate), reply
+            assert 0 < reply[native_loot.INSPECTION_BYTES] < 2048, reply
+            requests.append((started, complete, reply[native_loot.INSPECTION_BYTES]))
+        ordinary = await submit(host_run, "native-inventory-list")
+        assert ordinary["ok"] and ordinary["native_inventory"]["owner"] == "host", ordinary
+        sample = read_scheduler_sample(await command(host, "schedulerread"))
+        claims = sample["inspections"]
+        assert len(claims) == len(requests) and len(set(row["ticket"] for row in claims)) == len(claims), sample
+        assert any(row["lane"] == "native-fast" for row in claims), sample
+        for claim, (started, complete, reply_bytes) in zip(claims, requests, strict=True):
+            assert started <= claim["claimed_us"] <= complete, (claim, started, complete)
+            claim.update(request_to_claim_ms=(claim["claimed_us"] - started) / 1000,
+                         request_to_reply_ms=(complete - started) / 1000, compact_host_reply_bytes=reply_bytes)
+        sample["ordinary_inventory_request_completed"] = True
+        return sample
+
+    approached = await host.bridge.command("native-loot-approach", pawn, crate, timeout=5)
+    location, = (row["location"] for row in approached["pawns"].values() if row["name"] == pawn)
+    try:
+        await wait_resident_status(guest_run, visitor_near(location))
+        normal = await measure()
+        try:
+            assert await asyncio.gather(command(host, "lowfps"), command(guest, "lowfps")) == ["lowfps", "lowfps"]
+            capped = await measure()
+        finally:
+            assert await asyncio.gather(command(host, "uncap"), command(guest, "uncap")) == ["uncap", "uncap"]
+    finally:
+        restored = await host.bridge.restore("guest", {"location": original["location"]})
+        expected = restored["pawns"]["guest"]["location"]
+        await wait_resident_status(guest_run, visitor_near(expected))
+    for run, initial in ((host_run, before), (guest_run, guest_before)):
+        final = await wait_resident_status(run, lambda state: state["game"]["sequence"] > initial["game"]["sequence"])
+        assert (final["state"], final["generation"], final["zone_epoch"], final["game"]["map"]) == (
+            initial["state"], initial["generation"], initial["zone_epoch"], area), final
+        assert final["game"]["pawns"]["local"]["name"] == initial["game"]["pawns"]["local"]["name"], final
+        assert final.get("local_bridge") == final.get("local_status_source") == "memory"
+    return {"uncapped": normal, "capped_at_10_fps": capped, "session_and_pawns_preserved": True,
+            "status_sequence_advanced": True}
+
+
 async def profile_world(host, guest, area, probe, *, gc_trial=False, host_maintenance_trial=False):
     guest_run = guest.client / "run"
     seats = {"host": host, "guest": guest}
@@ -1759,18 +1855,40 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     verified_lookup = "matched world and package, returned an invalid object for the missing path"
     assert all(result in ("unavailable", verified_lookup) for result in object_paths), object_paths
     collector_modes = await read_collector_modes(host, guest, probe)
+    scheduler = {}
+
+    async def start_scheduler_sample():
+        states = await asyncio.gather(*(command(seat, "schedulerstart") for seat in seats.values()))
+        assert states in (["armed", "armed"], ["legacy", "legacy"]), states
+        return states[0] == "armed"
+
+    async def idle_scheduler_sample(frame_profile):
+        measurements = await asyncio.gather(*(command(seat, "schedulerread") for seat in seats.values()))
+        samples = dict(zip(seats, map(read_scheduler_sample, measurements), strict=True))
+        for seat, sample in samples.items():
+            assert not sample["inspections"], sample
+            sample["median_frame_interval_ms"] = frame_profile[seat]["timings"]["frame"]["p50_ms"]
+        return samples
+
+    scheduler_enabled = area == CROSSROADS and await start_scheduler_sample()
     before = await transport()
     await arm()
     idle = await collect()
     after_idle = await transport()
+    if scheduler_enabled:
+        scheduler["uncapped_idle"] = await idle_scheduler_sample(idle)
     heartbeat = {}
     if area == CROSSROADS and "keepalive_probes_queued" in after_idle["guest"][0]:
         try:
             assert await asyncio.gather(*(command(seat, "lowfps") for seat in seats.values())) == ["lowfps", "lowfps"]
             heartbeat_before = await transport()
+            if scheduler_enabled:
+                assert await start_scheduler_sample()
             await arm()
             low_fps = await collect()
             heartbeat_after = await transport()
+            if scheduler_enabled:
+                scheduler["capped_idle"] = await idle_scheduler_sample(low_fps)
         finally:
             assert await asyncio.gather(*(command(seat, "uncap") for seat in seats.values())) == ["uncap", "uncap"]
         frame_ms = {seat: profile["timings"]["frame"]["p50_ms"] for seat, profile in low_fps.items()}
@@ -2109,6 +2227,9 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
         await journal_action("close", "native_host_invite_journal_closed")
         await wait_resident_status(runs["host"], lambda frame: "native_host_invite_journal" not in frame["game"])
         journal = {"journal_open_and_close": view["game"][native_package_handoff_journal.JOURNAL]}
+        if scheduler_enabled:
+            assert "capped_idle" in scheduler, "The native scheduler needs a measured low-FPS idle sample"
+            scheduler["commands"] = await verify_bridge_scheduler_commands(host, guest, command, area)
     return {"collector_modes": collector_modes, "exact_object_lookup": dict(zip(seats, object_paths, strict=True)),
             "idle": idle, "guest_walking": moving,
             "guest_max_displacement_cm": displacement,
@@ -2131,4 +2252,5 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             "avatar_appearance_comparison": avatar_appearance,
             "avatar_gait_comparison": avatar_gait,
             "standing_mapping_comparison": standing_mapping,
+            "local_bridge_scheduler": scheduler,
             "remote_head_rotation_comparison": remote_head_rotation}

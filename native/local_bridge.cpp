@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <clocale>
@@ -19,6 +20,7 @@
 #include <string_view>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <LuaType/LuaUObject.hpp>
@@ -66,6 +68,20 @@ namespace
     std::int64_t active_ticket{};
     State state{State::idle};
     std::string command;
+    struct FastHeader
+    {
+        std::size_t length{};
+        int fields{};
+    };
+    FastHeader fast_header;
+    std::vector<std::string> fast_actions;
+    std::atomic<bool> fast_queued{};
+    struct FastBridgeProfile
+    {
+        std::int64_t skips{}, invocations{}, takes{}, claims{};
+        std::int64_t taken_ticket{}, claimed_ticket{};
+    };
+    thread_local FastBridgeProfile fast_profile;
     std::shared_ptr<const std::string> reply;
     bool status_enabled{};
     std::shared_ptr<const std::string> status_frame;
@@ -100,6 +116,96 @@ namespace
         std::string pawn;
     };
     GuestInteractionLease guest_interaction_lease;
+
+    bool timing_fixture_enabled();
+
+    bool fast_profile_enabled()
+    {
+        static const bool enabled = timing_fixture_enabled();
+        return enabled;
+    }
+
+    bool plain_bridge_token(std::string_view token)
+    {
+        return !token.empty() && token.size() <= 80 && std::ranges::all_of(token, [](char byte) {
+            return (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') ||
+                (byte >= '0' && byte <= '9') || byte == '_' || byte == '.' || byte == '-';
+        });
+    }
+
+    FastHeader classify_fast_header(std::string_view payload)
+    {
+        if (fast_actions.empty() || payload.empty() || payload.size() > command_limit) return {};
+        const auto end = payload.find_last_not_of("\r\n");
+        if (end == payload.npos) return {};
+        const auto line = payload.substr(0, end + 1);
+        const auto id_end = line.find('\t');
+        if (id_end == line.npos || !plain_bridge_token(line.substr(0, id_end))) return {};
+        const auto after_id = line.substr(id_end + 1);
+        const auto action = after_id.substr(0, after_id.find('\t'));
+        if (!std::binary_search(fast_actions.begin(), fast_actions.end(), action, std::less<>{}) ||
+            line.find_first_of(std::string_view{"\r\n\0", 3}) != line.npos) return {};
+        const auto fields = std::ranges::count(line, '\t') + 1;
+        return fields <= 256 ? FastHeader{line.size(), static_cast<int>(fields)} : FastHeader{};
+    }
+
+    template <bool profile>
+    int dispatch_fast_command(lua_State* stack)
+    {
+        if (!fast_queued.load(std::memory_order_acquire))
+        {
+            if constexpr (profile) ++fast_profile.skips;
+            return 0;
+        }
+        const auto takes = profile ? fast_profile.takes : 0;
+        if constexpr (profile) ++fast_profile.invocations;
+        lua_pushvalue(stack, lua_upvalueindex(1));
+        lua_call(stack, 0, 0);
+        if constexpr (profile)
+        {
+            if (fast_profile.takes != takes && fast_profile.taken_ticket == fast_profile.claimed_ticket)
+                ++fast_profile.claims;
+        }
+        return 0;
+    }
+
+    int make_fast_command_callback(const Lua& lua)
+    {
+        auto* stack = lua.get_lua_state();
+        if (lua_gettop(stack) != 2 || lua_type(stack, 1) != LUA_TTABLE || !lua_isfunction(stack, 2)) return 0;
+        std::vector<std::string> actions;
+        lua_pushnil(stack);
+        while (lua_next(stack, 1))
+        {
+            if (lua_type(stack, -2) != LUA_TSTRING || !lua_isboolean(stack, -1) || !lua_toboolean(stack, -1) ||
+                actions.size() >= 128)
+            {
+                lua_settop(stack, 2);
+                return 0;
+            }
+            std::size_t size{};
+            const auto* raw = lua_tolstring(stack, -2, &size);
+            const std::string_view action{raw, size};
+            if (!plain_bridge_token(action))
+            {
+                lua_settop(stack, 2);
+                return 0;
+            }
+            actions.emplace_back(action);
+            lua_pop(stack, 1);
+        }
+        if (actions.empty()) return 0;
+        std::ranges::sort(actions);
+        {
+            std::lock_guard lock(mutex);
+            fast_actions = std::move(actions);
+            fast_header = state == State::queued ? classify_fast_header(command) : FastHeader{};
+            fast_queued.store(fast_header.fields != 0, std::memory_order_release);
+        }
+        lua_pushvalue(stack, 2);
+        lua_pushcclosure(stack, fast_profile_enabled() ? dispatch_fast_command<true> : dispatch_fast_command<false>, 1);
+        return 1;
+    }
 
     int find_object_by_path(const Lua& lua)
     {
@@ -148,6 +254,8 @@ namespace
     {
         active_ticket = 0;
         state = State::idle;
+        fast_header = {};
+        fast_queued.store(false, std::memory_order_release);
         command.clear();
         reply.reset();
         changed.notify_all();
@@ -165,6 +273,7 @@ namespace
             if (state == State::queued)
             {
                 state = State::taken;
+                fast_queued.store(false, std::memory_order_release);
                 pending = std::move(command);
             }
             if (state == State::taken || state == State::running) ticket = active_ticket;
@@ -177,6 +286,52 @@ namespace
         return 3;
     }
 
+    int take_fast_command(const Lua& lua)
+    {
+        if (lua.get_stack_size() != 0 || !fast_queued.load(std::memory_order_acquire)) return 0;
+        std::string pending;
+        FastHeader header;
+        std::int64_t ticket{};
+        {
+            std::lock_guard lock(mutex);
+            if (state != State::queued || !fast_header.fields) return 0;
+            state = State::taken;
+            fast_queued.store(false, std::memory_order_release);
+            pending = std::move(command);
+            header = fast_header;
+            ticket = active_ticket;
+        }
+        if (fast_profile_enabled())
+        {
+            ++fast_profile.takes;
+            fast_profile.taken_ticket = ticket;
+        }
+        lua.set_integer(ticket);
+        auto* stack = lua.get_lua_state();
+        lua_createtable(stack, header.fields, 0);
+        const std::string_view line{pending.data(), header.length};
+        std::size_t start{};
+        for (int field = 1; field <= header.fields; ++field)
+        {
+            const auto end = line.find('\t', start);
+            const auto value = line.substr(start, end == line.npos ? end : end - start);
+            lua_pushlstring(stack, value.data(), value.size());
+            lua_rawseti(stack, -2, field);
+            if (end != line.npos) start = end + 1;
+        }
+        return 2;
+    }
+
+    int read_fast_profile(const Lua& lua)
+    {
+        if (lua.get_stack_size() != 0) return 0;
+        lua.set_integer(fast_profile.skips);
+        lua.set_integer(fast_profile.invocations);
+        lua.set_integer(fast_profile.takes);
+        lua.set_integer(fast_profile.claims);
+        return 4;
+    }
+
     int claim_command(const Lua& lua)
     {
         if (lua.get_stack_size() != 1 || !lua.is_integer()) return 0;
@@ -187,6 +342,7 @@ namespace
             claimed = state == State::taken && ticket == active_ticket;
             if (claimed) state = State::running;
         }
+        if (claimed && fast_profile_enabled()) fast_profile.claimed_ticket = ticket;
         lua.set_bool(claimed);
         return 1;
     }
@@ -1144,6 +1300,8 @@ extern "C" __declspec(dllexport) std::int64_t SilverfishBridgeSubmitV1(const cha
     else command = std::move(large_catalog);
     active_ticket = ++last_ticket;
     state = State::queued;
+    fast_header = classify_fast_header(command);
+    fast_queued.store(fast_header.fields != 0, std::memory_order_release);
     return active_ticket;
 }
 
@@ -1201,6 +1359,8 @@ namespace silverfish::local_bridge
         lua.register_function("SilverfishFindObjectByPath", find_object_by_path);
         lua.register_function("SilverfishTakeLocalBridgeCommand", take);
         lua.register_function("SilverfishClaimLocalBridgeCommand", claim_command);
+        lua.register_function("SilverfishMakeFastLocalBridgeCallback", make_fast_command_callback);
+        lua.register_function("SilverfishTakeFastLocalBridgeCommand", take_fast_command);
         lua.register_function("SilverfishLocalBridgeStashBodyLimit", stash_body_limit);
         lua.register_function("SilverfishFormatLocalStatusRow", format_status_row<true>);
         lua.register_function("SilverfishPublishLocalBridgeReply", publish);
@@ -1224,6 +1384,7 @@ namespace silverfish::local_bridge
         lua.register_function("SilverfishReadLocalGuestInteractionLease", read_guest_interaction_lease);
         if (timing_fixture_enabled())
         {
+            lua.register_function("SilverfishReadFastLocalBridgeProfile", read_fast_profile);
             lua.register_function("SilverfishBridgeProfileStamp", profile_stamp);
             register_early_engine_tick_profile();
             lua.register_function("SilverfishBeginEngineTickProfile", begin_engine_tick_profile);
@@ -1256,6 +1417,7 @@ namespace silverfish::local_bridge
         guest_interaction_lease = {};
         zone_heartbeat = 0;
         zone_roster.clear();
+        fast_actions.clear();
         clear();
     }
 }
