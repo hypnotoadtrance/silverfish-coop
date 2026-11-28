@@ -3985,9 +3985,14 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str, hinged=None
             else:
                 raise RuntimeError("The guest could not aim the stock lockpick at the Crossroads door")
         else:
-            for seat in (host, guest):
-                armed = await seat.bridge.command("fixture-stock-lockpick-locker", "arm")
-                assert armed["ack"]["message"] == "locked", armed["ack"]
+            armed = await host.bridge.command("fixture-stock-lockpick-locker", "arm")
+            assert armed["ack"]["message"] == "locked", armed["ack"]
+            # The next attempt shares the same locker. Wait for the new host lock
+            # report so the previous attempt's unlocked projection cannot undo the fixture.
+            await wait_resident_status(guest_run, lambda f:
+                f.get("gameplay", {}).get(native_loot.VEHICLE_LOCKS, {}).get(crate) is True)
+            armed = await guest.bridge.command("fixture-stock-lockpick-locker", "arm")
+            assert armed["ack"]["message"] == "locked", armed["ack"]
             approached = await host.bridge.command("native-loot-approach", pawn, crate)
             assert approached["native_loot"]["ok"], approached["native_loot"]
             position, = [row["location"] for row in approached["pawns"].values() if row["name"] == pawn]
