@@ -405,20 +405,8 @@ local function install_lifecycle_witness()
     local pending_guest, finished
     local save_type = "BlueprintGeneratedClass " .. save_path
     local crossroads_world = "World /Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
-    local inside_prepare, stock_allocations, hook_entries, hook_error = false, 0, 0, nil
     local function address(value) return valid(value) and value:GetAddress() or 0 end
 
-    RegisterHook("/Script/Engine.GameplayStatics:CreateSaveGameObject", function(context, parameter)
-        if not inside_prepare then return end
-        hook_entries = hook_entries + 1
-        local ok, qualified = pcall(function()
-            local statics, class = context:get(), parameter:get()
-            return valid(statics) and statics:GetFullName() == "GameplayStatics " .. statics_path
-                and valid(class) and class:GetFullName() == save_type
-        end)
-        if not ok then hook_error = qualified
-        elseif qualified then stock_allocations = stock_allocations + 1 end
-    end)
     local function fields(world)
         local instance = valid(world) and world.OwningGameInstance
         if not valid(instance) then return end
@@ -450,20 +438,22 @@ local function install_lifecycle_witness()
     SilverfishPrepareNativeGuestSaveView = function(world, id)
         local first = not pending_guest or pending_guest.id ~= id
         local before = first and capture(world)
-        local prior_allocations, prior_entries = stock_allocations, hook_entries
-        hook_error, inside_prepare = nil, true
         local result = table.pack(pcall(prepare, world, id))
-        inside_prepare = false
-        local ok, view, reason = result[1], result[2], result[3]
-        local allocations = stock_allocations - prior_allocations
-        if not ok or not valid(view) then
-            save_lifecycle_failure("prepare", {{"scope", id}, {"result", ok and "declined" or "threw"},
-                {"reason", ok and reason or view}, {"stock_hook_entries", hook_entries - prior_entries},
-                {"stock_hook_allocations", allocations}, {"stock_hook_error", hook_error},
+        local ok, view, receipt = result[1], result[2], result[3]
+        local installed = ok and valid(view)
+        if not installed or type(receipt) ~= "boolean" then
+            local outcome = not ok and "threw" or installed and "invalid_allocation_receipt" or "declined"
+            local reason = receipt
+            if not ok then reason = view end
+            save_lifecycle_failure("prepare", {{"scope", id}, {"result", outcome}, {"reason", reason},
                 {"prior_save_class", before and before.save_class}})
         end
         if not ok then error(view, 0) end
-        if not valid(view) then return table.unpack(result, 2, result.n) end
+        if not installed then return table.unpack(result, 2, result.n) end
+
+        -- The native receipt distinguishes actual factory allocation from reuse.
+        -- A Lua hook on the reflected stock factory also intercepts its return value.
+        local allocations = receipt == true and 1 or 0
 
         local world_address, view_address = address(world), address(view)
         if first then
@@ -480,7 +470,7 @@ local function install_lifecycle_witness()
         else
             local guest = pending_guest
             guest.allocations, guest.preparations = guest.allocations + allocations, guest.preparations + 1
-            guest.same_view = guest.same_view and guest.view == view_address
+            guest.same_view = guest.same_view and receipt == false and guest.view == view_address
         end
         return table.unpack(result, 2, result.n)
     end

@@ -9906,6 +9906,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
 
             proof["native_save_routing"] = await verify_installed_save_scope(first)
         for seat, (hashes, preferences) in zip(seats, baselines, strict=True):
+            await offered(seat)
             for key in ("singleplayer", "modes", "multiplayer", "modes", "singleplayer"):
                 button = await seat.bridge.command("native-title-button-fixture", key)
                 await seat.bridge.wait_for(lambda frame: frame["sequence"] > button["sequence"])
