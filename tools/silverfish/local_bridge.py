@@ -29,6 +29,28 @@ class LocalCommandNotSubmitted(RuntimeError):
     """The command was refused or cancelled before the game claimed it."""
 
 
+class LocalCommandReplyUnavailable(RuntimeError):
+    """The game could have executed the command before both replies were lost."""
+
+
+COMBAT_REPLY_WAIT = 0.75
+REPLY_RECOVERED = "bridge_reply_recovered"
+
+
+async def combat_command(bridge, command, operation, *, timeout):
+    if getattr(bridge, "local_bridge", None) is None:
+        return await bridge.command(*command, timeout=timeout)
+    operation = f"op:{operation}"
+    try:
+        return await bridge.command(*command, operation, timeout=min(timeout, COMBAT_REPLY_WAIT), update_status=False)
+    except TimeoutError:
+        try:
+            receipt = await bridge.command(*command, operation, timeout=timeout, update_status=False)
+        except (TimeoutError, LocalCommandNotSubmitted) as error:
+            raise LocalCommandReplyUnavailable("The game did not return the combat result") from error
+    return {**receipt, REPLY_RECOVERED: True}
+
+
 class LocalBridge:
     def __init__(self, library):
         self._open = library.SilverfishBridgeOpenV1

@@ -94,7 +94,7 @@ class GuestExpiryTests(unittest.IsolatedAsyncioTestCase):
             members=SimpleNamespace(members=(failed, ready), observe=Mock(return_value=SimpleNamespace(state="ready", reason=None)),
                                     match_pawns=Mock(return_value={"guest": object(), "guest2": object()})),
             last_game=frame, party=party.new_party(), control=Mock(), stopping=False,
-            recover_joining_pawn=AsyncMock(return_value=False), _refresh_pending_return=AsyncMock(),
+            observe_host_frame=Mock(), recover_joining_pawn=AsyncMock(return_value=False), _refresh_pending_return=AsyncMock(),
             _expire_return_handshake=AsyncMock(), _retire_expired_guests=AsyncMock(),
             _attach_member=AsyncMock(side_effect=error), _reserve_next_return=Mock(),
         )

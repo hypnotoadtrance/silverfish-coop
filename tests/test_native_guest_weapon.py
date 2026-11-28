@@ -312,10 +312,10 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
             "state": "hosting", "map": "zone", "native_guest_weapon": proof,
         }))
         with self.assertRaisesRegex(party.RuleError, "selection_expired"):
-            await native_guest_weapon.select_equipment(host, bridge, "character", f"previous@{guid}")
+            await native_guest_weapon.select_equipment(host, bridge, "character", f"previous@{guid}", "a" * 32)
         bridge.command.assert_not_awaited()
 
-        result = await native_guest_weapon.select_equipment(host, bridge, "character", f"current@{guid}")
+        result = await native_guest_weapon.select_equipment(host, bridge, "character", f"current@{guid}", "a" * 32)
         self.assertEqual(result, {"native_guest_weapon": proof})
         bridge.command.assert_awaited_once_with(native_guest_weapon.SELECT_EQUIPMENT, "exact pawn", guid, timeout=3)
         self.assertFalse(host.native_checkpoint_unsafe)
@@ -345,7 +345,7 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
         host.queue_guest_save.assert_called_once_with("character", "exact pawn")
         host.checkpoint_native.assert_not_awaited()
 
-    async def test_compact_fire_receipt_survives_older_world_equipment_until_the_next_frame(self):
+    async def test_lost_compact_fire_reply_recovers_without_overwriting_the_world_frame(self):
         host = self.host()
         pawn, guid = "exact pawn", "1" * 32
         action = "native-guest-weapon-fire"
@@ -355,9 +355,16 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
         def frame(sequence, rounds):
             return (f"schema\t1\nseq\t{sequence}\n" + scope + f"native-guest-save\tbound\t{pawn}\n"
                     + "wallet\t50\n" + equipped(rounds))
+        attempts = []
+
         async def reply(payload, timeout):
-            nonce, sent, owner, weapon = payload.decode().strip().split("\t")
-            self.assertEqual((sent, owner, weapon, timeout), (action, pawn, guid, 5))
+            nonce, sent, owner, weapon, operation = payload.decode().strip().split("\t")
+            self.assertEqual((sent, owner, weapon, operation), (action, pawn, guid, "op:" + "a" * 32))
+            attempts.append(nonce)
+            if len(attempts) == 1:
+                self.assertEqual(timeout, .75)
+                raise TimeoutError()
+            self.assertEqual(timeout, 5)
             return (native_guest_weapon.REPLY_HEADER + "schema\t1\nseq\t40\n" + scope
                     + f"ack\t{nonce}\taccepted\tguest shot\n" + equipped(7)
                     + f"native-guest-weapon\tzone\tfire\t{pawn}\t{guid}\t1\tequipped\t8\t7\t7\t7\t1\t-\t-\t-\n")
@@ -371,6 +378,8 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
         result = await native_guest_weapon.perform(host, bridge, "character", "a" * 32, action, guid)
         self.assertEqual(result["native_guest_weapon"]["after"], 7)
         self.assertLess(result[native_guest_weapon.REPLY_BYTES], 600)
+        self.assertTrue(result[native_guest_weapon.REPLY_RECOVERED])
+        self.assertEqual(len(set(attempts)), 2)
         self.assertEqual(host.last_game["native_wallet"], 50)
         self.assertEqual(host.last_game[native_guest_weapon.EQUIPPED][pawn]["rounds"], 7)
         self.assertEqual(bridge.snapshot()[native_guest_weapon.EQUIPPED][pawn]["rounds"], 7)
@@ -378,7 +387,7 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
         bridge.local_bridge.read_status.return_value = frame(41, 6)
         self.assertEqual(bridge.snapshot()[native_guest_weapon.EQUIPPED][pawn]["rounds"], 6)
         self.assertEqual(await native_guest_weapon.perform(host, bridge, "character", "a" * 32, action, guid), result)
-        command.assert_awaited_once()
+        self.assertEqual(command.await_count, 2)
         host.checkpoint_native.assert_not_awaited()
 
     async def test_preflight_denies_weapon_request_without_stopping_host(self):
@@ -408,7 +417,7 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
         bridge = SimpleNamespace(command=AsyncMock(side_effect=RuntimeError("guest_weapon_refused_detached_save")))
 
         with self.assertRaisesRegex(party.RuleError, "^guest_weapon_refused_detached_save$"):
-            await native_guest_weapon.select_equipment(host, bridge, "character", f"current@{guid}")
+            await native_guest_weapon.select_equipment(host, bridge, "character", f"current@{guid}", "a" * 32)
 
         bridge.command.assert_awaited_once_with(native_guest_weapon.SELECT_EQUIPMENT, "exact pawn", guid, timeout=3)
         self.assertFalse(host.stopping)
@@ -469,7 +478,7 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
                 with self.assertRaisesRegex(party.RuleError, "could not queue the local co-op command"):
                     if action == native_guest_weapon.SELECT_EQUIPMENT:
-                        await native_guest_weapon.select_equipment(host, bridge, "character", f"epoch@{guid}")
+                        await native_guest_weapon.select_equipment(host, bridge, "character", f"epoch@{guid}", "a" * 32)
                     else:
                         await native_guest_weapon.perform(host, bridge, "character", "a" * 32, action, guid)
 

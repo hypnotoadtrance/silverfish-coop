@@ -27,7 +27,7 @@ local fixtures = enabled and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANAR
     and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
     and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local latest, equipment, staged_aim, input_scope
-local receipt_world, receipts, receipt_order = nil, {}, {}
+local receipt = require("native_combat_receipts").cache("native_guest_melee_operation_conflict")
 
 local function qualified_host(state, phase, testing)
     return enabled and phase == "hosting" and state.listening and state.server == false
@@ -437,29 +437,10 @@ local function observe_command(fields, state, phase, status_row, standing)
 end
 
 function melee.local_reply(fields, state, phase, sequence, status_row, standing)
-    local operation = #fields >= 5 and fields[#fields]
-    local outcome
-    if type(operation) == "string" and #operation == 32 and operation:match("^[0-9a-f]+$")
-        and qualified_host(state, phase, false) and valid(state.world) then
-        if not same(receipt_world, state.world) then
-            receipt_world, receipts, receipt_order = state.world, {}, {}
-        end
-        local request = table.concat(fields, "\t", 2, #fields - 1)
-        local prior = receipts[operation]
-        if prior then
-            outcome = prior.request == request and prior
-                or {accepted = false, message = "native_guest_melee_operation_conflict"}
-        else
-            local command = {table.unpack(fields, 1, #fields - 1)}
-            outcome = observe_command(command, state, phase, status_row, standing)
-            outcome.request = request
-            receipts[operation] = outcome
-            receipt_order[#receipt_order + 1] = operation
-            if #receipt_order > 256 then receipts[table.remove(receipt_order, 1)] = nil end
-        end
-    else
-        outcome = observe_command(fields, state, phase, status_row, standing)
-    end
+    local world = qualified_host(state, phase, false) and state.world
+    local outcome = receipt(fields, world, function(command)
+        return observe_command(command, state, phase, status_row, standing)
+    end)
     local rows = {"native-guest-melee-reply\t1", status_row("schema", 1), status_row("seq", sequence),
         status_row("ack", fields[1], outcome.accepted and "accepted" or "error", outcome.message),
         status_row("session", "host", phase, state.map, state.clients, state.server and 1 or 0)}

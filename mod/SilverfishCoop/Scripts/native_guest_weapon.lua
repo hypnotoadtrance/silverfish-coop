@@ -633,20 +633,31 @@ local function equipped_row(state, name, pawn, save, status_row)
         rounds or "-", mode or "-", ammo_path or "-", table.unpack(shell))
 end
 
-function guest_weapon.local_reply(fields, state, phase, sequence, status_row)
+local receipt = require("native_combat_receipts").cache("native_guest_weapon_operation_conflict")
+
+local function observe_command(fields, state, phase, status_row)
     local previous = observation
     observation = nil
     local accepted, message, pawn, save = pcall(guest_weapon.command, fields, state, phase)
     local result = observation
     observation = previous
     if accepted and not result then accepted, message = false, "guest_weapon_readback_unavailable" end
+    return {accepted = accepted, message = message,
+        retryable = not accepted and message == "guest_weapon_refused_detached_save",
+        report = accepted and weapon_result_row(result, status_row),
+        equipped = accepted and result.ok and equipped_row(state, result.pawn, pawn, save, status_row)}
+end
+
+function guest_weapon.local_reply(fields, state, phase, sequence, status_row)
+    local world = phase == "hosting" and state.listening and state.server == false and state.world
+    local outcome = receipt(fields, world, function(command)
+        return observe_command(command, state, phase, status_row)
+    end)
     local rows = {"native-guest-weapon-reply\t1", status_row("schema", 1), status_row("seq", sequence),
-        status_row("ack", fields[1], accepted and "accepted" or "error", message),
+        status_row("ack", fields[1], outcome.accepted and "accepted" or "error", outcome.message),
         status_row("session", "host", phase, state.map, state.clients, state.server and 1 or 0)}
-    if accepted then
-        rows[#rows + 1] = weapon_result_row(result, status_row)
-        if result.ok then rows[#rows + 1] = equipped_row(state, result.pawn, pawn, save, status_row) end
-    end
+    if outcome.report then rows[#rows + 1] = outcome.report end
+    if outcome.equipped then rows[#rows + 1] = outcome.equipped end
     return table.concat(rows, "\n") .. "\n"
 end
 

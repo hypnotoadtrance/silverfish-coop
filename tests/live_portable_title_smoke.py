@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bootstrap import install_stage
 from tools.silverfish import (
     direct_ip, embedded_startup, native_finite_shop, native_guest_consumable, native_guest_drop, native_guest_drop_record,
-    native_guest_melee,
+    native_guest_melee, native_guest_weapon,
     native_dialogue, native_host_save, native_inventory, native_inventory_grant, native_loose_pickup, native_smg_hold,
     native_anomaly_effects, native_critters, native_destructibles, native_lantern, native_npc_barter, native_loot, native_prop_carry, native_stash, native_stock_switch, native_weapon_fire_view,
     native_host_stack_drop, native_player_avatar, native_stock_door, native_stock_enemy_drops, native_world_loot, runtime,
@@ -327,7 +327,7 @@ def stock_shovel_overlay(game: Path):
         yield {"stock_shovel": shovel, "hold_report": report}
 
 
-def suppress_one_melee_release_reply(game: Path):
+def suppress_combat_replies(game: Path, *, melee: bool, weapon: bool):
     original = (
         "        SilverfishPublishLocalBridgeReply(pending.ticket,\n"
         "            guest_combat(fields, state, current_phase, sequence, status_row, players.is_standing_guest))"
@@ -335,14 +335,20 @@ def suppress_one_melee_release_reply(game: Path):
 
     def patch(script):
         if script.count(original) != 1:
-            raise ValueError("The replica lacks the compact melee reply dispatcher")
+            raise ValueError("The replica lacks the compact combat reply dispatcher")
         injected = '''        local reply = guest_combat(fields, state, current_phase, sequence, status_row, players.is_standing_guest)
-        local release = fields[2] == "native-guest-melee-input-edge" and fields[4] == "release"
-        if release and not status_publication.test_melee_release_reply_dropped and reply:find("\\taccepted\\t", 1, true) then
-            status_publication.test_melee_release_reply_dropped = true
+        local action = fields[2]
+        local release = TEST_MELEE and action == "native-guest-melee-input-edge" and fields[4] == "release"
+        local weapon = TEST_WEAPON and (action == "native-guest-weapon-select"
+            or action == "native-guest-weapon-fire" or action == "native-guest-weapon-reload")
+        status_publication.test_combat_replies_dropped = status_publication.test_combat_replies_dropped or {}
+        if (release or weapon) and fields[#fields]:match("^op:")
+            and not status_publication.test_combat_replies_dropped[action] and reply:find("\\taccepted\\t", 1, true) then
+            status_publication.test_combat_replies_dropped[action] = true
         else
             SilverfishPublishLocalBridgeReply(pending.ticket, reply)
         end'''
+        injected = injected.replace("TEST_MELEE", str(melee).lower()).replace("TEST_WEAPON", str(weapon).lower())
         return script.replace(original, injected, 1)
 
     return portable_main_overlay(game, patch)
@@ -945,7 +951,8 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
     loaded_press = await submit(guest_run, "native-guest-primary-input-fixture")
     assert loaded_press["ok"], loaded_press
     capture = loaded_press["native_guest_primary_fixture"]
-    shot = (await input_result("native_guest_primary_input", capture["sequence"]))["native_guest_weapon"]
+    fire_event = await input_result("native_guest_primary_input", capture["sequence"])
+    shot = fire_event["native_guest_weapon"]
     assert (shot["guid"], shot["before"], shot["after"], shot["projectiles"]) == (guest_guid, 1, 0, 1), shot
     if rusty:
         retirement = await command(host, "retirement-read")
@@ -1030,7 +1037,13 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
     if memory_queue:
         for filename in ("native-guest-primary-events", "native-guest-held-fire-events"):
             assert not (guest.bridge.directory / filename).exists(), filename
+    selections = [row for row in await resident_events(guest_run, guest_frame)
+                  if row["event"] == "native_guest_equipment_selected"]
+    recovered = {"equipment": any(row.get(native_guest_weapon.REPLY_RECOVERED) for row in selections),
+                 "fire": fire_event.get(native_guest_weapon.REPLY_RECOVERED) is True,
+                 "reload": reload_event.get(native_guest_weapon.REPLY_RECOVERED) is True}
     return {**combat, "weapon_kind": kind, "host_stock_click": host_click, "guest_heard_host": guest_heard, "guest_primary_input": press,
+            "recovered_missing_replies": recovered,
             "guest_primary_publication": expected_publication,
             "host_heard_guest": host_heard, "guest_click": guest_click, "guest_cue_receipts": events,
             "guest_live_round": shot, "guest_projectile_retired_during_birth": rusty,
@@ -1441,7 +1454,8 @@ async def verify_stock_melee_edges_only(host: Seat, guest: Seat, pawn: str) -> d
     first_person_contacts = int(await observe("melee-local-read"))
     assert first_person_contacts >= 5, (first_person_contacts, edges)
     recovered, = [event for event in await resident_events(guest.client / "run", frame)
-                  if event["time_unix"] >= started and event.get(native_guest_melee.REPLY_RECOVERED)]
+                  if event["time_unix"] >= started and event["event"] == "native_guest_melee_edge"
+                  and event.get(native_guest_melee.REPLY_RECOVERED)]
     assert recovered["event"] == "native_guest_melee_edge" and recovered["edge"] == "release", recovered
     async def command(seat, action):
         return await portable_probe_command(seat.bridge, "portable-npc-override", action)
@@ -8796,8 +8810,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["stock_nearby_overlays"] = [probes.enter_context(stock_nearby_overlay(game)) for game in games]
         if stock_bandage_revisit:
             proof["loose_revisit_overlays"] = [probes.enter_context(loose_revisit_overlay(game)) for game in games]
-        if stock_melee_edges:
-            proof["melee_release_reply_overlays"] = [probes.enter_context(suppress_one_melee_release_reply(game)) for game in games]
+        if stock_melee_edges or rusty_pistol:
+            proof["combat_reply_overlays"] = [probes.enter_context(suppress_combat_replies(
+                game, melee=stock_melee_edges, weapon=rusty_pistol)) for game in games]
         if stock_shovel or stock_buried_placements:
             proof["stock_shovel_overlays"] = [probes.enter_context(stock_shovel_overlay(game)) for game in games]
         if stock_shovel_quest or stock_dead_drops or stock_authored_quest_placement:

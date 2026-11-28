@@ -2486,7 +2486,8 @@ class Host:
                 result = await self.native_pickup.buy(self, bridge, character, request["operation_id"], target)
             elif action == native_guest_weapon.SELECT_EQUIPMENT:
                 async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
-                    result = await native_guest_weapon.select_equipment(self, bridge, character, target)
+                    result = await native_guest_weapon.select_equipment(
+                        self, bridge, character, target, request["operation_id"])
             elif action == native_guest_weapon.SET_FIRE_MODE:
                 result = await native_guest_weapon.store_fire_mode(self, bridge, character, target)
             elif action in native_guest_weapon.GUEST_ACTIONS:

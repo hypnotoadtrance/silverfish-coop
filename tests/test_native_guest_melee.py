@@ -369,8 +369,8 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await handler.request(bridge, "guest", target, OPERATION), result)
         first, retry = bridge.command.await_args_list
         self.assertEqual(first.args, retry.args)
-        self.assertEqual(first.args[-1], OPERATION)
-        self.assertEqual(first.kwargs["timeout"], melee.MELEE_REPLY_WAIT)
+        self.assertEqual(first.args[-1], f"op:{OPERATION}")
+        self.assertEqual(first.kwargs["timeout"], 0.75)
         self.assertFalse(host.stopping)
         self.assertFalse(host.native_checkpoint_unsafe)
         host.checkpoint_native.assert_not_awaited()

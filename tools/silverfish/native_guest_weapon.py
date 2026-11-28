@@ -5,17 +5,20 @@ import time
 import uuid
 
 from . import guest_weapon_profiles, native_guest_melee, native_inventory, party
-from .local_bridge import LocalCommandNotSubmitted
+from .local_bridge import REPLY_RECOVERED, LocalCommandNotSubmitted, LocalCommandReplyUnavailable, combat_command
 
 GUEST_ACTIONS = ("native-guest-weapon-inspect", "native-guest-weapon-equip", "native-guest-weapon-fire",
                  "native-guest-weapon-reload")
-COMPACT_ACTIONS = frozenset(("native-guest-weapon-fire", "native-guest-weapon-reload"))
+SELECT_EQUIPMENT = "native-guest-weapon-select"
+COMPACT_ACTIONS = frozenset({SELECT_EQUIPMENT, "native-guest-weapon-equip", "native-guest-weapon-fire",
+                             "native-guest-weapon-reload"})
 # These bridge refusals come from the Lua preflight, before it calls the native weapon operation.
 _PREFLIGHT_REFUSALS = frozenset({
     "A native weapon operation needs an exact guest and item GUID",
     "native_guest_weapon_fixtures_disabled",
     "The matched native weapon add-on is unavailable",
     "guest_weapon_refused_detached_save",
+    "native_guest_weapon_operation_conflict",
 })
 REPLY_HEADER = "native-guest-weapon-reply\t1\n"
 REPLY_BYTES = "native_guest_weapon_reply_bytes"
@@ -25,7 +28,6 @@ SHOT_DIRECTION = re.compile(r"-?[01]\.[0-9]{6}(?:,-?[01]\.[0-9]{6}){2}")
 SHOT_POSITION = re.compile(r"-?[0-9]{1,7}\.[0-9]{3}(?:,-?[0-9]{1,7}\.[0-9]{3}){2}")
 SHOT_ACTOR_PATH = re.compile(r"/[A-Za-z0-9_]+/[A-Za-z0-9_/.]+:PersistentLevel\.[A-Za-z0-9_.]+")
 SHOT_NPC_REFERENCE = re.compile(r"npc:([1-9][0-9]{0,4})")
-SELECT_EQUIPMENT = "native-guest-weapon-select"
 SET_FIRE_MODE = "native-guest-weapon-mode-store"
 FIRE_MODES = ("auto", "semi")
 BARREL_MODES = ("loki-primary", "loki-underbarrel")
@@ -91,7 +93,9 @@ def valid_primary_shot(kind: str, view: str) -> bool:
     return valid_shot_view(view)
 
 
-async def select_equipment(host, bridge, character: str, target: str | None) -> dict:
+async def select_equipment(host, bridge, character: str, target: str | None, operation_id: str) -> dict:
+    if not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
+        raise party.RuleError("invalid_operation_id")
     area = host.last_game.get("map")
     epoch, _, guid = target.partition("@") if isinstance(target, str) else ("", "", "")
     if not GUID.fullmatch(guid) or epoch != host.zone_epoch:
@@ -110,7 +114,10 @@ async def select_equipment(host, bridge, character: str, target: str | None) -> 
     host.native_checkpoint_unsafe = True
     try:
         try:
-            snapshot = await bridge.command(SELECT_EQUIPMENT, pawn, guid, timeout=3)
+            snapshot = await combat_command(bridge, (SELECT_EQUIPMENT, pawn, guid), operation_id, timeout=3)
+        except LocalCommandReplyUnavailable as error:
+            host.native_checkpoint_unsafe = False
+            raise party.RuleError("native_guest_weapon_reply_unavailable") from error
         except RuntimeError as error:
             reason = str(error)
             if not isinstance(error, LocalCommandNotSubmitted) and reason not in _PREFLIGHT_REFUSALS:
@@ -131,9 +138,13 @@ async def select_equipment(host, bridge, character: str, target: str | None) -> 
         if (proof.get("status") != "equipped" or type(loaded := proof.get("stored_ammo")) is not int
                 or loaded < -1 or loaded != proof.get("actor_ammo")):
             raise RuntimeError("Guest equipment selection did not preserve the stock item")
-        host.last_game, host.last_seen = snapshot, time.monotonic()
+        if REPLY_BYTES not in snapshot:
+            host.last_game, host.last_seen = snapshot, time.monotonic()
         host.native_checkpoint_unsafe = False
-        return {"native_guest_weapon": proof}
+        result = {"native_guest_weapon": proof}
+        if snapshot.get(REPLY_RECOVERED):
+            result[REPLY_RECOVERED] = True
+        return result
     finally:
         if host.native_checkpoint_unsafe:
             host.stopping = True
@@ -162,7 +173,8 @@ async def service_equipment_selection(client, active: bool) -> None:
         result = await client.gameplay_action(SELECT_EQUIPMENT, operation, f"{client.zone_epoch}@{guid}")
     except (OSError, RuntimeError, ValueError) as error:
         reason = str(error)
-        if reason in {"native_guest_selection_unavailable", "game_connection_unavailable", "guest_weapon_refused_detached_save"}:
+        if reason in {"native_guest_selection_unavailable", "game_connection_unavailable",
+                      "guest_weapon_refused_detached_save", "native_guest_weapon_reply_unavailable"}:
             client.equipment_selection_retry = selection, time.monotonic() + .8
             return
         client.control.event("native_guest_equipment_selection_rejected", sequence=sequence, reason=reason)
@@ -295,7 +307,13 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
     try:
         if bandit_fixture is None:
             try:
-                snapshot = await bridge.command(action, pawn, guid, *extra, timeout=5)
+                if action in COMPACT_ACTIONS and not fixture:
+                    snapshot = await combat_command(bridge, (action, pawn, guid, *extra), operation_id, timeout=5)
+                else:
+                    snapshot = await bridge.command(action, pawn, guid, *extra, timeout=5)
+            except LocalCommandReplyUnavailable as error:
+                host.native_checkpoint_unsafe = False
+                raise party.RuleError("native_guest_weapon_reply_unavailable") from error
             except RuntimeError as error:
                 reason = str(error)
                 if not isinstance(error, LocalCommandNotSubmitted) and reason not in _PREFLIGHT_REFUSALS:
@@ -413,6 +431,8 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
         result = {"native_guest_weapon": dict(proof, kind="camera", class_path=CAMERA_PATH) if camera else proof}
         if compact:
             result[REPLY_BYTES] = snapshot[REPLY_BYTES]
+        if snapshot.get(REPLY_RECOVERED):
+            result[REPLY_RECOVERED] = True
         if shot_view is not None:
             geometry, _, contact = shot_view.partition("|")
             direction, has_geometry, points = geometry.partition(";")
