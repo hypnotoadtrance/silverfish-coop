@@ -377,7 +377,123 @@ local function tick()
     if not ok then return finish(statics, false, failure) end
 end
 
+-- The portable fixture observes the stock session teardown in memory. The
+-- separate same-name canary proof runs only when its explicit command arms it.
+local function install_lifecycle_witness()
+    local prepare, remember, restore = SilverfishPrepareNativeGuestSaveView,
+        SilverfishRememberNativeGuestTravelStep, SilverfishRestoreNativeGuestSaveView
+    local release, refresh, selected = SilverfishReleaseNativeSaveScope,
+        SilverfishRefreshNativeTitleSingleplayer, SilverfishSelectedNativeSaveScope
+    if type(prepare) ~= "function" or type(remember) ~= "function" or type(restore) ~= "function"
+        or type(release) ~= "function" or type(refresh) ~= "function" or type(selected) ~= "function" then return end
+
+    local pending_guest, finished
+    local function address(value) return valid(value) and value:GetAddress() or 0 end
+    local function fields(world)
+        local instance = valid(world) and world.OwningGameInstance
+        if not valid(instance) then return end
+        local save = instance.SaveSlot_Ref
+        return {instance = address(instance), save = address(save), save_object = save,
+            save_class = valid(save) and save:GetClass():GetFullName(), slot = text(instance.CurrentSaveSlot),
+            autosave = instance.SaveAfterTransition,
+            travel = instance.Travel_TimeStep, listed = instance.SaveFileExists}
+    end
+    local function capture(world)
+        local accepted, snapshot = pcall(fields, world)
+        return accepted and snapshot or nil
+    end
+
+    SilverfishPrepareNativeGuestSaveView = function(world, instance, save, id)
+        local first = not pending_guest or pending_guest.id ~= id
+        local before = first and capture(world)
+        local accepted = prepare(world, instance, save, id)
+        if accepted == true and first then
+            local after = capture(world)
+            pending_guest = {id = id, before = before, isolated = after,
+                installed = before and after and before.instance == after.instance and after.instance == address(instance)
+                    and before.save ~= after.save and after.save == address(save)
+                    and after.slot == "SFCoopGuest_" .. id and after.autosave == false and selected() == id}
+        end
+        return accepted
+    end
+
+    SilverfishRememberNativeGuestTravelStep = function(world, instance, save, id, previous)
+        local accepted = remember(world, instance, save, id, previous)
+        if accepted == true and pending_guest and pending_guest.id == id and pending_guest.travel_before == nil then
+            pending_guest.travel_before = previous
+        end
+        return accepted
+    end
+
+    SilverfishRestoreNativeGuestSaveView = function(world, id)
+        local guest = pending_guest and pending_guest.id == id and pending_guest
+        local before, route = guest and capture(world), guest and selected()
+        local accepted = restore(world, id)
+        if guest and accepted == true and not guest.restore then
+            local after = capture(world)
+            local original = guest.before and guest.before.save_object
+            guest.restore = {route = route == id and selected() == id, before = before, after = after,
+                original_save = address(original)}
+        end
+        return accepted
+    end
+
+    SilverfishReleaseNativeSaveScope = function(id)
+        local route = selected()
+        local accepted = release(id)
+        if accepted == true then
+            finished = {id = id, guest = pending_guest and pending_guest.id == id and pending_guest or nil,
+                released = route == id and selected() == nil}
+            pending_guest = nil
+        end
+        return accepted
+    end
+
+    SilverfishRefreshNativeTitleSingleplayer = function(world, controller)
+        local route = selected()
+        local accepted, reason = refresh(world, controller)
+        if finished and not finished.continued then
+            local after = capture(world)
+            finished.continued = {accepted = accepted == true and route == nil and selected() == nil,
+                cached = after and after.slot == "" and after.listed == true and after.save ~= 0
+                    and after.save_class == "BlueprintGeneratedClass " .. save_path}
+        end
+        return accepted, reason
+    end
+
+    function SilverfishReadSameProcessSaveLifecycle(world, id)
+        require_that(selected() == nil and finished and finished.id == id and finished.continued,
+            "no matching completed native save lifecycle")
+        local guest = finished.guest
+        local slot, autosave, save, travel = false, false, false, false
+        local restored_save, restored_slot, restored_travel = false, false, false
+        if guest and guest.installed and guest.restore and guest.restore.route then
+            local before, after = guest.restore.before, guest.restore.after
+            if before and after and guest.before.instance == before.instance and before.instance == after.instance then
+                local old, isolated = guest.before, guest.isolated
+                local expected_slot = before.slot == isolated.slot and old.slot or before.slot
+                local expected_save = before.save == isolated.save and guest.restore.original_save or before.save
+                local expected_travel = before.travel == 0 and guest.travel_before or before.travel
+                slot, autosave, save = after.slot == expected_slot, after.autosave == old.autosave,
+                    after.save == expected_save
+                travel = type(expected_travel) == "number" and after.travel == expected_travel
+                restored_save = save and before.save == isolated.save and after.save == old.save and old.save ~= 0
+                restored_slot = slot and before.slot == isolated.slot and before.slot ~= after.slot
+                restored_travel = travel and before.travel == 0 and after.travel ~= 0
+            end
+        end
+        local stale = restore(world, id) ~= true and release(id) ~= true and selected() == nil
+        local function bit(value) return value and "1" or "0" end
+        return table.concat({guest and "guest" or "host", bit(guest and guest.installed),
+            bit(guest and guest.restore and guest.restore.route), bit(save), bit(slot), bit(autosave), bit(travel),
+            bit(guest and guest.travel_before ~= nil), bit(restored_save), bit(restored_slot), bit(restored_travel),
+            bit(finished.released), bit(finished.continued.accepted),
+            bit(finished.continued.cached), bit(stale)}, ":")
+    end
+end
+
 if grouped then
+    install_lifecycle_witness()
     function SilverfishStartSameProcessSaveProof(request, first, second, expected_profile)
         local function token(value)
             return type(value) == "string" and #value == 32 and value:match("^[0-9a-f]+$") and value:find("[1-9a-f]")

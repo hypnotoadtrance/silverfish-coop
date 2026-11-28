@@ -644,7 +644,7 @@ local function run_command(fields, state, current_phase)
             return "selected co-op save scope"
         end
         if native_stock_creator.guest_busy() then error("Finish returning from the co-op guest creator first", 0) end
-        native_save_scope.release(argument)
+        native_save_scope.release(argument, context.world)
         wallet.release()
         if type(SilverfishClearInventoryGrants) == "function" then SilverfishClearInventoryGrants() end
         native_title_entry.refresh_singleplayer(context)

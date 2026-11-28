@@ -61,7 +61,15 @@ def same_process_save_overlay(source: str) -> str:
     anchor = '    if command == "native-save-scope-select" or command == "native-save-scope-release" then\n'
     if source.count(anchor) != 1:
         raise ValueError("The private save scope command anchor changed")
-    action = '''    if command == "native-same-process-save-proof" then
+    action = '''    if command == "native-save-lifecycle-proof" then
+        local context = role == "idle" and native_title_entry.probe(state, current_phase)
+        if #fields ~= 3 or not context or type(SilverfishReadSameProcessSaveLifecycle) ~= "function" then
+            error("Read the private native save lifecycle at an unscoped stock title", 0)
+        end
+        return SilverfishReadSameProcessSaveLifecycle(context.world, fields[3])
+    end
+
+    if command == "native-same-process-save-proof" then
         if #fields ~= 6 or role ~= "idle" or not native_title_entry.probe(state, current_phase)
             or type(SilverfishStartSameProcessSaveProof) ~= "function" then
             error("Arm the private save proof at an unscoped stock title", 0)
@@ -102,6 +110,35 @@ def _proof_hashes(case):
         with (case / f"{name}.sav").open("rb") as item:
             hashes[name] = file_digest(item, "sha256").hexdigest()
     return hashes
+
+
+async def verify_installed_save_lifecycle(host, guest, session) -> dict:
+    """Check ordinary native scope release and stock Continue on both portable seats."""
+    keys = ("guest_view_installed", "guest_restored_while_scoped", "save", "slot", "autosave",
+            "travel_step", "travel_step_remembered", "previous_save_rebound", "previous_slot_rebound",
+            "previous_travel_rebound", "scope_released", "native_continue", "continue_cache", "stale_scope_refused")
+
+    async def verify_seat(seat, role, identifier, pid):
+        assert seat.bridge.process.pid == pid
+        scope = uuid.UUID(identifier).hex
+        response = await seat.bridge.command("native-save-lifecycle-proof", scope)
+        observed_role, *flags = response["ack"]["message"].split(":")
+        assert observed_role == role and all(flag in {"0", "1"} for flag in flags), response["ack"]
+        report = dict(zip(keys, (flag == "1" for flag in flags), strict=True))
+        assert all(report[key] for key in keys[-4:]), report
+        if role == "guest":
+            assert all(report[key] for key in keys[:6]), report
+        else:
+            assert not any(report[key] for key in keys[:-4]), report
+        cache = await seat.bridge.command("native-title-stock-profile-fixture", "cache")
+        assert cache["ack"]["message"], cache["ack"]
+        return {"pid": pid, "scope_id": scope, "stock_profile_cache": cache["ack"]["message"], **report}
+
+    first, second = await asyncio.gather(
+        verify_seat(host, "host", session["campaign_id"], session["host_pid"]),
+        verify_seat(guest, "guest", session["character_id"], session["guest_pid"]),
+    )
+    return {"host": first, "guest": second}
 
 
 async def verify_installed_save_scope(seat) -> dict:

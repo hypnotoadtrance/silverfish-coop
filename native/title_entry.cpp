@@ -1,8 +1,10 @@
 #include "title_entry.hpp"
 #include "local_bridge.hpp"
+#include "save_scope.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <utility>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
@@ -32,6 +34,11 @@ namespace
     constexpr auto widget_path = STR("/Game/Classes/GUI/MainMenu_Widget.MainMenu_Widget_C");
     constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto viewport_path = STR("/Script/Engine.GameViewportClient");
+    constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
+    constexpr auto recent_save_path =
+        STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:Find_MostRecentSaveFile");
+    constexpr auto refresh_scope_unavailable = "title_stock_save_scope_unavailable";
+    constexpr auto refresh_failed = "title_stock_save_refresh_failed";
     constexpr std::uint64_t sequence_limit = std::uint64_t{1} << 53;
 
     bool live(U::UObject* object)
@@ -291,6 +298,41 @@ namespace
         return 8;
     }
 
+    struct RecentSaveParameters
+    {
+        std::uint8_t found{};
+        U::UObject* save{};
+    };
+
+    bool matches_out_parameter(U::FProperty* property, int offset, int size)
+    {
+        constexpr auto flags = static_cast<U::EPropertyFlags>(U::CPF_Parm | U::CPF_OutParm);
+        return property && property->GetOffset_Internal() == offset && property->GetSize() == size &&
+            property->HasAllPropertyFlags(flags) &&
+            !property->HasAnyPropertyFlags(U::CPF_ReturnParm | U::CPF_ReferenceParm);
+    }
+
+    int lua_refresh_singleplayer(const Lua& lua)
+    {
+        auto* stack = lua.get_lua_state();
+        std::string_view error = refresh_scope_unavailable;
+        if (U::IsInGameThreadRaw() && lua_gettop(stack) == 2 &&
+            valid_wrapper(stack, 1, "UWorld") && valid_wrapper(stack, 2, "AActor"))
+        {
+            auto* world = lua.get_userdata<RC::LuaType::UWorld>(1, true).get_remote_cpp_object();
+            auto* controller = lua.get_userdata<RC::LuaType::AActor>(2, true).get_remote_cpp_object();
+            error = title::refresh_singleplayer({world, controller, title::Phase::ready});
+        }
+        if (error.empty())
+        {
+            lua_pushboolean(stack, true);
+            return 1;
+        }
+        lua_pushnil(stack);
+        lua.set_string(error);
+        return 2;
+    }
+
     int lua_rows(const Lua& lua)
     {
         const auto input = lua_input(lua, 8);
@@ -434,6 +476,59 @@ std::optional<title::Observation> title::observe(const Input& input)
     return report;
 }
 
+std::string_view title::refresh_singleplayer(const Input& input)
+{
+    const auto ready = [&input] {
+        if (silverfish::native_save_scope::active()) return false;
+        const auto report = observe(input);
+        return report && report->ready();
+    };
+    if (!ready()) return refresh_scope_unavailable;
+
+    auto* instance = object_field(input.world, STR("OwningGameInstance")).value_or(nullptr);
+    static U::FWeakObjectPtr save_cache, recent_cache;
+    auto* save_class = loaded<U::UClass>(save_cache, save_path);
+    auto* recent = loaded<U::UFunction>(recent_cache, recent_save_path);
+    auto* exists = field<U::FBoolProperty>(instance, STR("SaveFileExists"));
+    auto* slot = field<U::FObjectProperty>(instance, STR("SaveSlot_Ref"));
+    auto* name = field<U::FStrProperty>(instance, STR("CurrentSaveSlot"));
+    if (!live(instance) || !live(recent) || !save_class || !exists || !slot || !name ||
+        slot->GetPropertyClass().Get() != save_class || name->GetSize() != sizeof(U::FString) ||
+        recent->GetOuterPrivate() != instance->GetClassPrivate() ||
+        recent->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net | U::FUNC_Static) ||
+        !recent->HasAnyFunctionFlags(U::FUNC_HasOutParms) || recent->GetNumParms() != 2 ||
+        recent->GetParmsSize() != sizeof(RecentSaveParameters) || recent->GetReturnProperty())
+        return refresh_failed;
+
+    auto* found = field<U::FBoolProperty>(recent, STR("SaveFileFound"));
+    auto* save = field<U::FObjectProperty>(recent, STR("Save"));
+    if (!matches_out_parameter(found, offsetof(RecentSaveParameters, found), sizeof(std::uint8_t)) ||
+        found->GetByteOffset() != 0 ||
+        !matches_out_parameter(save, offsetof(RecentSaveParameters, save), sizeof(U::UObject*)) ||
+        save->GetPropertyClass().Get() != save_class) return refresh_failed;
+
+    const U::FWeakObjectPtr world_ref{input.world}, controller_ref{input.controller}, instance_ref{instance};
+    RecentSaveParameters result;
+    instance->ProcessEvent(recent, &result);
+    if (world_ref.Get() != input.world || controller_ref.Get() != input.controller || instance_ref.Get() != instance ||
+        !ready() || object_field(input.world, STR("OwningGameInstance")) != instance)
+        return refresh_scope_unavailable;
+
+    // The stock scan owns SaveFileExists. Its out flag must agree before the
+    // title adopts the solo save, including the case where no save was found.
+    const bool save_found = found->GetPropertyValueInContainer(&result);
+    if (exists->GetPropertyValueInContainer(instance) != save_found) return refresh_failed;
+    auto* solo = save_found ? save->GetObjectPropertyValue(save->ContainerPtrToValuePtr<void>(&result)) : nullptr;
+    if (save_found && (!live(solo) || solo->GetClassPrivate() != save_class)) return refresh_failed;
+
+    auto* current = slot->ContainerPtrToValuePtr<void>(instance);
+    slot->SetObjectPropertyValue(current, solo);
+    name->SetPropertyValueInContainer(instance, U::FString{});
+    if (slot->GetObjectPropertyValue(current) != solo || !name->GetPropertyValueInContainer(instance).IsEmpty() ||
+        exists->GetPropertyValueInContainer(instance) != save_found) return refresh_failed;
+    return {};
+}
+
 std::optional<title::Rows> title::rows(const Input& input, std::optional<std::uint64_t> startup_sequence)
 {
     const auto report = observe(input);
@@ -467,4 +562,5 @@ void title::register_lua(Lua& lua)
 {
     lua.register_function("SilverfishObserveNativeTitle", lua_observe);
     lua.register_function("SilverfishNativeTitleRows", lua_rows);
+    lua.register_function("SilverfishRefreshNativeTitleSingleplayer", lua_refresh_singleplayer);
 }

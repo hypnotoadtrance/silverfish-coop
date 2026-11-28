@@ -3,13 +3,17 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
+#include <LuaType/LuaUObject.hpp>
+#include <LuaType/LuaUWorld.hpp>
 #include <Unreal/Core/Containers/FString.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/FStrProperty.hpp>
@@ -17,6 +21,7 @@
 #include <Unreal/FWeakObjectPtr.hpp>
 #include <Unreal/UObjectHashTables.hpp>
 #include <Unreal/UnrealInitializer.hpp>
+#include <Unreal/World.hpp>
 
 namespace
 {
@@ -35,6 +40,16 @@ namespace
     std::mutex lifecycle;
     std::shared_ptr<const Route> selected;
     std::uint64_t generation{};
+
+    struct GuestView
+    {
+        U::FWeakObjectPtr instance, save, previous_save;
+        std::wstring slot, previous_slot;
+        bool previous_autosave{};
+        std::optional<double> previous_travel_step;
+    };
+
+    std::optional<GuestView> guest;
 
     struct Target
     {
@@ -72,6 +87,169 @@ namespace
     {
         return id.size() == 32 && id.find_first_not_of('0') != id.npos &&
             std::ranges::all_of(id, [](char letter) { return (letter >= '0' && letter <= '9') || (letter >= 'a' && letter <= 'f'); });
+    }
+
+    bool live(U::UObject* object)
+    {
+        constexpr auto excluded = static_cast<U::EObjectFlags>(U::RF_ClassDefaultObject | U::RF_ArchetypeObject |
+            U::RF_BeginDestroyed | U::RF_FinishDestroyed);
+        return object && !object->HasAnyFlags(excluded) && !object->IsUnreachable();
+    }
+
+    U::UClass* loaded_class(U::FWeakObjectPtr& cache, const U::TCHAR* path)
+    {
+        if (auto* value = cache.Get()) return static_cast<U::UClass*>(value);
+        auto* value = U::Cast<U::UClass>(U::FUObjectHashTables::StaticFindObjectByPath(nullptr, path, false, true));
+        cache = value;
+        return value;
+    }
+
+    template <typename Property>
+    Property* field(U::UObject* owner, const U::TCHAR* name)
+    {
+        auto* property = owner ? U::CastField<Property>(owner->GetPropertyByNameInChain(name)) : nullptr;
+        return property && property->GetArrayDim() == 1 ? property : nullptr;
+    }
+
+    U::UObject* object(U::UObject* owner, const U::TCHAR* name)
+    {
+        auto* property = field<U::FObjectProperty>(owner, name);
+        return property ? property->GetObjectPropertyValue(property->ContainerPtrToValuePtr<void>(owner)) : nullptr;
+    }
+
+    std::wstring_view view(const U::FString& text)
+    {
+        return {*text, static_cast<std::size_t>(text.Len())};
+    }
+
+    struct GuestFields
+    {
+        U::UObject* instance{};
+        U::UClass* save_class{};
+        U::FObjectProperty* save{};
+        U::FStrProperty* slot{};
+        U::FBoolProperty* autosave{};
+        U::FDoubleProperty* travel_step{};
+        bool at_title{};
+
+        U::UObject* current_save() const
+        {
+            return save->GetObjectPropertyValue(save->ContainerPtrToValuePtr<void>(instance));
+        }
+
+        void set_save(U::UObject* object) const
+        {
+            save->SetObjectPropertyValue(save->ContainerPtrToValuePtr<void>(instance), object);
+        }
+
+        std::wstring_view current_slot() const { return view(slot->GetPropertyValueInContainer(instance)); }
+        bool current_autosave() const { return autosave->GetPropertyValueInContainer(instance); }
+        bool installed(U::UObject* new_save, std::wstring_view new_slot) const
+        {
+            return current_save() == new_save && current_slot() == new_slot && !current_autosave();
+        }
+
+        void install(U::UObject* new_save, const std::wstring& new_slot) const
+        {
+            if (current_slot() != new_slot) slot->SetPropertyValueInContainer(instance, U::FString{new_slot});
+            if (current_save() != new_save) set_save(new_save);
+            if (current_autosave()) autosave->SetPropertyValueInContainer(instance, false);
+        }
+    };
+
+    std::optional<GuestFields> guest_fields(U::UWorld* world)
+    {
+        if (!U::UnrealInitializer::ShouldUseHashTables() || !live(world)) return {};
+        static U::FWeakObjectPtr world_type, instance_type, save_type, local_type, viewport_type;
+        if (world->GetClassPrivate() != loaded_class(world_type, STR("/Script/Engine.World"))) return {};
+        auto* instance = object(world, STR("OwningGameInstance"));
+        if (!live(instance) || instance->GetClassPrivate() != loaded_class(instance_type,
+            STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C"))) return {};
+
+        auto* local_players = field<U::FArrayProperty>(instance, STR("LocalPlayers"));
+        auto* entry = local_players ? U::CastField<U::FObjectProperty>(local_players->GetInner()) : nullptr;
+        if (!entry || entry->GetArrayDim() != 1) return {};
+        U::FScriptArrayHelper players(local_players, local_players->ContainerPtrToValuePtr<void>(instance));
+        if (players.Num() != 1) return {};
+        auto* local = entry->GetObjectPropertyValue(players.GetRawPtr(0));
+        auto* local_class = loaded_class(local_type, STR("/Script/Engine.LocalPlayer"));
+        auto* viewport = live(local) && local_class && local->IsA(local_class) ? object(local, STR("ViewportClient")) : nullptr;
+        if (!live(viewport) || viewport->GetClassPrivate() != loaded_class(viewport_type, STR("/Script/Engine.GameViewportClient")) ||
+            viewport->GetOuterPrivate() != instance->GetOuterPrivate() || object(viewport, STR("World")) != world ||
+            object(viewport, STR("GameInstance")) != instance) return {};
+
+        auto* driver_field = field<U::FObjectProperty>(world, STR("NetDriver"));
+        if (!driver_field) return {};
+        auto* driver = driver_field->GetObjectPropertyValue(driver_field->ContainerPtrToValuePtr<void>(world));
+        const bool at_title = world->GetPathName() == STR("/Game/Classes/Maps/MainMenu_P.MainMenu_P");
+        if (at_title ? driver != nullptr : !live(driver) || object(driver, STR("World")) != world ||
+            !live(object(driver, STR("ServerConnection")))) return {};
+
+        auto* save_class = loaded_class(save_type, STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"));
+        auto* save = field<U::FObjectProperty>(instance, STR("SaveSlot_Ref"));
+        auto* slot = field<U::FStrProperty>(instance, STR("CurrentSaveSlot"));
+        auto* autosave = field<U::FBoolProperty>(instance, STR("SaveAfterTransition"));
+        auto* step = field<U::FDoubleProperty>(instance, STR("Travel_TimeStep"));
+        if (!save_class || !save || save->GetPropertyClass().Get() != save_class || !slot || !autosave) return {};
+        return GuestFields{instance, save_class, save, slot, autosave, step, at_title};
+    }
+
+    bool capture_guest(const GuestFields& fields, U::UObject* save, std::string_view id)
+    {
+        if (!live(save) || save->GetClassPrivate() != fields.save_class) return false;
+        std::scoped_lock lock{lifecycle};
+        if (!selected || selected->id != id) return false;
+        if (!guest)
+        {
+            auto* previous = fields.current_save();
+            auto* outer = save->GetOuterPrivate();
+            if (!fields.at_title || previous == save || !live(outer) || outer->GetPathName() != STR("/Engine/Transient"))
+                return false;
+            guest = GuestView{fields.instance, save, live(previous) ? previous : nullptr,
+                L"SFCoopGuest_" + RC::to_wstring(id), std::wstring{fields.current_slot()}, fields.current_autosave()};
+        }
+        if (guest->instance.Get() != fields.instance || guest->save.Get() != save) return false;
+        fields.install(save, guest->slot);
+        return fields.installed(save, guest->slot);
+    }
+
+    bool remember_travel_step(const GuestFields& fields, U::UObject* save, std::string_view id, double step)
+    {
+        if (!fields.at_title || !fields.travel_step || !std::isfinite(step)) return false;
+        std::scoped_lock lock{lifecycle};
+        if (!selected || selected->id != id || !guest || guest->instance.Get() != fields.instance ||
+            guest->save.Get() != save || !fields.installed(save, guest->slot) ||
+            fields.travel_step->GetPropertyValueInContainer(fields.instance) != 0) return false;
+        if (!guest->previous_travel_step) guest->previous_travel_step = step;
+        return true;
+    }
+
+    bool restore_guest(const GuestFields& fields, std::string_view id)
+    {
+        if (!fields.at_title) return false;
+        std::scoped_lock lock{lifecycle};
+        if (!selected || selected->id != id) return false;
+        if (!guest) return true;
+        if (guest->instance.Get() != fields.instance || (guest->previous_travel_step && !fields.travel_step)) return false;
+
+        auto* save = guest->save.Get();
+        auto* previous = guest->previous_save.Get();
+        if (!live(previous) || !previous->IsA(fields.save_class)) previous = nullptr;
+        const bool restore_slot = fields.current_slot() == guest->slot;
+        const bool restore_save = save && fields.current_save() == save;
+        const bool restore_travel = guest->previous_travel_step &&
+            fields.travel_step->GetPropertyValueInContainer(fields.instance) == 0;
+        if (restore_slot) fields.slot->SetPropertyValueInContainer(fields.instance, U::FString{guest->previous_slot});
+        if (restore_save) fields.set_save(previous);
+        fields.autosave->SetPropertyValueInContainer(fields.instance, guest->previous_autosave);
+        if (restore_travel) fields.travel_step->SetPropertyValueInContainer(fields.instance, *guest->previous_travel_step);
+
+        if ((restore_slot && fields.current_slot() != guest->previous_slot) ||
+            (restore_save && fields.current_save() != previous) || fields.current_autosave() != guest->previous_autosave ||
+            (restore_travel && fields.travel_step->GetPropertyValueInContainer(fields.instance) != *guest->previous_travel_step))
+            return false;
+        guest.reset();
+        return true;
     }
 
     wchar_t lower_ascii(wchar_t letter)
@@ -199,12 +377,59 @@ namespace
         return true;
     }
 
-    std::string_view stack_id(lua_State* stack)
+    std::string_view stack_id(lua_State* stack, int index, int count)
     {
-        if (lua_gettop(stack) != 1 || lua_type(stack, 1) != LUA_TSTRING) return {};
+        if (lua_gettop(stack) != count || lua_type(stack, index) != LUA_TSTRING) return {};
         std::size_t length{};
-        const auto* data = lua_tolstring(stack, 1, &length);
+        const auto* data = lua_tolstring(stack, index, &length);
         return {data, length};
+    }
+
+    template <typename Wrapper>
+    auto wrapped(const Lua& lua, int index, const char* type)
+    {
+        using Object = decltype(lua.get_userdata<Wrapper>(index, true).get_remote_cpp_object());
+        auto* stack = lua.get_lua_state();
+        if (!luaL_testudata(stack, index, type)) return Object{};
+        lua_getfield(stack, index, "IsValid");
+        if (!lua_iscfunction(stack, -1))
+        {
+            lua_pop(stack, 1);
+            return Object{};
+        }
+        lua_pushvalue(stack, index);
+        const bool valid = lua_pcall(stack, 1, 1, 0) == LUA_OK && lua_toboolean(stack, -1);
+        lua_pop(stack, 1);
+        return valid ? lua.get_userdata<Wrapper>(index, true).get_remote_cpp_object() : Object{};
+    }
+
+    int guest_command(const Lua& lua, bool remember)
+    {
+        if (!U::IsInGameThreadRaw()) return 0;
+        auto* stack = lua.get_lua_state();
+        const auto id = stack_id(stack, 4, remember ? 5 : 4);
+        bool accepted{};
+        if (scope_id(id) && (!remember || lua_type(stack, 5) == LUA_TNUMBER))
+        {
+            auto* world = wrapped<RC::LuaType::UWorld>(lua, 1, "UWorld");
+            auto* instance = wrapped<RC::LuaType::UObject>(lua, 2, "UObject");
+            auto* save = wrapped<RC::LuaType::UObject>(lua, 3, "UObject");
+            const auto fields = guest_fields(world);
+            if (fields && instance == fields->instance && save)
+                accepted = remember ? remember_travel_step(*fields, save, id, lua_tonumber(stack, 5)) : capture_guest(*fields, save, id);
+        }
+        lua_pushboolean(stack, accepted);
+        return 1;
+    }
+
+    int lua_restore_guest(const Lua& lua)
+    {
+        if (!U::IsInGameThreadRaw()) return 0;
+        auto* stack = lua.get_lua_state();
+        const auto id = stack_id(stack, 2, 2);
+        const auto fields = scope_id(id) ? guest_fields(wrapped<RC::LuaType::UWorld>(lua, 1, "UWorld")) : std::nullopt;
+        lua_pushboolean(stack, fields && restore_guest(*fields, id));
+        return 1;
     }
 
     int push_text(lua_State* stack, std::string_view result)
@@ -243,18 +468,18 @@ namespace
     {
         if (!U::IsInGameThreadRaw()) return 0;
         auto* stack = lua.get_lua_state();
-        return push_text(stack, select(stack_id(stack)));
+        return push_text(stack, select(stack_id(stack, 1, 1)));
     }
 
     int lua_release(const Lua& lua)
     {
         if (!U::IsInGameThreadRaw()) return 0;
         auto* stack = lua.get_lua_state();
-        const auto id = stack_id(stack);
+        const auto id = stack_id(stack, 1, 1);
         bool released{};
         {
             std::scoped_lock lock{lifecycle};
-            if (selected && selected->id == id)
+            if (selected && selected->id == id && !guest)
             {
                 selected.reset();
                 ++generation;
@@ -278,12 +503,21 @@ void silverfish::native_save_scope::register_lua(Lua& lua)
     lua.register_function("SilverfishSelectNativeSaveScope", lua_select);
     lua.register_function("SilverfishReleaseNativeSaveScope", lua_release);
     lua.register_function("SilverfishSelectedNativeSaveScope", lua_selected);
+    lua.register_function("SilverfishPrepareNativeGuestSaveView", [](const Lua& lua) { return guest_command(lua, false); });
+    lua.register_function("SilverfishRememberNativeGuestTravelStep", [](const Lua& lua) { return guest_command(lua, true); });
+    lua.register_function("SilverfishRestoreNativeGuestSaveView", lua_restore_guest);
+}
+
+bool silverfish::native_save_scope::active()
+{
+    return static_cast<bool>(current_route());
 }
 
 void silverfish::native_save_scope::clear()
 {
     std::scoped_lock lock{lifecycle};
     selected.reset();
+    guest.reset();
     ++generation;
 }
 
@@ -291,6 +525,7 @@ void silverfish::native_save_scope::uninstall_hooks()
 {
     std::scoped_lock lock{lifecycle};
     selected.reset();
+    guest.reset();
     ++generation;
     remove_hooks();
 }

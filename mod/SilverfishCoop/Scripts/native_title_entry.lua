@@ -124,6 +124,13 @@ function title.starting(state, phase)
 end
 
 function title.refresh_singleplayer(context)
+    if type(SilverfishRefreshNativeTitleSingleplayer) == "function" then
+        local accepted, reason = SilverfishRefreshNativeTitleSingleplayer(context.world, context.controller)
+        if accepted ~= true then error(reason or "title_stock_save_refresh_failed", 0) end
+        return
+    end
+    if os.getenv("SILVERFISH_COOP_INSTALLED_TITLE") == "1" then error("title_stock_save_refresh_failed", 0) end
+
     local instance = context.world.OwningGameInstance
     if require("native_save_scope").selected() or not exact(instance, instance_path) then
         error("title_stock_save_scope_unavailable", 0)
