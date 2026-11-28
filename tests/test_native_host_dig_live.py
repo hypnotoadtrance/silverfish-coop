@@ -60,20 +60,24 @@ class GuestDigTests(unittest.IsolatedAsyncioTestCase):
             await dig.guest_dig(self.host, self.bridge, GUEST_ID, f"{self.epoch}@{PACKAGE}", self.operation)
         self.bridge.command.assert_not_awaited()
 
-    async def test_reported_camera_angles_reach_the_host_without_replacing_the_world_snapshot(self):
+    async def test_reported_camera_pose_reaches_the_host_without_replacing_the_world_snapshot(self):
         original = self.host.last_game
         self.bridge.local_bridge = object()
-        aim = "-86.10000,35.00000,1.23000"
+        aim = "-86.10000,35.00000,1.23000,8421.1000,-578.2560,436.0000"
         self.bridge.command.return_value[dig.COMPACT_SCOPE] = PAWN
         target = dig.request_target(f"{SPADE}@{aim}", self.epoch)
         self.assertEqual(target, f"{self.target}@{aim}")
         result = await dig.guest_dig(self.host, self.bridge, GUEST_ID, target, self.operation)
         self.assertEqual(result[dig.GUEST_RESULT]["aim_source"], "guest_camera")
+        self.assertEqual(result[dig.GUEST_RESULT]["trace_origin"], [8421.1, -578.256, 436.0])
         self.assertEqual(await dig.guest_dig(self.host, self.bridge, GUEST_ID, f"{self.target}@{aim}", self.operation), result)
         self.assertIs(self.host.last_game, original)
         self.bridge.command.assert_awaited_once_with(dig.GUEST_ACTION, PAWN, SPADE, aim, timeout=3, update_status=False)
         with self.assertRaisesRegex(party.RuleError, "stock_guest_dig_camera_unqualified"):
             await dig.guest_dig(self.host, self.bridge, GUEST_ID, f"{self.target}@361.00000,0.00000,0.00000", self.operation)
+        for position in (",0.0000,1.0000", ",100000000.0001,1.0000,0.0000", ",nan,1.0000,0.0000"):
+            with self.assertRaisesRegex(ValueError, "stock_guest_dig_camera_unqualified"):
+                dig.request_target(f"{SPADE}@0.00000,0.00000,0.00000{position}", self.epoch)
 
 
 class DigReportTests(unittest.TestCase):

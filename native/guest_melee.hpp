@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <optional>
 
 namespace RC::LuaMadeSimple { class Lua; }
 namespace RC::Unreal { class UObject; class UWorld; }
@@ -17,9 +18,13 @@ namespace silverfish::native_guest_melee
     bool ordinary_world(RC::Unreal::UWorld* world);
     bool ordinary_weapon(RC::Unreal::UObject* weapon);
     bool present_local_input(RC::Unreal::UObject* pawn, RC::Unreal::UObject* weapon, bool down);
-    bool apply_stock_control_rotation(RC::Unreal::UObject* camera, RC::Unreal::UObject* controller,
-                                      std::array<double, 3>& previous);
-    bool apply_stock_aim_rotation(RC::Unreal::UObject* camera, const std::array<double, 3>& rotation,
-                                  std::array<double, 3>& previous);
-    bool restore_stock_camera_rotation(RC::Unreal::UObject* camera, const std::array<double, 3>& previous);
+    struct StockCameraPose
+    {
+        std::array<double, 3> rotation{};
+        std::optional<std::array<double, 3>> location;
+    };
+
+    bool apply_stock_camera_pose(RC::Unreal::UObject* camera, RC::Unreal::UObject* controller,
+                                 const std::optional<StockCameraPose>& pose, StockCameraPose& previous);
+    bool restore_stock_camera_pose(RC::Unreal::UObject* camera, const StockCameraPose& previous);
 }

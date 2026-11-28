@@ -194,7 +194,13 @@ local function shovel_aim(current)
     for _, axis in ipairs({angle.Pitch, angle.Yaw, angle.Roll}) do
         if type(axis) ~= "number" or axis ~= axis or math.abs(axis) > 360 then return end
     end
-    return ("%.5f,%.5f,%.5f"):format(angle.Pitch, angle.Yaw, angle.Roll)
+    local position = camera:K2_GetComponentLocation()
+    if not position then return end
+    for _, axis in ipairs({position.X, position.Y, position.Z}) do
+        if type(axis) ~= "number" or axis ~= axis or math.abs(axis) > 100000000 then return end
+    end
+    return ("%.5f,%.5f,%.5f,%.4f,%.4f,%.4f"):format(
+        angle.Pitch, angle.Yaw, angle.Roll, position.X, position.Y, position.Z)
 end
 
 local function drain_taps(current, address)

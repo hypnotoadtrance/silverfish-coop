@@ -36,15 +36,18 @@ _FRAME_SLOT = re.compile(r"SFCoop_[0-9a-f]{32}\Z")
 _FAULT = re.compile(r"stock_[a-z0-9_]{1,80}\Z")
 _STATUS = re.compile(r"[a-z][a-z0-9_]{0,80}|-")
 _ANGLE = r"-?[0-9]{1,3}\.[0-9]{5}"
-_CAMERA_AIM = re.compile(rf"{_ANGLE},{_ANGLE},{_ANGLE}")
+_POSITION = r"-?[0-9]{1,9}\.[0-9]{4}"
+_CAMERA_POSE = re.compile(rf"{_ANGLE},{_ANGLE},{_ANGLE}(?:,{_POSITION},{_POSITION},{_POSITION})?")
 _CUSTODY_FIELDS = {"state", "map", "source", "flag", "flag_value", "spade_guid", "contact", "material", "package_guid"}
 
 
-def camera_aim(value):
-    if not isinstance(value, str) or not _CAMERA_AIM.fullmatch(value):
+def camera_pose(value):
+    if not isinstance(value, str) or not _CAMERA_POSE.fullmatch(value):
         return None
-    angles = tuple(map(float, value.split(",")))
-    return angles if all(abs(angle) <= 360 for angle in angles) else None
+    pose = tuple(map(float, value.split(",")))
+    if any(abs(angle) > 360 for angle in pose[:3]) or any(abs(axis) > 100_000_000 for axis in pose[3:]):
+        return None
+    return pose
 
 
 def request_target(value, epoch):
@@ -54,7 +57,7 @@ def request_target(value, epoch):
     scoped = native_guest_melee.request_target(guid, epoch)
     if not separator:
         return scoped
-    if camera_aim(aim) is None:
+    if camera_pose(aim) is None:
         raise ValueError("stock_guest_dig_camera_unqualified")
     return f"{scoped}@{aim}"
 
@@ -64,10 +67,11 @@ async def guest_dig(host, bridge, character, target, operation):
 
     if isinstance(target, str) and target.count("@") >= 2:
         identity, _, aim = target.rpartition("@")
-        if camera_aim(aim) is None:
+        pose = camera_pose(aim)
+        if pose is None:
             raise party.RuleError("stock_guest_dig_camera_unqualified")
     else:
-        identity, aim = target, None
+        identity, aim, pose = target, None, None
     guid = native_guest_melee.current_guid(identity, host.zone_epoch)
     if not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
         raise party.RuleError("stock_guest_dig_operation_unqualified")
@@ -109,8 +113,10 @@ async def guest_dig(host, bridge, character, target, operation):
         host.last_game = snapshot
     host.last_seen = time.monotonic()
     result = {GUEST_RESULT: {"map": area, "pawn": pawn, "guid": guid, "state": "dispatched"}}
-    if aim is not None:
+    if pose is not None:
         result[GUEST_RESULT]["aim_source"] = "guest_camera"
+        if len(pose) == 6:
+            result[GUEST_RESULT]["trace_origin"] = list(pose[3:])
     receipts.append({"id": operation, "request": fingerprint, "result": result})
     del receipts[:-party.RECENT_ACTIONS]
     return result

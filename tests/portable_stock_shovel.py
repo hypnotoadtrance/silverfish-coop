@@ -278,6 +278,8 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False, hos
             assert event["event"] == "native_guest_dig_input", event
             dispatch = event[dig.GUEST_RESULT]
             assert dispatch.get("aim_source") == "guest_camera", dispatch
+            origin = dispatch.get("trace_origin")
+            assert origin and math.dist(origin, expected) < 200, (origin, expected)
         if quest_dig:
             # The buried-item branch can emit its package without leaving an ordinary terrain hole.
             return {"contact": contacts, "dispatch": dispatch}

@@ -195,9 +195,12 @@ function dig.command(fields, state, phase)
         require_true(path, "stock_guest_dig_owner_unqualified")
         local aim = {}
         if fields[5] then
-            local pitch, yaw, roll = fields[5]:match("^(%-?%d+%.%d+),(%-?%d+%.%d+),(%-?%d+%.%d+)$")
+            local component = "(%-?%d+%.%d+)"
+            local angles = component .. "," .. component .. "," .. component
+            local pitch, yaw, roll, x, y, z = fields[5]:match("^" .. angles .. "," .. angles .. "$")
+            if not pitch then pitch, yaw, roll = fields[5]:match("^" .. angles .. "$") end
             require_true(pitch, "stock_guest_dig_camera_unqualified")
-            aim = {tonumber(pitch), tonumber(yaw), tonumber(roll)}
+            aim = {tonumber(pitch), tonumber(yaw), tonumber(roll), tonumber(x), tonumber(y), tonumber(z)}
         end
         local accepted, status = SilverfishDispatchNativeGuestDig(path, save:GetAddress(), identity, table.unpack(aim))
         require_true(accepted == true, status or "stock_guest_dig_unavailable")

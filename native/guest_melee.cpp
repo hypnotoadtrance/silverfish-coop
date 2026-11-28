@@ -203,25 +203,34 @@ namespace
         return value && value->GetOffset_Internal() == 0x140 ? read_vector(value, camera, rotator_path) : std::nullopt;
     }
 
-    bool set_camera_rotation(U::UObject* camera, const Vector& rotation, bool world)
+    bool set_camera_pose(U::UObject* camera, const Vector& rotation, bool world,
+                         const std::optional<Vector>& location = std::nullopt)
     {
-        const auto* path = world ? STR("/Script/Engine.SceneComponent:K2_SetWorldRotation")
-                                 : STR("/Script/Engine.SceneComponent:K2_SetRelativeRotation");
+        const auto* path = location
+            ? (world ? STR("/Script/Engine.SceneComponent:K2_SetWorldLocationAndRotation")
+                     : STR("/Script/Engine.SceneComponent:K2_SetRelativeLocationAndRotation"))
+            : (world ? STR("/Script/Engine.SceneComponent:K2_SetWorldRotation")
+                     : STR("/Script/Engine.SceneComponent:K2_SetRelativeRotation"));
+        const int offset = location ? sizeof(Vector) : 0;
         auto* function = find<U::UFunction>(path);
+        auto* position = location ? parameter<U::FStructProperty>(function, STR("NewLocation")) : nullptr;
         auto* value = parameter<U::FStructProperty>(function, STR("NewRotation"));
         auto* hit = parameter<U::FStructProperty>(function, STR("SweepHitResult"));
         auto* sweep = parameter<U::FBoolProperty>(function, STR("bSweep"));
         auto* teleport = parameter<U::FBoolProperty>(function, STR("bTeleport"));
         if (!function || function->GetOuterPrivate() != find<U::UClass>(STR("/Script/Engine.SceneComponent")) ||
-            !function->HasAnyFunctionFlags(U::FUNC_Native) || function->GetNumParms() != 4 ||
+            !function->HasAnyFunctionFlags(U::FUNC_Native) || function->GetNumParms() != (location ? 5 : 4) ||
             function->GetReturnProperty() || function->GetParmsSize() > sizeof(TraceBuffer::values) ||
-            !vector_field(value, rotator_path) || value->GetOffset_Internal() != 0 || !hit ||
+            (location && (!vector_field(position, vector_path) || position->GetOffset_Internal() != 0)) ||
+            !vector_field(value, rotator_path) || value->GetOffset_Internal() != offset || !hit ||
             hit->GetStruct().Get() != find<U::UScriptStruct>(STR("/Script/Engine.HitResult")) ||
-            !hit->HasAnyPropertyFlags(U::CPF_OutParm) || hit->GetOffset_Internal() != 0x20 ||
-            !sweep || sweep->GetOffset_Internal() != 0x18 || !teleport || teleport->GetOffset_Internal() != 0x118) return false;
+            !hit->HasAnyPropertyFlags(U::CPF_OutParm) || hit->GetOffset_Internal() != offset + 0x20 ||
+            !sweep || sweep->GetOffset_Internal() != offset + 0x18 ||
+            !teleport || teleport->GetOffset_Internal() != offset + 0x118) return false;
         TraceBuffer buffer;
         buffer.initialize(hit);
         auto* storage = buffer.values.data();
+        if (location) std::memcpy(position->ContainerPtrToValuePtr<void>(storage), location->data(), sizeof(Vector));
         std::memcpy(value->ContainerPtrToValuePtr<void>(storage), rotation.data(), sizeof(rotation));
         sweep->SetPropertyValueInContainer(storage, false);
         teleport->SetPropertyValueInContainer(storage, true);
@@ -811,7 +820,7 @@ namespace
         fixture.restore_frame = nullptr;
         auto* camera = fixture.camera.Get();
         const auto restored = live(camera) && camera->GetOuterPrivate() == pawn && object(pawn, STR("Camera")) == camera &&
-            set_camera_rotation(camera, fixture.saved_relative, false) ? relative_rotation(camera) : std::nullopt;
+            set_camera_pose(camera, fixture.saved_relative, false) ? relative_rotation(camera) : std::nullopt;
         bool matches = restored.has_value();
         if (restored)
             for (std::size_t axis = 0; axis < restored->size(); ++axis)
@@ -1123,7 +1132,7 @@ namespace
                 if (live(camera) && camera->GetOuterPrivate() == pawn && object(pawn, STR("Camera")) == camera)
                 {
                     const auto saved = relative_rotation(camera);
-                    if (saved && set_camera_rotation(camera, staged.qualified_rotation, true))
+                    if (saved && set_camera_pose(camera, staged.qualified_rotation, true))
                     {
                         staged.saved_relative = *saved;
                         staged.restore_frame = &frame;
@@ -1684,30 +1693,30 @@ namespace
     }
 }
 
-bool silverfish::native_guest_melee::apply_stock_control_rotation(RC::Unreal::UObject* camera,
-                                                                 RC::Unreal::UObject* controller,
-                                                                 std::array<double, 3>& previous)
+bool silverfish::native_guest_melee::apply_stock_camera_pose(RC::Unreal::UObject* camera,
+                                                            RC::Unreal::UObject* controller,
+                                                            const std::optional<StockCameraPose>& pose,
+                                                            StockCameraPose& previous)
 {
-    if (!live(camera) || !live(controller)) return false;
-    const auto control = component_vector(controller, STR("/Script/Engine.Controller:GetControlRotation"), rotator_path);
-    return control && apply_stock_aim_rotation(camera, *control, previous);
-}
-
-bool silverfish::native_guest_melee::apply_stock_aim_rotation(RC::Unreal::UObject* camera,
-                                                             const std::array<double, 3>& rotation,
-                                                             std::array<double, 3>& previous)
-{
-    if (!live(camera)) return false;
+    if (!live(camera) || (!pose && !live(controller))) return false;
+    const auto rotation = pose ? std::optional{pose->rotation} :
+        component_vector(controller, STR("/Script/Engine.Controller:GetControlRotation"), rotator_path);
     const auto relative = relative_rotation(camera);
-    if (!relative || !set_camera_rotation(camera, rotation, true)) return false;
-    previous = *relative;
+    if (!rotation || !relative) return false;
+
+    const auto location = pose ? pose->location : std::nullopt;
+    const auto relative_location = location
+        ? read_vector(field<U::FStructProperty>(camera, STR("RelativeLocation")), camera)
+        : std::nullopt;
+    if ((location && !relative_location) || !set_camera_pose(camera, *rotation, true, location)) return false;
+    previous = {*relative, relative_location};
     return true;
 }
 
-bool silverfish::native_guest_melee::restore_stock_camera_rotation(RC::Unreal::UObject* camera,
-                                                                   const std::array<double, 3>& previous)
+bool silverfish::native_guest_melee::restore_stock_camera_pose(RC::Unreal::UObject* camera,
+                                                              const StockCameraPose& previous)
 {
-    return live(camera) && set_camera_rotation(camera, previous, false);
+    return live(camera) && set_camera_pose(camera, previous.rotation, false, previous.location);
 }
 
 bool silverfish::native_guest_melee::ordinary_world(RC::Unreal::UWorld* world)
