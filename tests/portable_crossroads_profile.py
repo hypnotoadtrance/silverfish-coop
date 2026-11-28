@@ -908,14 +908,15 @@ def instrument_loose_discovery(source):
         assert source.count(fallback) == 1
         source = source.replace(fallback, 'local qualified = SilverfishProfileCrossroadsCall('
                                 '"authored_pickup_scalar_fallback", refresh_authored_sources, state, phase)')
-    scoped_status = "and publish(state.map, binding.pawn:GetAddress(), binding.loose_generation)"
+    scoped_status = "and publish(state.map, pawn_address, binding.loose_generation)"
     prior_status = "and publish(state.map)"
     if scoped_status not in source:
+        assert source.count(prior_status) == 1, "nearby pickup status instrumentation could not find its call site"
         return source.replace(prior_status, 'and SilverfishProfileCrossroadsCall("nearby_loose_status_rows", publish, state.map)')
     assert source.count(scoped_status) == 1
     end = "\nreturn pickup\n"
     assert source.count(end) == 1
-    source = source.replace(scoped_status, "and profile_nearby_rows(publish, state.map, binding.pawn:GetAddress(), binding.loose_generation)")
+    source = source.replace(scoped_status, "and profile_nearby_rows(publish, state.map, pawn_address, binding.loose_generation)")
     return r"""
 local profile_nearby_map, profile_nearby_pawn, profile_nearby_generation, profile_nearby_output
 
@@ -2442,11 +2443,11 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             if reply == "unavailable":
                 continue
             assert not reply.startswith("nearby pickup scope failed"), (seat, reply)
-            generation, rows = map(int, reply.split(","))
+            generation, nearby_row_count = map(int, reply.split(","))
             frame = await wait_resident_status(runs[seat], lambda snapshot:
                 snapshot.get("game", {}).get("map") == area
                 and snapshot["game"].get(native_loose_pickup.VIEW_SCOPE) == generation, timeout=8)
-            nearby_pickup_scopes[seat] = {"generation": generation, "nearby_rows": rows,
+            nearby_pickup_scopes[seat] = {"generation": generation, "nearby_rows": nearby_row_count,
                                           "published_status_sequence": frame["game"]["sequence"],
                                           "wrong_map_pawn_and_generation_refused": True}
         assert not nearby_pickup_scopes or set(nearby_pickup_scopes) == set(seats)
