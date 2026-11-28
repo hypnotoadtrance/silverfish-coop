@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cctype>
 #include <clocale>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdint>
@@ -23,11 +24,18 @@
 #include <vector>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
+#include <LuaType/LuaAActor.hpp>
 #include <LuaType/LuaUObject.hpp>
+#include <LuaType/LuaUWorld.hpp>
+#include <Unreal/AActor.hpp>
+#include <Unreal/CoreUObject/UObject/Class.hpp>
+#include <Unreal/CoreUObject/UObject/UnrealType.hpp>
+#include <Unreal/FWeakObjectPtr.hpp>
 #include <Unreal/Hooks/Hooks.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectHashTables.hpp>
 #include <Unreal/UnrealInitializer.hpp>
+#include <Unreal/World.hpp>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -248,6 +256,107 @@ namespace
         if (object && (object->HasAnyFlags(destroyed) || object->IsUnreachable())) object = nullptr;
         RC::LuaType::auto_construct_object(lua, object);
         return 1;
+    }
+
+    template <typename Property>
+    Property* pawn_status_field(RC::Unreal::UClass* type, const RC::Unreal::TCHAR* name)
+    {
+        auto* field = type ? RC::Unreal::CastField<Property>(type->GetPropertyByNameInChain(name)) : nullptr;
+        return field && field->GetArrayDim() == 1 ? field : nullptr;
+    }
+
+    int read_session_pawn(const Lua& lua)
+    {
+        namespace Unreal = RC::Unreal;
+        auto* stack = lua.get_lua_state();
+        if (!Unreal::IsInGameThreadRaw() || !Unreal::UnrealInitializer::ShouldUseHashTables() ||
+            lua_gettop(stack) != 3 || !lua_isboolean(stack, 3) ||
+            !luaL_testudata(stack, 1, "UWorld") || !luaL_testudata(stack, 2, "AActor")) return 0;
+        const bool read_health = lua_toboolean(stack, 3);
+        // Reuse UE4SS's own object-lifetime check before dereferencing the wrapper.
+        lua_getfield(stack, 2, "IsValid");
+        if (!lua_iscfunction(stack, -1)) return 0;
+        lua_pushvalue(stack, 2);
+        if (lua_pcall(stack, 1, 1, 0) != LUA_OK || !lua_toboolean(stack, -1)) return 0;
+        lua_pop(stack, 1);
+        auto* pawn = lua.get_userdata<RC::LuaType::AActor>(2, true).get_remote_cpp_object();
+        auto* world = lua.get_userdata<RC::LuaType::UWorld>(1, true).get_remote_cpp_object();
+        if (!pawn || !world || pawn->GetWorld() != world) return 0;
+
+        struct Schema
+        {
+            Unreal::FWeakObjectPtr pawn_class, save_class;
+            Unreal::FBoolProperty* destroyed{};
+            Unreal::FByteProperty* role{};
+            Unreal::FDoubleProperty* maximum{};
+            Unreal::FObjectProperty* save{};
+            Unreal::FDoubleProperty* health{};
+        };
+        static Schema schema;
+        const auto loaded_class = [](const Unreal::TCHAR* path) {
+            return Unreal::Cast<Unreal::UClass>(
+                Unreal::FUObjectHashTables::StaticFindObjectByPath(nullptr, path, false, true));
+        };
+        auto* pawn_class = static_cast<Unreal::UClass*>(schema.pawn_class.Get());
+        if (!pawn_class)
+        {
+            pawn_class = loaded_class(STR("/Game/Classes/Player/Player_FP.Player_FP_C"));
+            schema = {};
+            if (!pawn_class) return 0;
+            schema.pawn_class = pawn_class;
+            schema.destroyed = pawn_status_field<Unreal::FBoolProperty>(pawn_class, STR("bActorIsBeingDestroyed"));
+            schema.role = pawn_status_field<Unreal::FByteProperty>(pawn_class, STR("Role"));
+            schema.maximum = pawn_status_field<Unreal::FDoubleProperty>(pawn_class, STR("MaxHealth"));
+            schema.save = pawn_status_field<Unreal::FObjectProperty>(pawn_class, STR("Save"));
+        }
+        constexpr auto excluded = static_cast<Unreal::EObjectFlags>(Unreal::RF_ClassDefaultObject |
+            Unreal::RF_ArchetypeObject | Unreal::RF_BeginDestroyed | Unreal::RF_FinishDestroyed);
+        if (pawn->GetClassPrivate() != pawn_class || pawn->HasAnyFlags(excluded) || !schema.destroyed ||
+            schema.destroyed->GetPropertyValueInContainer(pawn) || !schema.role || !schema.maximum) return 0;
+        const auto role = schema.role->GetPropertyValueInContainer(pawn);
+        // A guest can observe a simulated pawn without a replicated Controller.
+        if (role < 1 || role > 3) return 0;
+        const auto point = pawn->K2_GetActorLocation();
+        const auto maximum = schema.maximum->GetPropertyValueInContainer(pawn);
+        if (!std::isfinite(point.X()) || !std::isfinite(point.Y()) || !std::isfinite(point.Z()) ||
+            !std::isfinite(maximum)) return 0;
+
+        Unreal::UObject* save{};
+        double health{};
+        if (read_health)
+        {
+            auto* save_class = static_cast<Unreal::UClass*>(schema.save_class.Get());
+            if (!save_class)
+            {
+                save_class = loaded_class(STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"));
+                schema.save_class = save_class;
+                schema.health = pawn_status_field<Unreal::FDoubleProperty>(save_class, STR("PlayerHealth"));
+            }
+            if (!save_class || !schema.save || schema.save->GetPropertyClass().Get() != save_class || !schema.health)
+                return 0;
+            save = schema.save->GetObjectPropertyValue(schema.save->ContainerPtrToValuePtr<void>(pawn));
+            if (save)
+            {
+                if (save->GetClassPrivate() != save_class || save->HasAnyFlags(excluded) || save->IsUnreachable()) return 0;
+                health = schema.health->GetPropertyValueInContainer(save);
+                if (!std::isfinite(health)) save = nullptr;
+            }
+        }
+        lua.set_number(point.X());
+        lua.set_number(point.Y());
+        lua.set_number(point.Z());
+        lua.set_number(maximum);
+        if (save)
+        {
+            lua.set_number(health);
+            RC::LuaType::auto_construct_object(lua, save);
+        }
+        else
+        {
+            lua_pushnil(stack);
+            lua_pushnil(stack);
+        }
+        return 6;
     }
 
     void clear()
@@ -1357,6 +1466,7 @@ namespace silverfish::local_bridge
     void register_lua(RC::LuaMadeSimple::Lua& lua)
     {
         lua.register_function("SilverfishFindObjectByPath", find_object_by_path);
+        lua.register_function("SilverfishReadNativeSessionPawn", read_session_pawn);
         lua.register_function("SilverfishTakeLocalBridgeCommand", take);
         lua.register_function("SilverfishClaimLocalBridgeCommand", claim_command);
         lua.register_function("SilverfishMakeFastLocalBridgeCallback", make_fast_command_callback);

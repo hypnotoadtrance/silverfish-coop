@@ -128,3 +128,31 @@ assert(lookup_calls == 2 and state.server and state.controller == host and state
 assert(#state.pawns == 3 and state.pawns[2].pawn == zulu_actor and state.pawns[3].pawn == alpha_actor)
 assert(state.pawns[2].controller == "" and state.pawns[2].controller_object == nil)
 assert(state.guests[1].pawn == alpha_actor and state.guests[2].pawn == zulu_actor)
+
+local native_pawns, fallback_reads = {}, 0
+local zulu_save = object({PlayerHealth = 275})
+zulu_actor.Save = zulu_save
+local read_location = zulu_actor.K2_GetActorLocation
+zulu_actor.K2_GetActorLocation = function(self)
+    fallback_reads = fallback_reads + 1
+    return read_location(self)
+end
+env.SilverfishReadNativeSessionPawn = function(observed_world, actor, read_health)
+    assert(observed_world == world)
+    native_pawns[actor] = true
+    if actor == zulu_actor then return end
+    if read_health then return 10, 20, 30, 350, actor.Save.PlayerHealth, actor.Save end
+    return 10, 20, 30, 350
+end
+
+state = inspect()
+assert(native_pawns[host_actor] and native_pawns[alpha_actor] and native_pawns[zulu_actor])
+assert(state.local_pawn.health == nil and state.local_pawn.save == nil)
+assert(state.guests[1].health == nil and state.guests[1].save == nil)
+assert(state.guests[2].health == 275 and state.guests[2].save == zulu_save and fallback_reads == 1)
+assert(state.guests[2].max_health == 350 and state.guests[2].x == 10 and state.guests[2].z == 30)
+
+env.vitals.active = function() return true end
+state = inspect()
+assert(fallback_reads == 2 and state.guests[2].health == nil and state.guests[2].save == nil)
+assert(state.local_pawn.max_health == 350 and state.guests[1].max_health == 350)

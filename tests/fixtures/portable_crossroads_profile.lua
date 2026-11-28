@@ -378,6 +378,55 @@ local function compare_acid_reads(dynamic)
     return result
 end
 
+local function compare_pawn_values()
+    local native, legacy = SilverfishReadNativeSessionPawn, status_publication.read_pawn_values_lua
+    if type(native) ~= "function" or type(legacy) ~= "function" then return "unavailable" end
+    local state = inspect()
+    assert(valid(state.world) and state.local_pawn and #state.pawns > 0, "missing live session pawns")
+    assert(native(state.local_pawn.pawn, state.local_pawn.pawn, false) == nil
+        and native(state.world, state.world, false) == nil, "mismatched pawn/world scope was accepted")
+
+    local function stock(pawn, health)
+        return legacy(pawn, health)
+    end
+    local function qualified(pawn, health)
+        return native(state.world, pawn, health)
+    end
+    for _, details in ipairs(state.pawns) do
+        for _, health in ipairs({false, true}) do
+            local expected = table.pack(stock(details.pawn, health))
+            local actual = table.pack(qualified(details.pawn, health))
+            assert(type(actual[1]) == "number", "one observed pawn fell back to Lua")
+            for index = 1, 5 do assert(actual[index] == expected[index], "session pawn scalar differs: " .. index) end
+            assert((actual[6] == nil and expected[6] == nil) or same_object(actual[6], expected[6]),
+                "session pawn save differs")
+        end
+    end
+    local function measure(reader, health)
+        local heap, started = collectgarbage("count"), stamp()
+        for _ = 1, 32 do
+            for _, details in ipairs(state.pawns) do reader(details.pawn, health) end
+        end
+        return (stamp() - started) / 1000, collectgarbage("count") - heap
+    end
+    local function compare(health)
+        local native_first, native_first_heap = measure(qualified, health)
+        local lua_first, lua_first_heap = measure(stock, health)
+        local lua_second, lua_second_heap = measure(stock, health)
+        local native_second, native_second_heap = measure(qualified, health)
+        return ("%.3f,%.3f,%.3f,%.3f"):format(native_first + native_second, lua_first + lua_second,
+            native_first_heap + native_second_heap, lua_first_heap + lua_second_heap)
+    end
+    local running = collectgarbage("isrunning")
+    collectgarbage("stop")
+    local ok, result = pcall(function()
+        return ("%d,%d;%s;%s"):format(#state.pawns, 64, compare(false), compare(true))
+    end)
+    if running then collectgarbage("restart") end
+    if not ok then error(result, 0) end
+    return result
+end
+
 local function compare_inspection()
     if type(observe_session_controllers) ~= "function" then return "unavailable" end
 
@@ -725,6 +774,9 @@ LoopInGameThreadWithDelay(50, function()
         else
             message = "unavailable"
         end
+    elseif action == "pawnvalues" and not capture then
+        local ok, value = pcall(compare_pawn_values)
+        if ok then message = value else message = "pawn scalar comparison failed: " .. tostring(value) end
     elseif action == "inspectcompare" and not capture then
         local ok, value = pcall(compare_inspection)
         if ok then message = value else message = "inspection comparison failed: " .. tostring(value) end

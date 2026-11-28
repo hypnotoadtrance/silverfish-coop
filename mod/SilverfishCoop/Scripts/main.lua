@@ -250,21 +250,32 @@ local function get_pawn_health(pawn)
     end
 end
 
-local function describe_pawn(pawn, name, local_player, controller, controller_name, read_health)
+function status_publication.read_pawn_values_lua(pawn, read_health)
     local location = pawn:K2_GetActorLocation()
     local health, save
     if read_health then health, save = get_pawn_health(pawn) end
+    return location.X, location.Y, location.Z, pawn.MaxHealth, health, save
+end
+
+local function describe_pawn(world, pawn, name, local_player, controller, controller_name, read_health)
+    local x, y, z, max_health, health, save
+    if type(SilverfishReadNativeSessionPawn) == "function" then
+        x, y, z, max_health, health, save = SilverfishReadNativeSessionPawn(world, pawn, read_health)
+    end
+    if x == nil then
+        x, y, z, max_health, health, save = status_publication.read_pawn_values_lua(pawn, read_health)
+    end
     return {
         pawn = pawn,
         name = name,
         kind = local_player and "local" or "guest",
         controller = controller_name or "",
         controller_object = controller,
-        x = location.X,
-        y = location.Y,
-        z = location.Z,
+        x = x,
+        y = y,
+        z = z,
         health = health,
-        max_health = pawn.MaxHealth,
+        max_health = max_health,
         save = save,
     }
 end
@@ -274,7 +285,8 @@ local function observe_controller(state, controller, is_local, controller_name, 
     if is_local then state.controller = controller end
     local name = valid(pawn) and not pawn:IsActorBeingDestroyed() and pawn:GetFullName()
     if not name or not name:match("^Player_FP_C ") then return end
-    local details = describe_pawn(pawn, name, is_local, controller, controller_name or controller:GetFullName(), read_health)
+    local details = describe_pawn(state.world, pawn, name, is_local, controller,
+        controller_name or controller:GetFullName(), read_health)
     state.pawns[#state.pawns + 1] = details
     if is_local then state.local_pawn = details end
     if known_pawns then known_pawns[pawn:GetAddress()] = true end
@@ -390,7 +402,7 @@ local function inspect()
                 and same_object(pawn:GetWorld(), world) then
                 local name = pawn:GetFullName()
                 if name:match("^Player_FP_C ") and not name:find("Default__", 1, true) then
-                    state.pawns[#state.pawns + 1] = describe_pawn(pawn, name, false, nil, nil, read_health)
+                    state.pawns[#state.pawns + 1] = describe_pawn(world, pawn, name, false, nil, nil, read_health)
                 end
             end
         end

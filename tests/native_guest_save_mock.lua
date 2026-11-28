@@ -79,6 +79,8 @@ local function player(name, local_player)
 end
 
 local root_pinned = false
+local native_certificate, native_calls, connection_lookups = nil, 0, 0
+local expected_certificate
 local classes = { [statics_path] = statics, [instance_path] = instance_class,
     [save_path] = save_class, [connection_path] = connection_class }
 local module = assert(loadfile(scripts .. "guest_save.lua", "t", setmetatable({
@@ -98,7 +100,17 @@ local module = assert(loadfile(scripts .. "guest_save.lua", "t", setmetatable({
         root_pinned = pin
         return true
     end,
-    StaticFindObject = function(path) return assert(classes[path]) end,
+    SilverfishCertifyNativeDetachedSave = function(...)
+        native_calls = native_calls + 1
+        assert(select("#", ...) == #expected_certificate)
+        for index, value in ipairs(expected_certificate) do assert(select(index, ...) == value) end
+        if native_certificate == "error" then error("mock certificate failure") end
+        return native_certificate
+    end,
+    StaticFindObject = function(path)
+        if path == connection_path then connection_lookups = connection_lookups + 1 end
+        return assert(classes[path])
+    end,
 }, { __index = _G })))()
 local last_revoked
 module.start("mock", function(name) last_revoked = name; return true end)
@@ -111,14 +123,42 @@ local function bind()
     assert(module.command({ "ticket", "native-guest-bind-exact", guest.name, guest.controller_object:GetFullName(),
         connection:GetFullName(), character, "-" }, state, "hosting") == "native guest save bound")
     assert(guest.pawn.Save == detached)
+    expected_certificate = {guest.name, guest.controller_object:GetFullName(), connection:GetFullName(),
+        guest.pawn:GetAddress(), detached:GetAddress(), stock:GetAddress(), world:GetAddress(),
+        instance:GetAddress(), host.pawn:GetAddress(), host.controller_object:GetAddress(),
+        guest.controller_object:GetAddress(), driver:GetAddress(), connection:GetAddress()}
 end
 
 bind()
+native_certificate = true
+local before = connection_lookups
+assert(not module.sync(state, "hosting") and native_calls == 1 and connection_lookups == before)
+local pawn, save, character_id = module.status_context(state, "hosting", guest, true)
+assert(pawn == guest.pawn and save == detached and character_id == character)
+native_certificate = nil
+assert(not module.sync(state, "hosting") and native_calls == 2 and connection_lookups > before)
+before = connection_lookups
+native_certificate = "error"
+assert(not module.sync(state, "hosting") and native_calls == 3 and connection_lookups > before)
+assert(module.active() and state.status_guest_lease == true and guest.pawn.Save == detached)
+
+native_certificate = true
+local alias = player("Also observed pawn", true)
+alias.pawn.Save = detached
+state.pawns[3] = alias
+assert(module.sync(state, "hosting") and native_calls == 4,
+    "A positive native result cannot hide an aliased save on another observed pawn")
+assert(not module.active() and not state.status_guest_saves and guest.pawn.Save == stock)
+state.pawns[3] = nil
+alias.pawn.Save = stock
+bind()
+
 assert(module.command({ "ticket", "native-guest-save-retain", guest.name, character },
     state, "hosting") == "retained exact co-op guest inventory")
+assert(native_calls == 4, "Explicit retention must use the original exact qualification")
 guest.pawn.retiring = true
 assert(module.sync(state, "hosting"))
-assert(not module.active() and last_revoked == guest.name and root_pinned,
+assert(not module.active() and last_revoked == guest.name and root_pinned and native_calls == 4,
     "A retiring guest's binding must clear while its retained save stays available")
 
 guest, connection = player("Replacement pawn", false)
@@ -126,4 +166,4 @@ state.pawns[2] = guest
 bind()
 assert(module.command({ "ticket", "native-guest-clear" }, state, "hosting") == "native guest save cleared")
 assert(not module.active() and guest.pawn.Save == stock and last_revoked == guest.name and not root_pinned)
-print("native guest save retirement fixtures passed")
+print("Native guest save certification, fallback, alias protection, and retirement fixtures passed.")

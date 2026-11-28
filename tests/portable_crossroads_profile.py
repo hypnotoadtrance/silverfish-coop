@@ -42,7 +42,7 @@ def instrument_profile(source, *, stock_receipts=False):
     before, separator, rest = source.partition(anchor)
     if not separator:
         raise ValueError("The status publication anchor changed")
-    names = r"(?:native_[a-z_]+|players(?:\.critters)?)\.[\w]+"
+    names = r"(?:(?:native_[a-z_]+|players(?:\.critters)?)\.[\w]+|guest_save\.sync)"
     wrapper = "status_publication.profile.call"
     rest, protected = re.subn(r"\bpcall\((" + names + r"|tick)(?=[,)])",
                               lambda m: 'pcall(' + wrapper + ', "' + m[1] + '", ' + m[1], rest)
@@ -1473,7 +1473,47 @@ function SilverfishProfileCrossroadsGuestBinding()
     local exact = measure(guest_save.exact_item_context, state, "hosting", detail.name)
     exact = exact + measure(guest_save.exact_item_context, state, "hosting", detail.name)
     reused = reused + measure(observed_context, state, "hosting", detail)
-    return ("%d,%.3f,%.3f"):format(rounds * 2, exact, reused)
+    local summary = ("%d,%.3f,%.3f"):format(rounds * 2, exact, reused)
+    local native = SilverfishCertifyNativeDetachedSave
+    if type(native) ~= "function" then return summary end
+    local binding = assert(bindings[detail.name], "missing stable detached guest binding")
+    local host = assert(state.local_pawn, "missing host pawn")
+    assert(native_matches(binding) == true, "the native detached binding fell back to Lua")
+    local function certify(detached, world)
+        return native(binding.name, binding.controller_name, binding.connection_name, binding.pawn:GetAddress(),
+            detached, binding.stock:GetAddress(), world, binding.owner:GetAddress(), binding.host:GetAddress(),
+            binding.host_controller:GetAddress(), binding.controller:GetAddress(), binding.driver:GetAddress(),
+            binding.connection:GetAddress())
+    end
+    local detached, world = binding.detached:GetAddress(), binding.world:GetAddress()
+    assert(certify(detached, world) == true and certify(detached, world + 1) == nil
+        and certify(binding.stock:GetAddress(), world) == nil, "detached reader accepted a stale world or shared save")
+    local stale_guest = {pawn = host.pawn, controller_object = detail.controller_object}
+    assert(not verified_binding(binding, state, host, stale_guest, false)
+        and not verified_binding(binding, state, host, stale_guest, true), "stale guest pawn retained a binding")
+
+    local function observe(allow_native)
+        return verified_binding(binding, state, host, detail, allow_native)
+    end
+    assert(observe(false) and observe(true), "Lua and native stable binding observations differ")
+    local function measure_binding(allow_native)
+        local heap, started = collectgarbage("count"), SilverfishBridgeProfileStamp()
+        for _ = 1, 32 do observe(allow_native) end
+        return (SilverfishBridgeProfileStamp() - started) / 1000, collectgarbage("count") - heap
+    end
+    local running = collectgarbage("isrunning")
+    collectgarbage("stop")
+    local ok, result = pcall(function()
+        local native_first, native_first_heap = measure_binding(true)
+        local lua_first, lua_first_heap = measure_binding(false)
+        local lua_second, lua_second_heap = measure_binding(false)
+        local native_second, native_second_heap = measure_binding(true)
+        return ("%d,%.3f,%.3f,%.3f,%.3f"):format(64, native_first + native_second, lua_first + lua_second,
+            native_first_heap + native_second_heap, lua_first_heap + lua_second_heap)
+    end)
+    if running then collectgarbage("restart") end
+    if not ok then error(result, 0) end
+    return summary .. ";" .. result
 end
 """
     return source.replace(sync, "local guest_status_observation\n\n" + sync).replace(checked, checked +
@@ -2095,9 +2135,17 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     binding = await command(host, "guestbinding")
     guest_binding = {}
     if binding != "unavailable":
-        calls, exact, reused = map(float, binding.split(","))
+        observed, _, certification = binding.partition(";")
+        calls, exact, reused = map(float, observed.split(","))
         guest_binding = {"guest_binding_comparison": {"reads_per_path": int(calls),
                          "full_qualification_ms": exact, "observed_binding_ms": reused}}
+        if certification:
+            passes, native_ms, lua_ms, native_kib, lua_kib = map(float, certification.split(","))
+            guest_binding["detached_certification_comparison"] = {
+                "passes_per_path": int(passes), "native_ms": native_ms, "lua_ms": lua_ms,
+                "native_heap_growth_kib": native_kib, "lua_heap_growth_kib": lua_kib,
+                "all_stable_observations_matched": True, "stale_pawn_and_world_refused": True, "shared_save_refused": True,
+            }
     roster = await command(host, "readyroster")
     ready_roster = {}
     if roster != "unavailable":
@@ -2125,6 +2173,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     electrode_samples = {}
     dynamic_acid_samples = {}
     controller_inspection = {}
+    pawn_values = {}
     remote_head_rotation = {}
     avatar_clock = {}
     avatar_motion = {}
@@ -2192,6 +2241,20 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             remote_head_rotation[seat] = {"writes_per_path": 32, "native_ms": native_ms, "lua_ms": lua_ms,
                                           "native_heap_growth_kib": native_kib, "lua_heap_growth_kib": lua_kib,
                                           "all_angles_matched": True}
+        pawn_measurements = await asyncio.gather(*(command(seat, "pawnvalues") for seat in seats.values()))
+        for seat, reply in zip(seats, pawn_measurements, strict=True):
+            if reply == "unavailable":
+                continue
+            assert not reply.startswith("pawn scalar comparison failed"), reply
+            counts, *lanes = reply.split(";")
+            pawns, passes = map(int, counts.split(","))
+            result = {"pawns": pawns, "passes_per_path": passes, "all_values_and_save_identities_matched": True,
+                      "wrong_pawn_and_world_refused": True}
+            for lane, numbers in zip(("geometry", "with_health"), lanes, strict=True):
+                native_ms, lua_ms, native_kib, lua_kib = map(float, numbers.split(","))
+                result[lane] = {"native_ms": native_ms, "lua_ms": lua_ms, "native_heap_growth_kib": native_kib,
+                                "lua_heap_growth_kib": lua_kib}
+            pawn_values[seat] = result
         inspections = await asyncio.gather(*(command(seat, "inspectcompare") for seat in seats.values()))
         for seat, reply in zip(seats, inspections, strict=True):
             if reply == "unavailable":
@@ -2247,6 +2310,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             "vitals_comparison": dict(zip(seats, comparison, strict=True)), **heartbeat, **guest_binding,
             **coarse, **journal, **anomaly_samples, **electrode_samples, **dynamic_acid_samples, **ready_roster,
             "controller_inspection_comparison": controller_inspection,
+            "pawn_value_comparison": pawn_values,
             "avatar_clock_comparison": avatar_clock,
             "avatar_motion_comparison": avatar_motion,
             "avatar_appearance_comparison": avatar_appearance,

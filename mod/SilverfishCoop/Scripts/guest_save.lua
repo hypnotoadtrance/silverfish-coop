@@ -233,10 +233,27 @@ function guest_save.clear(name)
     return changed
 end
 
-local function verified_binding(binding, state, host, guest)
+local function native_matches(binding)
+    if not binding.character or binding.revoked or type(SilverfishCertifyNativeDetachedSave) ~= "function"
+        or not valid(binding.owner) or not valid(binding.stock) or not valid(binding.detached)
+        or not valid(binding.driver) or not valid(binding.connection) or managed_save(binding.detached, binding) then return end
+    if SilverfishCertifyNativeDetachedSave(binding.name, binding.controller_name, binding.connection_name,
+        binding.pawn:GetAddress(), binding.detached:GetAddress(), binding.stock:GetAddress(), binding.world:GetAddress(),
+        binding.owner:GetAddress(), binding.host:GetAddress(), binding.host_controller:GetAddress(),
+        binding.controller:GetAddress(), binding.driver:GetAddress(), binding.connection:GetAddress()) ~= true then return end
+    return binding.host_controller:IsLocalController() == true and binding.controller:IsLocalController() == false
+end
+
+local function verified_binding(binding, state, host, guest, allow_native)
     if not guest or state.map ~= binding.map or not same(state.world, binding.world)
         or not same(host.pawn, binding.host) or not same(host.controller_object, binding.host_controller)
-        or not same(guest.controller_object, binding.controller) or not matches(binding, guest.pawn) then return false end
+        or not same(guest.controller_object, binding.controller) then return false end
+    local certified
+    if allow_native and same(guest.pawn, binding.pawn) then
+        local ok, result = pcall(native_matches, binding)
+        certified = ok and result == true
+    end
+    if not certified and not matches(binding, guest.pawn) then return false end
     for _, other in ipairs(state.pawns) do
         if not same(other.pawn, binding.pawn) and valid(other.pawn) and not other.pawn:IsActorBeingDestroyed()
             and same(other.pawn.Save, binding.detached) then
@@ -261,7 +278,7 @@ function guest_save.sync(state, phase)
     for _, name in ipairs(sorted_names()) do
         local binding = bindings[name]
         -- A momentarily late coordinator must not attach this player to the host inventory.
-        local checked, live = pcall(verified_binding, binding, state, host, guests and guests[name])
+        local checked, live = pcall(verified_binding, binding, state, host, guests and guests[name], true)
         if checked and live then
             verified[name] = binding
             if fresh then binding.lease_seen = true end

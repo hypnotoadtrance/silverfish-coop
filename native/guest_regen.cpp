@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <string_view>
 
+#include <Helpers/String.hpp>
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
@@ -16,6 +17,7 @@
 #include <Unreal/NameTypes.hpp>
 #include <Unreal/UnrealInitializer.hpp>
 #include <Unreal/UObjectGlobals.hpp>
+#include <Unreal/UObjectHashTables.hpp>
 #include <Unreal/World.hpp>
 
 namespace
@@ -49,6 +51,11 @@ namespace
 
     template <typename T>
     T* find(const U::TCHAR* path) { return U::UObjectGlobals::StaticFindObject<T*>(nullptr, nullptr, path); }
+
+    U::UClass* find_hashed_class(const U::TCHAR* path)
+    {
+        return U::Cast<U::UClass>(U::FUObjectHashTables::StaticFindObjectByPath(nullptr, path, false, true));
+    }
 
     template <typename T>
     T* field(U::UObject* owner, const U::TCHAR* name)
@@ -104,8 +111,12 @@ namespace
         // One synchronous regeneration call can run several stock steps.
         // Reuse their reflected fields while the declaring classes stay live.
         std::array<ClassFields, 8> classes{};
-        U::FWeakObjectPtr local_type{find<U::UClass>(STR("/Script/Engine.LocalPlayer"))};
-        U::FWeakObjectPtr remote_type{find<U::UClass>(STR("/Script/Engine.NetConnection"))};
+        U::FWeakObjectPtr local_type, remote_type;
+
+        explicit RosterFields(bool hash_only = false)
+            : local_type{(hash_only ? find_hashed_class : find<U::UClass>)(STR("/Script/Engine.LocalPlayer"))},
+              remote_type{(hash_only ? find_hashed_class : find<U::UClass>)(STR("/Script/Engine.NetConnection"))}
+        {}
 
         void discard_unloaded_classes()
         {
@@ -167,11 +178,17 @@ namespace
         }
     };
 
+    struct BindingIdentity
+    {
+        RC::StringType pawn_name, controller_name, connection_name;
+        Address world{}, owner{}, host{}, host_controller{}, controller{}, driver{}, connection{};
+    };
+
     struct Scope
     {
         U::FWeakObjectPtr pawn, save, stock, world, instance, controller, driver, connection;
 
-        bool current(RosterFields& fields) const
+        bool current(RosterFields& fields, const BindingIdentity* expected = nullptr) const
         {
             fields.discard_unloaded_classes();
             auto* player = pawn.Get();
@@ -217,6 +234,24 @@ namespace
                 fields.object(host_pawn, STR("Controller")) != host_controller || fields.object(host_pawn, STR("Save")) != canonical)
                 return false;
 
+            if (expected)
+            {
+                if (address(current_world) != expected->world || address(game) != expected->owner ||
+                    address(host_pawn) != expected->host || address(host_controller) != expected->host_controller ||
+                    address(control) != expected->controller || address(net) != expected->driver ||
+                    address(remote) != expected->connection || player->GetFullName() != expected->pawn_name ||
+                    control->GetFullName() != expected->controller_name || remote->GetFullName() != expected->connection_name)
+                    return false;
+                if (auto* property = control->GetPropertyByNameInChain(STR("NetConnection")))
+                {
+                    auto* net_connection = U::CastField<U::FObjectProperty>(property);
+                    if (!net_connection || net_connection->GetArrayDim() != 1) return false;
+                    auto* controller_connection = net_connection->GetObjectPropertyValue(
+                        net_connection->ContainerPtrToValuePtr<void>(control));
+                    if (controller_connection && controller_connection != remote) return false;
+                }
+            }
+
             U::FScriptArrayHelper remotes(clients, clients->ContainerPtrToValuePtr<void>(net));
             if (remotes.Num() < 1 || remotes.Num() > max_guests) return false;
             std::array<U::UObject*, max_guests> seen{};
@@ -232,6 +267,7 @@ namespace
                     found = true;
                     continue;
                 }
+                if (expected && client->GetFullName() == expected->connection_name) return false;
                 auto* other_controller = fields.object(client, STR("PlayerController"));
                 if (!other_controller) continue;
                 if (!live(other_controller)) return false;
@@ -241,12 +277,14 @@ namespace
             return found;
         }
 
-        bool bind_player(U::UObject* player, Address detached, Address canonical, RosterFields& fields)
+        bool bind_player(U::UObject* player, Address detached, Address canonical, RosterFields& fields,
+                         const BindingIdentity* expected = nullptr)
         {
-            auto* save_class = find<U::UClass>(save_path);
-            auto* instance_class = find<U::UClass>(instance_path);
-            auto* controller_class = find<U::UClass>(controller_path);
-            if (!exact(player, find<U::UClass>(pawn_path)) || !save_class || !instance_class || !controller_class) return false;
+            const auto find_class = expected ? find_hashed_class : find<U::UClass>;
+            auto* save_class = find_class(save_path);
+            auto* instance_class = find_class(instance_path);
+            auto* controller_class = find_class(controller_path);
+            if (!exact(player, find_class(pawn_path)) || !save_class || !instance_class || !controller_class) return false;
             auto* actual_world = static_cast<U::AActor*>(player)->GetWorld();
             auto* game = object(actual_world, STR("OwningGameInstance"));
             auto* control = object(player, STR("Controller"));
@@ -263,7 +301,7 @@ namespace
             controller = control;
             driver = object(actual_world, STR("NetDriver"));
             connection = object(control, STR("Player"));
-            return current(fields);
+            return current(fields, expected);
         }
 
         bool bind(Address requested, Address detached, Address canonical, RosterFields& fields)
@@ -277,6 +315,41 @@ namespace
             return bind_player(player, detached, canonical, fields);
         }
     };
+
+    int certify_detached_save(const Lua& lua)
+    {
+        if (!U::IsInGameThreadRaw() || !U::UnrealInitializer::ShouldUseHashTables() || lua.get_stack_size() != 13)
+            return 0;
+        for (int index = 1; index <= 3; ++index)
+            if (!lua.is_string(index)) return 0;
+        for (int index = 4; index <= 13; ++index)
+            if (!lua.is_integer(index)) return 0;
+
+        constexpr std::string_view pawn_prefix = "Player_FP_C ";
+        const auto pawn_name = lua.get_string();
+        if (!pawn_name.starts_with(pawn_prefix) || !pawn_name.substr(pawn_prefix.size()).starts_with("/Game/") ||
+            pawn_name.size() > 512 || pawn_name.find_first_of("\r\n\t\0", 0, 4) != std::string_view::npos) return 0;
+        BindingIdentity expected;
+        expected.pawn_name = RC::to_generic_string(pawn_name);
+        expected.controller_name = RC::to_generic_string(lua.get_string());
+        expected.connection_name = RC::to_generic_string(lua.get_string());
+        const auto pawn = static_cast<Address>(lua.get_integer());
+        const auto detached = static_cast<Address>(lua.get_integer());
+        const auto stock = static_cast<Address>(lua.get_integer());
+        for (auto* member : {&expected.world, &expected.owner, &expected.host, &expected.host_controller,
+                             &expected.controller, &expected.driver, &expected.connection})
+            *member = static_cast<Address>(lua.get_integer());
+
+        // A travel-time miss falls back to the existing Lua checks. Do not walk the object array.
+        auto* player = U::FUObjectHashTables::StaticFindObjectByPath(nullptr,
+            expected.pawn_name.c_str() + pawn_prefix.size(), false, true);
+        if (!player || address(player) != pawn) return 0;
+
+        static RosterFields fields{true};
+        if (!Scope{}.bind_player(player, detached, stock, fields, &expected)) return 0;
+        lua.set_bool(true);
+        return 1;
+    }
 
     struct ClockParams
     {
@@ -722,6 +795,8 @@ bool silverfish::native_guest_regen::qualifies_detached_guest(RC::Unreal::UObjec
 
 void silverfish::native_guest_regen::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
+    if (opt_in("SILVERFISH_COOP_NATIVE_GUEST_SAVE"))
+        lua.register_function("SilverfishCertifyNativeDetachedSave", certify_detached_save);
     if (!enabled()) return;
     lua.register_function("SilverfishPulseNativeGuestRegen", pulse);
     lua.register_function("SilverfishClearNativeGuestRegen", clear);
