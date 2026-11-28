@@ -324,6 +324,66 @@ async def verify_native_clock_dispatch(guest, run, area, epoch, pawn, probe):
                              f"observed {list(renewals)}, counters {latest['counts']}") from error
 
 
+async def read_native_health_dispatch(guest, probe):
+    reply = await session_profile_request(guest, probe, "healthdispatch")
+    if reply == "unavailable":
+        return None
+    assert not reply.startswith("health dispatch profile failed"), reply
+    lua, separator, history = reply.partition("\n")
+    assert separator
+    receipts = []
+    for line in history.splitlines():
+        fields = line.split("\t")
+        assert (len(fields) in (13, 15, 16, 18, 19, 20) and fields[:2] == ["native-guest-health-reply", "1"]
+                and fields[9:11] == ["accepted", "stock co-op guest health projected"]), line
+        nonce, status_sequence, area, session, epoch, character, pawn = fields[2:9]
+        assert re.fullmatch(r"[0-9a-f]{32}", nonce) and int(status_sequence) > 0, line
+        health, maximum = map(float, fields[11:13])
+        regen = float(fields[14]) if len(fields) >= 15 and fields[14] != "-" else None
+        assert 0 <= health <= maximum <= 1_000_000 and maximum >= 1 and (regen is None or 0 <= regen <= maximum), line
+        receipts.append({"command_id": nonce, "map": area, "host_session": session, "epoch": epoch,
+                         "character": character, "pawn": pawn, "status_sequence": int(status_sequence),
+                         "health": health, "maximum": maximum, "regen": regen,
+                         "reply_bytes": len(line.encode("utf-8")) + 1})
+    return {"receipts": receipts, "lua_ids": set(filter(None, lua.split(",")))}
+
+
+async def wait_native_health_dispatch(guest, probe, scope, excluded, stage, predicate):
+    last = None
+    try:
+        async with asyncio.timeout(6):
+            while True:
+                last = await read_native_health_dispatch(guest, probe)
+                assert last is not None, "Native health dispatch witness disappeared"
+                for receipt in last["receipts"]:
+                    if (tuple(receipt[key] for key in ("map", "host_session", "epoch", "character", "pawn")) == scope
+                            and receipt["command_id"] not in excluded and predicate(receipt)):
+                        assert receipt["command_id"] not in last["lua_ids"] and 0 < receipt["reply_bytes"] <= 1024, receipt
+                        return receipt
+                await asyncio.sleep(.12)
+    except TimeoutError as error:
+        raise AssertionError(f"No exact native guest health receipt for {stage} in {scope[0]}: {last}") from error
+
+
+async def verify_native_health_scope(guest, probe):
+    try:
+        async with asyncio.timeout(4):
+            while (reply := await session_profile_request(guest, probe, "healthdispatchprobe")) == "awaiting-scope":
+                await asyncio.sleep(.15)
+    except TimeoutError as error:
+        raise AssertionError("The active guest could not qualify native health preflight") from error
+    assert reply in {"9", "11", "12", "14", "15", "16"}, reply
+    return {"validated_fields": int(reply), "wrong_character_refused": True, "wrong_host_session_refused": True,
+            "wrong_visit_refused": True, "stock_health_unchanged": True}
+
+
+def instrument_guest_health_dispatch(source):
+    anchor = "local function project_health(fields, state, phase, reply)\n"
+    if source.count(anchor) != 1:
+        raise ValueError("The stock guest health fallback anchor changed")
+    return source.replace(anchor, anchor + "    SilverfishProfileCrossroadsHealthLuaProjection(fields[1])\n", 1)
+
+
 def instrument_guest_clock_dispatch(source):
     anchor = 'function clock.command(fields, state, phase)\n    local action = fields[2]\n'
     if source.count(anchor) != 1:
@@ -1132,6 +1192,108 @@ def instrument_host_drop_context(source):
         source = source.replace(reuse, 'local pawn = refreshed and SilverfishProfileCrossroadsCall('
                                 '"host_drop_reused", checked_drop_pawn, binding) or context(state, phase)')
     return source
+
+
+def instrument_world_scene(source):
+    native_call = '    local read_native = SilverfishReadNativeWorldSceneRows\n'
+    if native_call not in source:
+        return source
+    start = '\nlocal function world_rows(state, phase, status_row)\n'
+    finish = '    cached_rows, cached_time, cached_world = rows, now, world_address\n'
+    fallback = '            scene_read, scene_error = pcall(append_scene, rows, status_row, state.map, instance)\n'
+    stop = '\nreturn native_world\n'
+    assert all(source.count(anchor) == 1 for anchor in (start, finish, fallback, stop))
+    source = source.replace(start, '\nlocal profiled_scene\n' + start)
+    source = source.replace(native_call, '    local scene_start = #rows + 1\n' + native_call)
+    source = source.replace(fallback, fallback + r'''
+            if scene_read then
+                profiled_scene = {map = state.map, world = world_address, mode = "fallback",
+                    block = table.concat(rows, "\n", scene_start)}
+            end
+''')
+    source = source.replace(finish, '''
+    if type(scene) == "string" and scene ~= "" then
+        profiled_scene = {map = state.map, world = world_address, mode = "native", block = scene}
+    end
+''' + finish)
+    return source.replace(stop, r"""
+function SilverfishProfileCrossroadsWorldScene(state, current_phase, row)
+    local read = SilverfishReadNativeWorldSceneRows
+    assert(type(read) == "function", "missing native world scene reader")
+    local pawn = host_pawn(state, current_phase)
+    assert(pawn, "world scene probe needs the active stock host pawn")
+    local world_address = pawn:GetWorld():GetAddress()
+    local observed = profiled_scene
+    if not observed or observed.map ~= state.map or observed.world ~= world_address then return "pending" end
+    local address, map = pawn:GetAddress(), state.map
+    local instance = game_instance(pawn)
+    local function native() return read(address, map) end
+    local function stock()
+        local rows = {}
+        append_scene(rows, row, map, instance)
+        return table.concat(rows, "\n")
+    end
+    local expected = stock()
+    local actual = native()
+    assert(read(address + 1, map) == nil and read(address, map .. "_Missing") == nil,
+        "native scene reader accepted a wrong pawn or area")
+    local tags, lines = {}, {}
+    for line in expected:gmatch("[^\n]+") do lines[#lines + 1] = line end
+    for index, line in ipairs(lines) do tags[index] = line:match("^[^\t]+") end
+    assert(tags[1] == "native-rule" and tags[#tags] == "native-scene" and #tags > 2,
+        "stock world scene did not contain rules and a scene row")
+    local function layout(block)
+        local result = {}
+        for line in block:gmatch("[^\n]+") do result[#result + 1] = line:match("^[^\t]+") end
+        return table.concat(result, ",")
+    end
+    assert(layout(observed.block) == table.concat(tags, ","),
+        "normal world status did not produce the stock scene row layout")
+    if actual == nil then
+        assert(observed.mode == "fallback", "native scene declined with no same-world stock fallback")
+        return ("fallback,%d,%d"):format(#lines, #expected)
+    end
+    if observed.mode ~= "native" then return "pending" end
+    if actual ~= expected then
+        local index = 1
+        for line in actual:gmatch("[^\n]+") do
+            assert(lines[index] == line, "native world scene differs from stock at row " .. index
+                .. " [" .. tostring(lines[index]) .. "] [" .. line .. "]")
+            index = index + 1
+        end
+        error("native world scene bytes differ after row " .. (index - 1), 0)
+    end
+    local count = 32
+    local native_ms, lua_ms, native_kib, lua_kib = SilverfishProfileCrossroadsCompare(count, native, stock)
+    return ("native,%d,%d,%d,%.3f,%.3f,%.3f,%.3f"):format(
+        #lines, #expected, count, native_ms, lua_ms, native_kib, lua_kib)
+end
+
+return native_world
+""")
+
+
+async def read_world_scene(command, host):
+    deadline = time.monotonic() + 8
+    while True:
+        reply = await command(host, "worldscene")
+        if reply == "unavailable":
+            return None
+        if reply != "pending":
+            break
+        assert time.monotonic() < deadline, "Host world scene was never published for the profiled visit"
+        await asyncio.sleep(0.2)
+    parts = reply.split(",")
+    assert parts[0] in ("native", "fallback"), reply
+    mode, rows, encoded_bytes = parts[:3]
+    assert int(rows) > 2 and int(encoded_bytes) > 0, reply
+    result = {"mode": mode, "rows": int(rows), "bytes": int(encoded_bytes),
+              "normal_world_status_observed": True, "wrong_pawn_refused": True, "wrong_map_refused": True}
+    if mode == "native":
+        count, native_ms, lua_ms, native_kib, lua_kib = map(float, parts[3:])
+        result.update(bytes_match=True, passes_per_reader=int(count), native_ms=native_ms, lua_ms=lua_ms,
+                      native_heap_growth_kib=native_kib, lua_heap_growth_kib=lua_kib)
+    return result
 
 
 def instrument_weather_status(source):
@@ -2286,6 +2448,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     assert all(result in ("unavailable", verified_lookup) for result in object_paths), object_paths
     collector_modes = await read_collector_modes(host, guest, probe)
     session_census = await read_session_census(host, guest, probe, area)
+    world_scene = await read_world_scene(command, host)
     if area == CROSSROADS and session_census:
         assert all(sample["prior_travel_map_refused"] for sample in session_census.values()), session_census
     scheduler = {}
@@ -2799,6 +2962,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             scheduler["commands"] = await verify_bridge_scheduler_commands(host, guest, command, area)
     return {"collector_modes": collector_modes, "exact_object_lookup": dict(zip(seats, object_paths, strict=True)),
             "native_session_census": session_census,
+            "world_scene_comparison": world_scene,
             "idle": idle, "guest_walking": moving,
             "guest_max_displacement_cm": displacement,
             "transport_idle": traffic(before, after_idle), "transport_guest_walking": traffic(before_movement, after_movement),

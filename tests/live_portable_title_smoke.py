@@ -5281,7 +5281,7 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str, *, wo
                                       "tracked_turnins": tracked_quests, "followup_turnin": followup_receipt,
                                       "stale_turnin_refused_before_stock_callback": True,
                                       "empty_deposit_turnin": photo_receipt, "photo_objective_staged": True,
-                                      "campaign_checkpoint_unchanged": True}}
+                                      "campaign_checkpoint_unchanged": True, **native_health}}
 
 
 async def verify_resident_npc_override(host: Seat, guest: Seat, _pawn=None, *, fire_guest=None) -> dict:
@@ -5836,7 +5836,9 @@ async def verify_resident_voices(host, guest, command):
     return receipts
 
 
-async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str) -> dict:
+async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str, *, native_dispatch=False) -> dict:
+    if native_dispatch:
+        from portable_crossroads_profile import read_native_health_dispatch, verify_native_health_scope, wait_native_health_dispatch
     async def command(seat, action):
         return await portable_probe_command(seat.bridge, "portable-campfire", action)
 
@@ -5872,6 +5874,15 @@ async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str) -> dict:
     sickness, coefficient, floor, maximum = map(float, (await command(host, "regen-policy")).split(","))
     assert 0 <= sickness <= 100 and 0 < coefficient < 1 and 0 <= floor < 1 and maximum > 0
     assert baseline["remote_regen"] == baseline["remote_health"] == maximum, baseline
+    native_health = {}
+    previous_health = await read_native_health_dispatch(guest, portable_probe_command) if native_dispatch else None
+    if previous_health is not None:
+        game = guest_frame["game"]
+        character = guest_frame["character_id"].replace("-", "")
+        assert game["save_scope"] == character
+        health_scope = (game["map"], guest_frame["host_session"], guest_frame["zone_epoch"], character,
+                        game["pawns"]["local"]["name"])
+        prior_health_ids = {receipt["command_id"] for receipt in previous_health["receipts"]}
 
     assert all(result == "moved" for result in await asyncio.gather(command(host, "enter-peer"), command(guest, "enter")))
     try:
@@ -5893,6 +5904,15 @@ async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str) -> dict:
     assert remote_hit["remote_health"] < expected_ceiling < maximum, (remote_hit, expected_ceiling)
     assert abs(remote_hit["remote_regen"] - expected_ceiling) < .01, (remote_hit, expected_ceiling)
     assert host_observed["local_regen"] == baseline["local_regen"], (baseline, host_observed)
+    if previous_health is not None:
+        def matches_stock_ceiling(receipt):
+            return (math.isclose(receipt["maximum"], maximum, abs_tol=.001) and receipt["regen"] is not None
+                    and math.isclose(receipt["regen"], expected_ceiling, abs_tol=.01))
+
+        native_damage = await wait_native_health_dispatch(
+            guest, portable_probe_command, health_scope, prior_health_ids, "campfire damage",
+            lambda receipt: matches_stock_ceiling(receipt) and receipt["health"] < expected_ceiling - .2)
+        prior_health_ids.add(native_damage["command_id"])
     def healing_pulse(frame):
         proof = frame["game"].get("native_guest_regen", {}).get(pawn, {})
         return proof.get("state") == "applied" and proof["health_after"] > proof["health_before"]
@@ -5908,6 +5928,18 @@ async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str) -> dict:
     assert published["name"] == pawn and abs(published["health"] - healing["health_after"]) < 1e-7, (published, healing)
     remote_recovered = await wait_for(host, lambda hit: abs(hit["remote_health"] - expected_ceiling) <= .2
                                       and abs(hit["remote_regen"] - expected_ceiling) < .01)
+    if previous_health is not None:
+        native_healing = await wait_native_health_dispatch(
+            guest, portable_probe_command, health_scope, prior_health_ids, "campfire recovery",
+            lambda receipt: matches_stock_ceiling(receipt)
+            and native_damage["health"] < receipt["health"] and abs(receipt["health"] - expected_ceiling) <= .2)
+        witness = await read_native_health_dispatch(guest, portable_probe_command)
+        assert witness is not None and witness["lua_ids"].isdisjoint(
+            {native_damage["command_id"], native_healing["command_id"]}), witness
+        native_health = {"native_health_dispatch": {
+            "damage": native_damage, "healing": native_healing, "exact_ids_bypassed_lua": True,
+            "preflight": await verify_native_health_scope(guest, portable_probe_command),
+        }}
 
     await asyncio.sleep(1)
     assert all(result == "cleared" for result in await asyncio.gather(*(command(seat, "clear") for seat in (host, guest))))
@@ -5948,7 +5980,7 @@ async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str) -> dict:
                                   "host_feedback": local_hit, "guest_observer": guest_observed,
                                   "same_tick_hits": {"health": burst_health, "guest": burst_guest,
                                                      "host": burst_host, "blunt_audio": burst_audio, "cue": burst_cues[0]},
-                                  "campaign_checkpoint_unchanged": True}}
+                                  "campaign_checkpoint_unchanged": True, **native_health}}
 
 
 def unequip_rows(raw):
@@ -8651,7 +8683,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_avatar_lean, "observatory", "stock_avatar_lean", check_lean),
         (stock_footsteps, "observatory", "stock_footsteps", check_footsteps),
         (guest_shop_lease, "shop_lease", "stock_shop_lease", verify_guest_shop_lease),
-        (stock_campfire, "observatory", "stock_campfire", verify_resident_campfire),
+        (stock_campfire, "observatory", "stock_campfire",
+         lambda host, guest, pawn: verify_resident_campfire(host, guest, pawn, native_dispatch=crossroads_profile)),
         (stock_npc_override and not resident_weapon_cues, "observatory", "stock_npc_override", verify_resident_npc_override),
         (stock_streamed_npc, "streamed_npc", "stock_streamed_npc", verify_stock_streamed_npc),
         (stock_dead_drops and "crossroads" in dead_drop_cases, "crossroads_dead_drop", "crossroads_dead_drop",
@@ -8873,13 +8906,15 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 instrument_crate_pickup_inventory_timing, instrument_crate_pickup_timing, instrument_crate_probe_timing,
                 instrument_crate_status_timing, instrument_death_poll,
                 instrument_flashlight_scope,
-                instrument_guest_clock_dispatch, instrument_guest_status_binding, instrument_host_drop_context,
+                instrument_guest_clock_dispatch, instrument_guest_health_dispatch,
+                instrument_guest_status_binding, instrument_host_drop_context,
                 instrument_host_stash_status,
                 instrument_inline_crate_scan,
                 instrument_input_mappings, instrument_journal_context,
                 instrument_loose_discovery, instrument_npc_class_discovery, instrument_profile,
                 instrument_ready_roster, instrument_shop_discovery, instrument_spawn_context, instrument_stash_binding,
-                instrument_switch_reads, instrument_vital_reads, instrument_weather_status, instrument_zone_walls,
+                instrument_switch_reads, instrument_vital_reads, instrument_weather_status, instrument_world_scene,
+                instrument_zone_walls,
             )
 
             crate_probe = ((Path(__file__).with_name("fixtures") / "portable_crate_input_probe.lua").read_text(encoding="utf-8")
@@ -8963,8 +8998,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(portable_script_overlay(game, name, instrument))
                 for game in games
                 for name, instrument in (
+                    ("native_world.lua", instrument_world_scene),
                     ("native_world_view.lua", instrument_weather_status),
                     ("native_guest_clock.lua", instrument_guest_clock_dispatch),
+                    ("native_guest_ui.lua", instrument_guest_health_dispatch),
                     ("native_stock_switch.lua", instrument_switch_reads),
                     ("native_flashlight.lua", instrument_flashlight_scope),
                     ("native_death.lua", instrument_death_poll),
@@ -9435,9 +9472,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                         if campaign == "oil_lamps" and results["stock_oil_lamps"]["passed"]:
                             assert host_receipts.get(native_stock_switch.IGNITE, {}).get("count", 0) > 0, evidence
                         if campaign == "observatory" and results["stock_campfire"]["passed"]:
-                            health_receipts = guest_receipts.get(runtime.GUEST_HEALTH_PROJECT, {})
-                            assert health_receipts.get("count", 0) >= 2, evidence
-                            assert 0 < health_receipts["maximum_bytes"] <= 1024, evidence
+                            campfire = results["stock_campfire"]["evidence"]["resident_campfire"]
+                            if "native_health_dispatch" not in campfire:
+                                health_receipts = guest_receipts.get(runtime.GUEST_HEALTH_PROJECT, {})
+                                assert health_receipts.get("count", 0) >= 2, evidence
+                                assert 0 < health_receipts["maximum_bytes"] <= 1024, evidence
                     return gameplay
 
                 async def check_shovel_reconnect(guest, _started):

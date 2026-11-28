@@ -15,6 +15,7 @@ local uncached_format = SilverfishFormatLocalStatusRowUncached
 local last_status_sample
 local last_census_map, watched_title_scope, session_publication
 local clock_lua_requests, clock_lua_count = {}, 0
+local health_lua_requests, health_lua_count = {}, 0
 
 local function record(active, tag, wall_ms, cycles)
     local rows = active.rows[tag]
@@ -608,6 +609,57 @@ local function read_clock_dispatch()
         status_sequence, seen_by_lua and 1 or 0}, "\t")
 end
 
+function SilverfishProfileCrossroadsHealthLuaProjection(nonce)
+    health_lua_count = health_lua_count + 1
+    health_lua_requests[(health_lua_count - 1) % 128 + 1] = nonce
+end
+
+local function read_health_dispatch()
+    local read = SilverfishReadNativeHealthDispatchProfile
+    if type(read) ~= "function" then return "unavailable" end
+    local history = read()
+    assert(type(history) == "string", "invalid native health dispatch history")
+    return table.concat(health_lua_requests, ",") .. "\n" .. history
+end
+
+local function probe_health_dispatch()
+    local read, probe = SilverfishReadNativeHealthDispatchProfile, SilverfishProbeNativeHealthDispatch
+    if type(read) ~= "function" or type(probe) ~= "function" then return "unavailable" end
+    local state = inspect()
+    local current_phase = phase(state)
+    assert(current_phase == "connected" and state.local_pawn, "missing connected guest health scope")
+    local save, pawn, token = native_save_scope.bind_guest(state, current_phase)
+    assert(valid(save) and valid(pawn) and same_object(pawn, state.local_pawn.pawn), "missing isolated guest save")
+    local request
+    for line in read():gmatch("[^\n]+") do
+        local fields = {}
+        for value in (line .. "\t"):gmatch("([^\t]*)\t") do fields[#fields + 1] = value end
+        if fields[1] == "native-guest-health-reply" and fields[5] == state.map and fields[8] == token
+            and fields[9] == state.local_pawn.name and fields[10] == "accepted" then
+            request = {fields[3], "native-guest-health-project", table.unpack(fields, 5, 9)}
+            for index = 12, #fields do request[#request + 1] = fields[index] end
+        end
+    end
+    assert(request and #request >= 9, "no native guest health receipt in the active scope")
+    local health, maximum, regen = save.PlayerHealth, pawn.MaxHealth, save.PlayerRegen
+    request[8] = tostring(health >= 1 and health - 1 or math.min(maximum, health + 1))
+    if probe(table.concat(request, "\t") .. "\n") ~= true then
+        for index = #request, 10, -1 do request[index] = nil end
+        if probe(table.concat(request, "\t") .. "\n") ~= true then return "awaiting-scope" end
+    end
+    local count = #request
+    for _, index in ipairs({4, 5, 6}) do
+        local exact = request[index]
+        assert(type(exact) == "string" and #exact == 32 and exact:match("^%x+$"), "invalid health scope identity")
+        request[index] = exact:sub(1, 31) .. (exact:sub(32) == "0" and "1" or "0")
+        assert(probe(table.concat(request, "\t") .. "\n") == false, "native health admitted a changed scope field: " .. index)
+        request[index] = exact
+    end
+    assert(save.PlayerHealth == health and pawn.MaxHealth == maximum and save.PlayerRegen == regen,
+        "native health preflight changed the stock guest")
+    return tostring(count)
+end
+
 local function compare_save_game_clock()
     local read, stock = SilverfishReadNativeSavedGameSeconds, native_world_view.read_game_seconds_lua
     if type(read) ~= "function" then return "unavailable" end
@@ -1090,6 +1142,16 @@ LoopInGameThreadWithDelay(50, function()
         else
             message = "unavailable"
         end
+    elseif action == "worldscene" and not capture then
+        if type(SilverfishProfileCrossroadsWorldScene) == "function" then
+            local ok, value = pcall(function()
+                local state = inspect()
+                return SilverfishProfileCrossroadsWorldScene(state, phase(state), status_row)
+            end)
+            if ok then message = value else message = "world scene comparison failed: " .. tostring(value) end
+        else
+            message = "unavailable"
+        end
     elseif action == "hoststash" and not capture then
         if type(SilverfishProfileCrossroadsHostStash) == "function" then
             local ok, value = pcall(function()
@@ -1100,6 +1162,12 @@ LoopInGameThreadWithDelay(50, function()
         else
             message = "unavailable"
         end
+    elseif action == "healthdispatch" and not capture then
+        local ok, value = pcall(read_health_dispatch)
+        if ok then message = value else message = "health dispatch profile failed: " .. tostring(value) end
+    elseif action == "healthdispatchprobe" and not capture then
+        local ok, value = pcall(probe_health_dispatch)
+        if ok then message = value else message = "health dispatch preflight failed: " .. tostring(value) end
     elseif action == "clockdispatch" and not capture then
         local ok, value = pcall(read_clock_dispatch)
         if ok then message = value else message = "clock dispatch profile failed: " .. tostring(value) end

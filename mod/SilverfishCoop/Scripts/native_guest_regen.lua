@@ -84,6 +84,7 @@ local function update(entry, guest, state, phase, standing, stock)
     -- This snapshot may intentionally suppress health when save ownership is shared.
     if status == "applied" and guest.health ~= nil and valid(guest.save)
         and guest.save:GetAddress() == detached:GetAddress() then
+        guest.status_health_changed = guest.status_health_changed or guest.health ~= hp_after
         guest.health = hp_after
     end
 end

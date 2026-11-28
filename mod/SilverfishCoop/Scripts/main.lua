@@ -1552,7 +1552,8 @@ local function write_status(state, current_phase, failure, fields, pending, crat
                     native_save_scope.vitals_for_status(details, personal_save)
             end
             local health = details == state.local_pawn and viewed_health or details.health
-            if census_token then
+            -- The census was taken before the guest regeneration pulse.
+            if census_token and not details.status_health_changed then
                 rows[#rows + 1] = pawn_index
                 if pawn_index == 1 then census_local_health = health end
             else
