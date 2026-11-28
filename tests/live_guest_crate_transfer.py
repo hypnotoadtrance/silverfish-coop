@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from contextlib import ExitStack
 import json
+import math
 from pathlib import Path
 
 import live_portable_title_smoke as suite
@@ -149,9 +150,9 @@ async def verify_streamed_transfer(host, guest, pawn):
 
 async def verify_crates(host, guest, pawn):
     return {"persistent": await verify_transfer(host, guest, pawn),
-            "pickup_preview": await verify_pickup_preview(host, guest, pawn),
             "streamed": await verify_streamed_transfer(host, guest, pawn),
-            "runtime": await verify_runtime_transfer(host, guest, pawn)}
+            "runtime": await verify_runtime_transfer(host, guest, pawn),
+            "pickup_preview": await verify_pickup_preview(host, guest, pawn)}
 
 
 async def verify_pickup_preview(host, guest, pawn):
@@ -159,6 +160,10 @@ async def verify_pickup_preview(host, guest, pawn):
     before = suite.campaign_save_hashes(host.campaign)
     crate = next(name for name, area in native_loot.CRATES.items() if area == OBSERVATORY
                  and name.endswith(":PersistentLevel.LootCrate_Small_BP_C_1"))
+    approached = await host.bridge.command("native-loot-approach", pawn, crate, timeout=5)
+    position, = [row["location"] for row in approached["pawns"].values() if row["name"] == pawn]
+    await suite.wait(guest_run, lambda frame:
+        (point := frame["game"]["pawns"]["local"].get("location")) and math.dist(point, position) < 50)
     opened = await suite.submit(host_run, "native-loot-open", target=crate)
     assert opened["ok"] and opened["native_loot_roll"]["items"], opened
     host_state, guest_state = await asyncio.gather(*(suite.wait(run, lambda frame:
