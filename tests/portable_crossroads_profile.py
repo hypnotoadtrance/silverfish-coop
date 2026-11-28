@@ -1819,6 +1819,45 @@ def instrument_weather_status(source):
         '"weather_status_readback", readback, current, frame, lease.saved_seconds)')
     if "local function lease_time_lua(" not in source:
         return source
+    component_probe = ""
+    component_branch = ("        and SilverfishVerifyNativeGuestWeatherComponents(table.unpack(lease.native_component_args)) == true then\n"
+                        "        return true\n")
+    if component_branch in source:
+        marker = "\nlocal function lease_components_current()\n"
+        assert source.count(marker) == source.count(component_branch) == 1
+        source = source.replace(marker, "\nlocal profiled_guest_weather_scope\n" + marker)
+        source = source.replace(component_branch, component_branch.replace(
+            "        return true", "        profiled_guest_weather_scope = lease.native_component_args\n        return true"))
+        component_probe = """
+    local qualify = assert(SilverfishVerifyNativeGuestWeatherComponents, "missing native weather component qualifier")
+    local scope = assert(lease.native_component_args, "no applied guest weather components")
+    local observed = assert(profiled_guest_weather_scope, "ordinary guest weather did not use the native qualifier")
+    assert(#scope == 12 and #observed == #scope, "expected all applied sun, fog, and cloud components")
+    for index, identity in ipairs(scope) do
+        assert(observed[index] == identity, "ordinary guest weather qualified another component scope")
+    end
+    local function native_components() return qualify(table.unpack(scope)) end
+    assert(native_components() == true and lease_components_current_lua() == true
+        and lease_components_current() == true, "native and stock guest weather qualification differ")
+    assert(qualify(table.unpack(scope, 1, 7)) == true, "native daylight-only qualification refused")
+    local wrong = {table.unpack(scope)}
+    for index, identity in ipairs(scope) do
+        if type(identity) == "number" then
+            wrong[index] = identity + 1
+            assert(qualify(table.unpack(wrong)) == nil, "native weather accepted a stale component address: " .. index)
+            wrong[index] = identity
+        end
+    end
+    local wrong_profile = {}
+    for key, value in pairs(scope[3]) do wrong_profile[key] = value end
+    wrong_profile.day = wrong_profile.day .. "_Missing"
+    wrong[3] = wrong_profile
+    assert(qualify(table.unpack(wrong)) == nil, "native weather accepted a different authored profile")
+    local component_count = 64
+    local cn, cl, ckn, ckl = SilverfishProfileCrossroadsCompare(
+        component_count, native_components, lease_components_current_lua)
+    component_suffix = (",%d,%d,%.3f,%.3f,%.3f,%.3f"):format(#scope, component_count, cn, cl, ckn, ckl)
+"""
     stop = "\nreturn view\n"
     assert source.count(stop) == 1
     return source.replace(stop, """
@@ -1849,7 +1888,9 @@ function SilverfishProfileCrossroadsWeatherLease(state, phase)
     assert(ok and expired == nil, "weather wrapper accepted an expired render lease")
     local count = 64
     local native_ms, lua_ms, native_kib, lua_kib = SilverfishProfileCrossroadsCompare(count, native, stock)
-    return ("%d,%.3f,%.3f,%.3f,%.3f"):format(count, native_ms, lua_ms, native_kib, lua_kib)
+    local component_suffix = ""
+""" + component_probe + """
+    return ("%d,%.3f,%.3f,%.3f,%.3f"):format(count, native_ms, lua_ms, native_kib, lua_kib) .. component_suffix
 end
 
 return view
@@ -3288,11 +3329,21 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
         weather_reply = await command(guest, "weatherlease")
         if weather_reply != "unavailable":
             assert not weather_reply.startswith("weather lease comparison failed"), weather_reply
-            count, native_ms, lua_ms, native_kib, lua_kib = map(float, weather_reply.split(","))
+            count, native_ms, lua_ms, native_kib, lua_kib, *components = map(float, weather_reply.split(","))
             weather_lease = {"reads_per_path": int(count), "native_ms": native_ms, "lua_ms": lua_ms,
                              "native_heap_growth_kib": native_kib, "lua_heap_growth_kib": lua_kib,
                              "matched_stock_clock": True, "expired_render_lease_refused": True,
                              "wrong_world_pawn_driver_connection_instance_and_save_refused": True}
+            if components:
+                identities, passes, native_ms, lua_ms, native_kib, lua_kib = components
+                assert identities == 12 and passes == 64, weather_reply
+                weather_lease["components"] = {
+                    "scope_fields": int(identities), "wrong_addresses_refused": int(identities) - 1,
+                    "wrong_profile_refused": True, "daylight_only_scope_accepted": True,
+                    "matched_stock_qualifier": True, "normal_native_scope_observed": True,
+                    "reads_per_path": int(passes), "native_ms": native_ms, "lua_ms": lua_ms,
+                    "native_heap_growth_kib": native_kib, "lua_heap_growth_kib": lua_kib,
+                }
         stash_reply = await command(host, "hoststash")
         if stash_reply != "unavailable":
             assert not stash_reply.startswith("host stash comparison failed"), stash_reply

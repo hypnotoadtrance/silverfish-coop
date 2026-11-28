@@ -69,4 +69,35 @@ assert(not lease_time(state, "connected") and lua_reads == 4, "The stock clock e
 env.SilverfishReadNativeWeatherLeaseTime = nil
 stock_clock = 13
 assert(lease_time(state, "connected") == 13 and lua_reads == 5)
-print("Weather lease verifies role, current scope, clock fallback, and expiration.")
+
+local components = upvalue(upvalue(view.sync, "lease_current"), "lease_components_current")
+local day, north, sun, light = object(11), object(12), object(13), object(14)
+local profile = lease.context.profile
+profile.day = "DayCycle_SunControler_BP_C /Game/Classes/Maps/Test.Test:PersistentLevel.DayCycle_SunControler_BP_C_0"
+day.GetWorld = function() return world end
+day.GetFullName = function() return profile.day end
+day.IsActorBeingDestroyed = function() return false end
+day.bReplicates, day["Game Instance"] = false, instance
+day.Arrow_North, day.Arrow_Sun, day.DLight_Sun = north, sun, light
+north.GetOwner = function() return day end
+sun.GetAttachParent = function() return north end
+light.GetAttachParent = function() return sun end
+lease.context.day, lease.context.north, lease.context.sun, lease.context.light = day, north, sun, light
+lease.native_component_args = {1, 5, profile, 11, 12, 13, 14}
+local native_checks = 0
+local native_result = true
+env.SilverfishVerifyNativeGuestWeatherComponents = function(...)
+    assert(select("#", ...) == #lease.native_component_args)
+    for index, identity in ipairs(lease.native_component_args) do assert(select(index, ...) == identity) end
+    native_checks = native_checks + 1
+    return native_result
+end
+local old_name = day.GetFullName
+day.GetFullName = function() error("Native success should bypass the wrapper-heavy scene read") end
+assert(components() and native_checks == 1)
+day.GetFullName, native_result = old_name, nil
+assert(components() and native_checks == 2, "Native refusal allows an equivalent Lua qualification")
+day.DLight_Sun = object(15)
+assert(not components() and native_checks == 3, "A replaced light must invalidate a refused native lease")
+
+print("Weather lease verifies role, current scope, clock fallback, component fallback, and expiration.")

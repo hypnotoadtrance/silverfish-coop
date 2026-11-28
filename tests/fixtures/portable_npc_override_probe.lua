@@ -1451,6 +1451,59 @@ local montage_probe, montage_probe_hooked
 local live_worker = "NPC_Survivor_Worker_C_2"
 local live_probe, live_probe_hooked, pursuit_launch_hooked
 local weapon_block_pawn, weapon_block_hooked
+local live_observation = {limit = 48}
+
+function live_observation.name(actor)
+    return valid(actor) and actor:GetFullName():gsub("[|;\t\r\n]", "?"):sub(1, 384) or "-"
+end
+
+function live_observation.actor(probe, actor)
+    return same(actor, probe.actor) and "worker" or same(actor, probe.host) and "host"
+        or same(actor, probe.guest) and "guest" or live_observation.name(actor)
+end
+
+function live_observation.health(pawn)
+    if valid(pawn) then
+        local save = pawn.Save
+        if valid(save) then return save.PlayerHealth end
+    end
+end
+
+function live_observation.sample(probe)
+    if not valid(probe.actor) or not same(probe.actor:GetWorld(), probe.world) then return end
+    return {time = statics:GetRealTimeSeconds(probe.world) - probe.started,
+        host = live_observation.health(probe.host), guest = live_observation.health(probe.guest),
+        worker = probe.actor.Health, target = live_observation.actor(probe, probe.actor.CombatTarget),
+        last = live_observation.actor(probe, probe.actor.LastDamagedMe)}
+end
+
+function live_observation.number(value)
+    if type(value) ~= "number" or value ~= value or math.abs(value) == math.huge then return "-" end
+    return ("%.6f"):format(value)
+end
+
+function live_observation.record(probe, kind, victim, source, damage)
+    if not probe.events then return end
+    local current = live_observation.sample(probe)
+    if not current then return end
+    local prior = probe.prior or {}
+    probe.prior = current
+    if #probe.events >= live_observation.limit then
+        probe.dropped = probe.dropped + 1
+        return
+    end
+    local source_role = live_observation.actor(probe, source)
+    if source_role == "-" then source_role = "none"
+    elseif source_role ~= "worker" and source_role ~= "host" and source_role ~= "guest" then source_role = "other" end
+    local ok, kinetic = pcall(function() return damage:get()[damage_key] end)
+    local number = live_observation.number
+    -- UE4SS Blueprint hooks run after the stock function. The earlier sample is
+    -- a separate observation, with its own timestamp, and may include stock regen.
+    probe.events[#probe.events + 1] = table.concat({#probe.events + 1, kind, number(current.time), victim,
+        source_role, live_observation.name(source), number(ok and kinetic), number(prior[victim]),
+        number(current[victim]), number(current.worker), current.target, current.last,
+        prior.target or "-", prior.last or "-", number(prior.time)}, ";")
+end
 
 local function dock_fight_position(pawn, actor, ignored, distance, shot_lane, contact)
     local center = actor:K2_GetActorLocation()
@@ -1491,7 +1544,7 @@ local function dock_melee_approach(host, guest, worker, distance)
     end
 end
 
-local function stage_live_worker(pawn, world, distance, keep_host_at_arrival)
+local function stage_live_worker(pawn, world, distance, keep_host_at_arrival, observe_damage)
     local actor = dock_worker(world, live_worker)
     assert(valid(actor) and actor.Alive and not valid(actor.CombatTarget) and actor.Health > 1
         and actor:HasAuthority() and valid(actor.Controller), "expected an untouched warehouse worker with its stock brain")
@@ -1512,8 +1565,23 @@ local function stage_live_worker(pawn, world, distance, keep_host_at_arrival)
         guest_point = dock_fight_position(guest, actor, ignored, 350, true)
     end
     assert(guest_point, "no clear guest approach in the warehouse")
-    live_probe = {actor = actor, guest = guest, host = pawn, enemy_health = actor.Health,
+    live_probe = {actor = actor, guest = guest, host = pawn, world = world, enemy_health = actor.Health,
         guest_health = guest.Save.PlayerHealth, guest_attacks = 0, host_attacks = 0}
+    if observe_damage then
+        live_probe.events, live_probe.dropped = {}, 0
+        live_probe.started = statics:GetRealTimeSeconds(world)
+        live_probe.prior = live_observation.sample(live_probe)
+        if not live_observation.worker_hooked then
+            RegisterHook("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:DealDamage",
+                function(context, damage, _, instigator)
+                    local probe = live_probe
+                    if probe and probe.events and same(context:get(), probe.actor) then
+                        live_observation.record(probe, "worker_damage", "worker", instigator:get(), damage)
+                    end
+                end)
+            live_observation.worker_hooked = true
+        end
+    end
     if keep_host_at_arrival then live_probe.launches = {} end
     if keep_host_at_arrival and not pursuit_launch_hooked then
         RegisterHook("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:SpawnProjectile", function(context)
@@ -1531,11 +1599,17 @@ local function stage_live_worker(pawn, world, distance, keep_host_at_arrival)
         pursuit_launch_hooked = true
     end
     if not live_probe_hooked then
-        RegisterHook("/Game/Classes/Player/Player_FP.Player_FP_C:DealDamage", function(context, _, _, instigator)
-            if not live_probe or not same(instigator:get(), live_probe.actor) then return end
-            local victim = context:get()
-            if same(victim, live_probe.guest) then live_probe.guest_attacks = live_probe.guest_attacks + 1 end
-            if same(victim, live_probe.host) then live_probe.host_attacks = live_probe.host_attacks + 1 end
+        RegisterHook("/Game/Classes/Player/Player_FP.Player_FP_C:DealDamage", function(context, damage, _, instigator)
+            local probe = live_probe
+            if not probe then return end
+            local victim, source = context:get(), instigator:get()
+            local role = same(victim, probe.guest) and "guest" or same(victim, probe.host) and "host" or nil
+            if not role or not same(victim:GetWorld(), probe.world) then return end
+            if same(source, probe.actor) then
+                if role == "guest" then probe.guest_attacks = probe.guest_attacks + 1
+                else probe.host_attacks = probe.host_attacks + 1 end
+            end
+            live_observation.record(probe, "player_damage", role, source, damage)
         end)
         live_probe_hooked = true
     end
@@ -2139,7 +2213,7 @@ local function run(action, actor_path)
         return tostring(pawn.IsWeaponBlocked)
     elseif action == "dock-natural-stage" then
         assert(host, "the test stages the stock host NPC")
-        return stage_live_worker(pawn, world)
+        return stage_live_worker(pawn, world, nil, false, true)
     elseif action == "dock-pursuit-stage" then
         assert(host, "the host observes the original warehouse worker")
         return stage_live_worker(pawn, world, nil, true)
@@ -2216,6 +2290,19 @@ local function run(action, actor_path)
     elseif action == "dock-natural-sample" or action == "dock-pursuit-sample" then
         assert(host, "the host owns the fight")
         return sample_live_worker(action == "dock-pursuit-sample")
+    elseif action == "dock-natural-events" then
+        local probe = live_probe
+        assert(host and probe and probe.events and same(probe.world, world), "no active host stock fight observation")
+        local header = "v1;" .. probe.dropped
+        return #probe.events == 0 and header or header .. "|" .. table.concat(probe.events, "|")
+    elseif action == "dock-natural-lane" then
+        local actor = dock_worker(world, live_worker)
+        if not valid(actor) or not actor.Alive then return "absent" end
+        local shooter = host and authoritative_guest(world) or pawn
+        local weapon, camera = shooter.EquipedItem, shooter.Camera
+        if not valid(weapon) or not valid(camera) or not valid(weapon.Arrow_Muzzle) then return "weapon unavailable" end
+        local clear, reason = pursuit_lane(shooter, actor, weapon, camera)
+        return clear and "clear" or reason
     elseif action == "dock-natural-state" then
         return dock_combat(pawn, world, host, action, live_worker)
     elseif action == "dock-natural-retreat" then
@@ -2646,6 +2733,10 @@ end
 
 LoopInGameThreadWithDelay(40, function()
     track_pursuit()
+    if live_probe and live_probe.events then
+        local prior = live_observation.sample(live_probe)
+        if prior then live_probe.prior = prior end
+    end
     local request = io.open(prefix .. "command.tsv", "rb")
     if not request then return end
     local data = request:read(command_limit + 1)

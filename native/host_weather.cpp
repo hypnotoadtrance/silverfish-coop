@@ -257,7 +257,14 @@ namespace
         Vector rain_direction{0, 0, 1};
     };
 
-    U::UObject* read_sun(View& report, U::UObject* day)
+    struct SunTargets
+    {
+        U::UObject* north;
+        U::UObject* sun;
+        U::UObject* light;
+    };
+
+    std::optional<SunTargets> sun_targets(U::UObject* day)
     {
         auto* north = object_field(day, STR("Arrow_North"));
         auto* sun = object_field(day, STR("Arrow_Sun"));
@@ -267,8 +274,16 @@ namespace
             !owned(sun, day, STR("/Script/Engine.ArrowComponent")) ||
             !owned(light, day, STR("/Script/Engine.DirectionalLightComponent")) ||
             object_field(north, STR("AttachParent")) != root || object_field(sun, STR("AttachParent")) != north ||
-            object_field(light, STR("AttachParent")) != sun) return nullptr;
+            object_field(light, STR("AttachParent")) != sun) return {};
+        return SunTargets{north, sun, light};
+    }
 
+    U::UObject* read_sun(View& report, U::UObject* day)
+    {
+        const auto targets = sun_targets(day);
+        if (!targets) return nullptr;
+        auto* north = targets->north;
+        auto* light = targets->light;
         const auto rotation = struct_value<double, U::FDoubleProperty>(
             field<U::FStructProperty>(north, STR("RelativeRotation")), north, rotator_path, rotator_axes);
         const auto intensity = scalar(light, STR("Intensity"), 0, 100000);
@@ -314,7 +329,17 @@ namespace
         return true;
     }
 
-    bool read_weather(View& report, U::UWorld* world, U::UObject* day, std::string_view fog_name, std::string_view cloud_name)
+    struct WeatherTargets
+    {
+        U::UObject* fog;
+        U::UObject* height;
+        U::UObject* cloud;
+        U::UObject* volume;
+        U::UObject* material;
+    };
+
+    std::optional<WeatherTargets> weather_targets(U::UWorld* world, U::UObject* day,
+        std::string_view fog_name, std::string_view cloud_name)
     {
         auto* fog = attached_actor(object_field(day, STR("HightFog")), world, fog_class, fog_name);
         auto* cloud = attached_actor(object_field(day, STR("Clouds_Ref")), world, cloud_class, cloud_name);
@@ -324,7 +349,17 @@ namespace
         if (!owned(height, fog, STR("/Script/Engine.ExponentialHeightFogComponent")) ||
             !owned(volume, cloud, STR("/Script/Engine.VolumetricCloudComponent")) ||
             object_field(fog, STR("RootComponent")) != height || object_field(cloud, STR("RootComponent")) != volume ||
-            !exact(material, mid_class) || object_field(volume, STR("Material")) != material) return false;
+            !exact(material, mid_class) || object_field(volume, STR("Material")) != material) return {};
+        return WeatherTargets{fog, height, cloud, volume, material};
+    }
+
+    bool read_weather(View& report, U::UWorld* world, U::UObject* day, std::string_view fog_name, std::string_view cloud_name)
+    {
+        const auto targets = weather_targets(world, day, fog_name, cloud_name);
+        if (!targets) return false;
+        auto* height = targets->height;
+        auto* volume = targets->volume;
+        auto* material = targets->material;
         auto* parent = object_field(material, STR("Parent"));
         if (!live(parent) || parent != find<U::UObject>(cloud_material)) return false;
 
@@ -378,6 +413,53 @@ namespace
         lua_pushnil(stack);
         lua_pushstring(stack, reason);
         return 2;
+    }
+
+    int verify_guest_components(const Lua& lua)
+    {
+        auto* stack = lua.get_lua_state();
+        const int count = lua_gettop(stack);
+        const bool weather = count == 12;
+        if (!U::IsInGameThreadRaw() || !U::UnrealInitializer::ShouldUseHashTables() ||
+            (count != 7 && !weather) || !lua_istable(stack, 3)) return 0;
+        for (int index = 1; index <= count; ++index)
+            if (index != 3 && (!lua_isinteger(stack, index) || lua_tointeger(stack, index) <= 0)) return 0;
+        const auto matches = [stack](int index, U::UObject* object) {
+            return live(object) && reinterpret_cast<std::uintptr_t>(object) ==
+                static_cast<std::uintptr_t>(lua_tointeger(stack, index));
+        };
+
+        // The address arguments identify the applied lease. Resolve every pointer
+        // from the current game-thread world and its stock actor bindings.
+        auto* world = silverfish::native_interaction_input::current_listen_world();
+        if (!matches(1, world)) return 0;
+        auto* instance = object_field(world, STR("OwningGameInstance"));
+        auto* driver = object_field(world, STR("NetDriver"));
+        if (!matches(2, instance) || !live(object_field(driver, STR("ServerConnection")))) return 0;
+
+        const auto map = profile_string(stack, "map");
+        const auto world_name = profile_string(stack, "world");
+        const auto day_name = profile_string(stack, "day");
+        if (!map || !world_name || !day_name || !silverfish::world_path::package(*map) ||
+            world->GetFullName() != RC::to_wstring(*world_name)) return 0;
+        const auto path = world->GetPathName();
+        if (std::wstring_view{path}.substr(0, path.find('.')) != RC::to_wstring(*map)) return 0;
+        auto* day = authored_day(world, instance, *day_name);
+        if (!matches(4, day)) return 0;
+
+        const auto sun = sun_targets(day);
+        if (!sun || !matches(5, sun->north) || !matches(6, sun->sun) || !matches(7, sun->light)) return 0;
+        if (weather)
+        {
+            const auto fog_name = profile_string(stack, "fog");
+            const auto cloud_name = profile_string(stack, "cloud");
+            if (!fog_name || !cloud_name) return 0;
+            const auto targets = weather_targets(world, day, *fog_name, *cloud_name);
+            if (!targets || !matches(8, targets->fog) || !matches(9, targets->height) || !matches(10, targets->cloud) ||
+                !matches(11, targets->volume) || !matches(12, targets->material)) return 0;
+        }
+        lua_pushboolean(stack, true);
+        return 1;
     }
 
     int read_host_weather(const Lua& lua)
@@ -467,4 +549,5 @@ namespace
 void silverfish::native_host_weather::register_lua(Lua& lua)
 {
     lua.register_function("SilverfishReadNativeHostWeather", read_host_weather);
+    lua.register_function("SilverfishVerifyNativeGuestWeatherComponents", verify_guest_components);
 }

@@ -446,8 +446,16 @@ local function lease_time(state, phase)
     if now and now < lease.expires then return now end
 end
 
-local function lease_components_current()
+local function lease_components_current_lua()
     return components_current(lease.context) and (not lease.weather or weather_current(lease.context, lease.weather))
+end
+
+local function lease_components_current()
+    if lease.native_component_args and type(SilverfishVerifyNativeGuestWeatherComponents) == "function"
+        and SilverfishVerifyNativeGuestWeatherComponents(table.unpack(lease.native_component_args)) == true then
+        return true
+    end
+    return lease_components_current_lua()
 end
 
 local function lease_current(state, phase)
@@ -527,6 +535,19 @@ function view.apply(state, phase, frame)
         elseif lease.weather then
             restore_weather(lease)
             lease.weather, lease.original_weather = nil, nil
+        end
+        if type(SilverfishVerifyNativeGuestWeatherComponents) == "function" then
+            local args = {current.world:GetAddress(), current.instance:GetAddress(), current.profile,
+                current.day:GetAddress(), current.north:GetAddress(), current.sun:GetAddress(), current.light:GetAddress()}
+            local targets = lease.weather
+            if targets then
+                args[8], args[9] = targets.fog:GetAddress(), targets.height_fog:GetAddress()
+                args[10], args[11] = targets.cloud:GetAddress(), targets.volume:GetAddress()
+                args[12] = targets.material:GetAddress()
+            end
+            lease.native_component_args = args
+        else
+            lease.native_component_args = nil
         end
         lease.rain_skipped_nullrhi = weather_view.skip_wet_rain(frame)
         if weather_view.has_rain(frame) and not lease.rain_skipped_nullrhi then

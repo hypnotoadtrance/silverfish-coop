@@ -1655,6 +1655,29 @@ async def verify_stock_melee_edges_only(host: Seat, guest: Seat, pawn: str) -> d
                                   "campaign_unchanged": True}}
 
 
+def dock_damage_events(raw: str) -> dict:
+    header, *rows = raw.split("|")
+    version, dropped = header.split(";")
+    assert version == "v1" and int(dropped) >= 0 and len(rows) <= 48, raw
+    events = []
+    for index, row in enumerate(rows, 1):
+        (serial, kind, elapsed, victim, source, source_actor, kinetic, previous_hp, hp, worker_hp,
+         target, last_damager, previous_target, previous_damager, previous_sample) = row.split(";")
+        assert int(serial) == index and kind in ("worker_damage", "player_damage"), row
+        assert victim in ("host", "guest", "worker") and source in ("host", "guest", "worker", "other", "none"), row
+        times_and_health = [None if field == "-" else float(field) for field in
+                            (elapsed, kinetic, previous_hp, hp, worker_hp, previous_sample)]
+        assert all(value is None or math.isfinite(value) for value in times_and_health), row
+        elapsed, kinetic, previous_hp, hp, worker_hp, previous_sample = times_and_health
+        assert elapsed is not None and elapsed >= 0 and (previous_sample is None or previous_sample <= elapsed), row
+        events.append({"serial": index, "kind": kind, "seconds": elapsed, "victim": victim,
+                       "source": source, "source_actor": source_actor, "kinetic": kinetic,
+                       "previous_hp": previous_hp, "hp": hp, "worker_hp": worker_hp, "target": target,
+                       "last_damager": last_damager, "previous_target": previous_target,
+                       "previous_damager": previous_damager, "previous_sample": previous_sample})
+    return {"dropped": int(dropped), "events": events}
+
+
 async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict) -> dict:
     async def command(seat, action):
         return await portable_probe_command(seat.bridge, "portable-npc-override", action)
@@ -1676,6 +1699,7 @@ async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict)
         assert await command(guest, "dock-unblock-weapon") == "false"
 
     center, seat_point = (await command(host, "dock-natural-stage")).split(";")
+    observation = {}
     try:
         baseline = await command(host, "dock-natural-sample")
         assert baseline.split(";")[4] == "-", baseline
@@ -1690,20 +1714,25 @@ async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict)
                         and math.dist(seat_origin, tuple(map(float, local_point.split(",")))) < 100):
                     break
                 await asyncio.sleep(.05)
-        assert await command(guest, f"dock-aim\t{guest_point}") == "ready"
-        await asyncio.sleep(.15)
-        target = await command(host, "dock-natural-position")
-        assert await command(host, f"dock-aim\t{target}") == "ready"
+        assert await command(guest, "dock-pursuit-aim") != "absent"
+
         async def shoot_guest(remaining):
             started = time.time()
-            async with asyncio.timeout(5):
-                while True:
-                    tap = await submit(guest_run, "native-guest-primary-input-fixture")
-                    if tap["ok"]:
-                        break
-                    # This refusal precedes stock dispatch. Other failures still fail the test.
-                    assert tap["error"] == "Stock primary input is temporarily blocked by the equipped player's state", tap
-                    await asyncio.sleep(.15)
+            lane = None
+            try:
+                async with asyncio.timeout(5):
+                    while True:
+                        lane = await command(guest, "dock-natural-lane")
+                        if lane == "clear":
+                            tap = await submit(guest_run, "native-guest-primary-input-fixture")
+                            if tap["ok"]:
+                                break
+                            # This refusal precedes stock dispatch, so a fresh attempt is safe.
+                            assert tap["error"] == "Stock primary input is temporarily blocked by the equipped player's state", tap
+                        await asyncio.sleep(.05)
+            except TimeoutError as error:
+                raise AssertionError(f"No accepted stock shot at the exact worker with {remaining} rounds left. "
+                                     f"Last sight and muzzle check was {lane}") from error
             sequence = tap["native_guest_primary_fixture"]["sequence"]
             async with asyncio.timeout(8):
                 while True:
@@ -1721,26 +1750,27 @@ async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict)
         began = time.time()
         info = await shoot_guest(7)
         current = baseline
-        try:
-            async with asyncio.timeout(15):
-                while True:
-                    current = await command(host, "dock-natural-sample")
-                    alive, hit, initial, health, target, guest_hits, host_hits, guest_before, guest_after = current.split(";")
-                    if (alive, hit, target, host_hits) == ("true", "true", "guest", "0") and int(guest_hits) > 0:
-                        assert float(health) < float(initial) and float(guest_after) < float(guest_before), current
-                        break
-                    await asyncio.sleep(.08)
-        except (TimeoutError, RuntimeError) as error:
-            raise AssertionError(f"Stock NPC did not retaliate against its guest attacker: {baseline} to {current}") from error
         local_position = tuple(map(float, (await command(guest, "dock-natural-seat")).split(",")))
-        async with asyncio.timeout(4):
-            while True:
-                impacts = [row for row in await resident_events(guest_run, frame)
-                           if row["event"] == "native_npc_impact_played" and row["time_unix"] >= began
-                           and row["sound"] == expected_sound and math.dist(row["position"], local_position) < 350]
-                if impacts:
-                    break
-                await asyncio.sleep(.05)
+        try:
+            async with asyncio.timeout(10):
+                while True:
+                    observation = dock_damage_events(await command(host, "dock-natural-events"))
+                    events = observation["events"]
+                    attack = next((hit for hit in events if hit["kind"] == "worker_damage"
+                                   and hit["source"] == "guest" and hit["hp"] is not None
+                                   and hit["previous_hp"] is not None and hit["hp"] < hit["previous_hp"]), None)
+                    retaliation_event = next((hit for hit in events if attack and hit["serial"] > attack["serial"]
+                                              and hit["kind"] == "player_damage" and hit["source"] == "worker"
+                                              and hit["victim"] == "guest" and hit["hp"] is not None
+                                              and hit["previous_hp"] is not None and hit["hp"] < hit["previous_hp"]
+                                              and (hit["target"] == "guest" or hit["previous_target"] == "guest")), None)
+                    if retaliation_event:
+                        break
+                    await asyncio.sleep(.05)
+        except TimeoutError as error:
+            raise AssertionError(f"No verified stock worker retaliation after the guest's hit. "
+                                 f"Worker and seat sample was {await command(host, 'dock-natural-sample')}") from error
+        current = await command(host, "dock-natural-sample")
         retaliation = current
         fight = [{"shot": info, "stock_result": current}]
         for remaining in range(info["after"], 0, -1):
@@ -1766,9 +1796,6 @@ async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict)
             except TimeoutError as error:
                 raise AssertionError(f"The guest did not reach the warehouse retreat {retreat} from {local_point}. "
                                      f"Last stock fight sample was {current}") from error
-            for seat in (guest, host):
-                target = await command(seat, "dock-natural-position")
-                assert target != "absent" and await command(seat, f"dock-aim\t{target}") == "ready"
             result = await shoot_guest(remaining)
             before_health = float(current.split(";")[3])
             deadline = time.monotonic() + 1.2
@@ -1789,11 +1816,30 @@ async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict)
                 if all(body.startswith("false;true;1;") for body in bodies):
                     break
                 await asyncio.sleep(.05)
+        observation = dock_damage_events(await command(host, "dock-natural-events"))
+        assert observation["dropped"] == 0 and not any(
+            hit["source"] == "worker" and hit["victim"] == "host" for hit in observation["events"]), observation
+        impacts = [row for row in await resident_events(guest_run, frame)
+                   if row["event"] == "native_npc_impact_played" and row["time_unix"] >= began
+                   and row["sound"] == expected_sound and math.dist(row["position"], local_position) < 350]
+        assert impacts, "The guest did not receive the stock worker's impact sound at the first fight position"
         return {"temporary_weapon_block": {"scope": scope, "rejected": rejected},
                 "baseline": baseline, "shot": info, "stock_target_and_hit": retaliation, "guest_impact_sound": impacts[0],
-                "stock_health_fight": fight, "both_peers_dead_and_ragdolled": bodies}
+                "stock_guest_attack": attack, "stock_worker_retaliation": retaliation_event,
+                "damage_events": observation, "stock_health_fight": fight, "both_peers_dead_and_ragdolled": bodies}
+    except Exception as error:
+        try:
+            observation = dock_damage_events(await command(host, "dock-natural-events"))
+        except (AssertionError, RuntimeError, TimeoutError, ValueError):
+            pass
+        if observation:
+            error.add_note(f"Observed stock damage events: {observation}")
+        raise
     finally:
-        assert await command(host, "dock-natural-stop") == "stopped"
+        try:
+            assert await command(host, "dock-natural-stop") == "stopped"
+        finally:
+            assert await command(guest, "dock-pursuit-guest-stop") == "stopped"
 
 
 async def verify_tutorial_bandage_revisit(host: Seat, guest: Seat, pawn: str) -> dict:
