@@ -1406,10 +1406,10 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
         motion = await command(host, "avatarmotion")
         assert motion != "unavailable" and not motion.startswith("avatar motion comparison failed"), motion
         for row in motion.split(";"):
-            seat, native_ms, lua_ms, native_kib, lua_kib, aiming, sprinting, moving = row.split(",")
+            seat, native_ms, lua_ms, native_kib, lua_kib, aiming, sprinting, pawn_moving = row.split(",")
             avatar_motion[seat] = {"reads_per_path": 128, "native_ms": float(native_ms), "lua_ms": float(lua_ms),
                                    "native_heap_growth_kib": float(native_kib), "lua_heap_growth_kib": float(lua_kib),
-                                   "aiming": aiming == "1", "sprinting": sprinting == "1", "moving": moving == "1",
+                                   "aiming": aiming == "1", "sprinting": sprinting == "1", "moving": pawn_moving == "1",
                                    "stock_values_matched": True, "wrong_scope_refused": True}
         assert set(avatar_motion) == {"host", "guest"}, avatar_motion
         clock_replies = await asyncio.gather(*(command(seat, "avatarclock") for seat in seats.values()))

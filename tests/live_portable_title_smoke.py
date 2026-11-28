@@ -3925,9 +3925,14 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str, hinged=None
         frame = await wait_resident_status(guest_run, lambda f: f.get("state") == "connected")
         async with asyncio.timeout(10):
             while True:
-                observed = await guest.bridge.command("fixture-stock-take-ammo-backpack", guid, update_status=False)
-                if observed["ack"]["message"] == str(units):
-                    break
+                try:
+                    observed = await guest.bridge.command("fixture-stock-take-ammo-backpack", guid,
+                                                          timeout=2, update_status=False)
+                    if observed["ack"]["message"] == str(units):
+                        break
+                except TimeoutError:
+                    # A missed fixture reply is safe to retry because this only reads the backpack.
+                    pass
                 await asyncio.sleep(.1)
         # The stock fixture opens Tab and uses the item's stock Equip menu.
         equipped = await submit(guest_run, native_guest_drop.STOCK_EQUIP_FIXTURE, target=guid)
@@ -7376,6 +7381,7 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
         return [row for row in await resident_events(run, state) if row["event"] == name and row.get("crate") == crate]
 
     received, = await events(guest_run, guest_state, "native_stock_crate_interaction")
+    local_rolls = await events(guest_run, guest_state, "native_loot_locally_rolled")
     applied, = await events(host_run, host_state, "native_loot_roll_accepted")
     assert received["input_source"] == "memory_input" and received["operation_id"] == applied["id"] == roll["id"]
     timings = {}
@@ -7431,6 +7437,8 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
         "local_bridge": {"host": host_state["local_bridge"], "guest": guest_state["local_bridge"]},
         "stock_crate": crate, "guest_actor": guest_actor,
         "input_source": received["input_source"], "sequence": received["sequence"],
+        "outcome_source": next((event["outcome_source"] for event in local_rolls
+                                if event["operation_id"] == roll["id"]), None),
         "roll_id": roll["id"], "roll_count": 1, "roll_origin": applied.get("origin", "host"),
         "guest_scope_cleared_before_press": cold,
         "saves_unchanged_after_open": True,
