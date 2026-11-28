@@ -3,7 +3,7 @@ import uuid
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish import party
 from tools.silverfish.campaign import CampaignStore
@@ -82,6 +82,38 @@ class LegacyGuestWipeRosterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.roles(), {"host": "host"})
         await host.settle_wipe(bridge, transport)
         host.checkpoint_native.assert_awaited_once()
+
+
+class GuestReturnSnapshotTests(unittest.TestCase):
+    def test_cleared_reservation_keeps_bound_guest_joining_during_attachment(self):
+        host = object.__new__(MultiHost)
+        first = SimpleNamespace(binding=None, disconnected_at=None, ready=False)
+        second = SimpleNamespace(binding=None, disconnected_at=None, ready=False)
+        host.members = {"first": first, "second": second}
+        host.returning_guests = ["first", "second"]
+        host.enrollment = SimpleNamespace(pending=SimpleNamespace(guest_id="first", id=7))
+        host.return_waiting = 7
+        host.return_census_floor = None
+        host.transitioning = False
+        host.party = party.new_party()
+        with patch.object(Host, "snapshot_for_guest", side_effect=lambda *_: {"travel_in_progress": False}):
+            self.assertEqual(host.snapshot_for_guest("first", "guest"), {
+                "travel_in_progress": False, "native_return_reservation": 7, "native_return_retry_allowed": True,
+            })
+            self.assertEqual(host.snapshot_for_guest("second", "guest2"), {"travel_in_progress": True})
+
+            first.binding = object()
+            host.enrollment.pending = None
+            self.assertEqual(host.snapshot_for_guest("first", "guest"), {"travel_in_progress": False})
+            self.assertEqual(host.snapshot_for_guest("second", "guest2"), {"travel_in_progress": True})
+
+            host.enrollment.pending = SimpleNamespace(guest_id="second", id=8)
+            self.assertEqual(host.snapshot_for_guest("first", "guest"), {"travel_in_progress": False})
+            self.assertEqual(host.snapshot_for_guest("second", "guest2"), {
+                "travel_in_progress": False, "native_return_reservation": 8, "native_return_retry_allowed": False,
+            })
+            host.transitioning = True
+            self.assertEqual(host.snapshot_for_guest("first", "guest"), {"travel_in_progress": True})
 
 
 class GuestExpiryTests(unittest.IsolatedAsyncioTestCase):

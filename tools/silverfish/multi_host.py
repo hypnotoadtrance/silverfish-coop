@@ -112,8 +112,13 @@ class MultiHost(Host):
         result = super().snapshot_for_guest(guest_id, role)
         if guest_id in self.returning_guests:
             pending = self.enrollment.pending
-            result["travel_in_progress"] = self._return_blocked() or not pending or pending.guest_id != guest_id
-            if not result["travel_in_progress"]:
+            owns_reservation = pending is not None and pending.guest_id == guest_id
+            member = self.members.get(guest_id)
+            # The native connection consumes its reservation before save attachment completes.
+            # Keep that guest's join open while the host is attaching the exact pawn.
+            attaching = member is not None and member.disconnected_at is None and member.binding is not None
+            result["travel_in_progress"] = self._return_blocked() or not (owns_reservation or attaching)
+            if owns_reservation and not result["travel_in_progress"]:
                 result["native_return_reservation"] = pending.id
                 result["native_return_retry_allowed"] = self.return_waiting == pending.id
         return result
