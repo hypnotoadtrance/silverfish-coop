@@ -24,7 +24,7 @@ from bootstrap import install_stage
 from tools.silverfish import (
     direct_ip, embedded_startup, native_finite_shop, native_guest_consumable, native_guest_drop, native_guest_drop_record,
     native_guest_melee,
-    native_dialogue, native_host_save, native_inventory, native_loose_pickup, native_smg_hold,
+    native_dialogue, native_host_save, native_inventory, native_inventory_grant, native_loose_pickup, native_smg_hold,
     native_anomaly_effects, native_critters, native_destructibles, native_lantern, native_npc_barter, native_loot, native_prop_carry, native_stash, native_stock_switch, native_weapon_fire_view,
     native_host_stack_drop, native_player_avatar, native_stock_door, native_stock_enemy_drops, native_world_loot, runtime,
 )
@@ -7299,7 +7299,7 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
     }
 
 
-async def claim_stock_crate_item(host, guest, pawn, crate, roll, host_state, guest_state, *, preview=False):
+async def claim_stock_crate_item(host, guest, pawn, crate, roll, host_state, guest_state, *, preview=False, recover=False):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     selected = min(roll["items"], key=lambda item: item["class_path"] in native_loot.CASH_RANGES)
     guid = selected["guid"]
@@ -7321,7 +7321,12 @@ async def claim_stock_crate_item(host, guest, pawn, crate, roll, host_state, gue
             if preview:
                 observed = await guest.bridge.command(native_world_loot.FIXTURE, identity, "preview", timeout=5)
                 assert observed["ack"]["message"] == "world loot preview canceled on exact press"
-            picked = await guest.bridge.command(native_world_loot.FIXTURE, identity, timeout=5)
+            if recover:
+                # The control request commits the normal claim without applying its fast stock inventory reply.
+                picked = await submit(guest_run, native_loot.CLAIM, target=f"{guid}@{crate}")
+                assert picked["ok"], picked
+            else:
+                picked = await guest.bridge.command(native_world_loot.FIXTURE, identity, timeout=5)
         except RuntimeError as error:
             if not str(error).startswith("world_loot_fixture_focus_unavailable:"):
                 raise
@@ -7329,7 +7334,8 @@ async def claim_stock_crate_item(host, guest, pawn, crate, roll, host_state, gue
             break
     else:
         raise AssertionError(f"Stock Interact could not focus crate loot {identity}")
-    assert picked["ack"]["message"] == "stock world loot interaction intercepted", picked["ack"]
+    if not recover:
+        assert picked["ack"]["message"] == "stock world loot interaction intercepted", picked["ack"]
     for run in (host_run, guest_run):
         await wait(run, lambda state: identity not in state["game"].get(native_world_loot.KEY, {})
                    and any(item["guid"] == guid and item.get("claimed_by") == guest_state["character_id"]
@@ -7340,8 +7346,11 @@ async def claim_stock_crate_item(host, guest, pawn, crate, roll, host_state, gue
         inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
         assert any(item["guid"] == receipt.get("inventory_guid", guid) and item["class_path"] == selected["class_path"]
                    for item in inventory), inventory
-    return {"guid": guid, "class_path": selected["class_path"], "claimed_by": receipt["claimed_by"],
-            "present_on_both_seats_before_pickup": True, "removed_from_both_seats_after_pickup": True}
+    evidence = {"guid": guid, "class_path": selected["class_path"], "claimed_by": receipt["claimed_by"],
+                "present_on_both_seats_before_pickup": True, "removed_from_both_seats_after_pickup": True}
+    if recover:
+        evidence["pickup_inventory_receipt"] = picked.get(native_inventory_grant.PICKUP)
+    return evidence
 
 
 async def verify_compact_crate_status(host: Seat, guest: Seat, pawn: str) -> dict:

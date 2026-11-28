@@ -72,6 +72,17 @@ def validate(contents: bytes, area: str, character: str) -> str:
 
 
 async def capture(host, bridge, character: str, known) -> dict:
+    recovery = ()
+    pickup_coverage = None
+    if isinstance(known, str) and "@" in known:
+        known, _, baseline = known.partition("@")
+        if not re.fullmatch(r"(?:0|[1-9][0-9]{0,15})", baseline) or int(baseline) >= 2**53:
+            raise party.RuleError("invalid_coop_view_revision")
+        recent = getattr(host, "guest_pickup_items", {}).get(character, {})
+        pending = [guid for guid, revision in recent.items() if revision > int(baseline)]
+        recovery = tuple(pending[:4])
+        if len(pending) > len(recovery):
+            pickup_coverage = recent[recovery[-1]]
     if known != "-" and (not isinstance(known, str) or not _DIGEST.fullmatch(known)):
         raise party.RuleError("invalid_coop_view_revision")
     owner = host.native_recipients().get(character)
@@ -82,7 +93,8 @@ async def capture(host, bridge, character: str, known) -> dict:
     path = None
     try:
         if game.get(runtime.GUEST_UI_MEMORY) is True and bridge.local_bridge is not None:
-            snapshot, contents = await bridge.guest_ui_command(owner["pawn"], timeout=3)
+            options = {"pickup_guids": recovery} if recovery else {}
+            snapshot, contents = await bridge.guest_ui_command(owner["pawn"], timeout=3, **options)
         else:
             nonce = uuid.uuid4().hex
             path = bridge.directory / f"native-guest-ui-{nonce}.tsv"
@@ -101,6 +113,8 @@ async def capture(host, bridge, character: str, known) -> dict:
     digest = sha256(contents).hexdigest()
     result = {"map": game["map"], "epoch": host.zone_epoch, "owner": character, "digest": digest,
               "revision": native_inventory_grant.next_view_revision(host)}
+    if pickup_coverage is not None:
+        result["pickup_coverage"] = pickup_coverage
     if digest != known:
         result["payload"] = base64.b64encode(zlib.compress(contents, level=1)).decode("ascii")
     return {"native_guest_ui": result}
@@ -122,6 +136,8 @@ class GuestView:
         self.inventory_visit = None
         self.full_revision = self.pickup_revision = 0
         self.pickup_revisions = {}
+        self.pickup_covered = self.pickup_announced = 0
+        self.next_pickup_recovery = 0.0
 
     async def close(self, *, preserve_stock=False):
         pending = (self.pending_stock_refresh or self.request_for_stock) if preserve_stock else None
@@ -167,6 +183,8 @@ class GuestView:
             self.inventory_visit = scope
             self.full_revision = self.pickup_revision = 0
             self.pickup_revisions.clear()
+            self.pickup_covered = self.pickup_announced = 0
+            self.next_pickup_recovery = 0.0
 
     async def present_pickup(self, client, scope, operation, claim, row, present):
         owner = client.invite["character_id"]
@@ -204,6 +222,9 @@ class GuestView:
             # need to include every applied pickup.
             self.pickup_revisions[guid] = revision
             self.pickup_revision = max(revision, self.pickup_revision)
+            previous_pickup = row.get("previous_pickup")
+            if type(previous_pickup) is int and 0 <= previous_pickup < revision and previous_pickup <= self.pickup_covered:
+                self.pickup_covered = max(self.pickup_covered, revision)
             self.digest = "-"
             client.control.event("native_pickup_inventory_applied", operation_id=operation, outcome=outcome,
                                  guid=guid, revision=revision, item_bytes=len(text.encode("utf-8")))
@@ -310,11 +331,24 @@ class GuestView:
                     client.control.event(event, reason=description)
                     self.last_error = description
         now = time.monotonic()
+        self._visit_revisions(scope)
+        announced = getattr(client, "gameplay", {}).get(native_inventory_grant.PICKUP_REVISION)
+        if type(announced) is int and self.pickup_announced < announced < 2**53:
+            if self.pickup_announced <= self.pickup_covered:
+                # Give the exact claim reply a short chance to update the stock backpack first.
+                self.next_pickup_recovery = now + .15
+            self.pickup_announced = announced
+        if (scope is not None and self.request is None and self.pending_stock_refresh is None
+                and self.pickup_announced > self.pickup_covered and now >= self.next_pickup_recovery):
+            self.next_pickup_recovery = now + .75
+            self.queue_stock_inventory(client)
+            client.control.event("native_pickup_inventory_recovery_requested", revision=self.pickup_announced)
         if self.request is None and now >= self.next_poll:
             self.next_poll = now + 3
             self.request_for_stock = self.pending_stock_refresh
             self.pending_stock_refresh = None
-            self.request = asyncio.create_task(client.gameplay_action(ACTION, uuid.uuid4().hex, self.digest))
+            digest = f"{self.digest}@{self.pickup_covered}"
+            self.request = asyncio.create_task(client.gameplay_action(ACTION, uuid.uuid4().hex, digest))
 
     async def _refresh_stock_screen(self, client, scope):
         if scope is not None and scope == self.stock_view(client):
@@ -326,7 +360,9 @@ class GuestView:
     async def receive(self, client, result, area, epoch, character, *, layout_sequence=None, refresh_stock=False):
         scope = self.inventory_scope(client)
         revision = result.get("revision", 0)
-        if type(revision) is not int or not 0 <= revision < 2**53:
+        pickup_coverage = result.get("pickup_coverage", revision)
+        if (type(revision) is not int or not 0 <= revision < 2**53
+                or type(pickup_coverage) is not int or not 0 <= pickup_coverage <= revision):
             raise ValueError("Invalid co-op inventory revision")
         async with self.inventory_lock:
             if scope != self.inventory_scope(client):
@@ -337,6 +373,7 @@ class GuestView:
             projected = await self._receive(client, result, area, epoch, character, layout_sequence, refresh_stock)
             if projected and scope == self.inventory_scope(client):
                 self.full_revision = revision
+                self.pickup_covered = max(self.pickup_covered, pickup_coverage)
                 self.pickup_revisions.clear()
             return projected
 
@@ -374,7 +411,8 @@ class GuestView:
         try:
             if scope != self.inventory_scope(client):
                 raise RuntimeError("The stock inventory refresh belongs to an earlier visit")
-            reply = await client.gameplay_action(ACTION, uuid.uuid4().hex, "-")
+            self._visit_revisions(scope)
+            reply = await client.gameplay_action(ACTION, uuid.uuid4().hex, f"-@{self.pickup_covered}")
             if scope != self.inventory_scope(client):
                 raise RuntimeError("The stock inventory refresh belongs to an earlier visit")
             if not await self.receive(client, reply["native_guest_ui"], area, epoch, character,

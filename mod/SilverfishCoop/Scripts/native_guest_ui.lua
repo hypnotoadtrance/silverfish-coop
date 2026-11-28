@@ -238,7 +238,7 @@ local function append_quests(canonical, rows)
     journal_view.omitted = omitted
 end
 
-local function capture(state, phase, pawn_name)
+local function capture(state, phase, pawn_name, pickups)
     local pawn, save, character = guest_save.exact_item_context(state, phase, pawn_name)
     local host = state.local_pawn and state.local_pawn.pawn
     local instance = state.world.OwningGameInstance
@@ -300,6 +300,19 @@ local function capture(state, phase, pawn_name)
     append_quests(canonical, rows)
     local contents = table.concat(rows, "\n") .. "\n"
     if #rows > max_rows or #contents > max_size then error("The co-op view exceeds its transfer bounds", 0) end
+    if pickups and type(SilverfishExportDetachedInventoryItem) == "function" then
+        local size, count = #contents, #rows
+        for guid in pickups:gmatch("[^,]+") do
+            if #guid ~= 32 or not guid:match("^[0-9A-F]+$") then error("Invalid pickup recovery GUID", 0) end
+            local ok, text = SilverfishExportDetachedInventoryItem(pawn:GetAddress(), save:GetAddress(), guid)
+            if ok and type(text) == "string" and #text <= 8192 and not text:find("[^ -~]") then
+                local line = "pickup-payload\t" .. guid .. "\t" .. text .. "\n"
+                if size + #line <= max_size and count < max_rows then
+                    contents, size, count = contents .. line, size + #line, count + 1
+                end
+            end
+        end
+    end
     return contents
 end
 
@@ -345,6 +358,7 @@ local function project(state, phase, character, path, raw, sequence)
     local completed, attachments, reputation, balance = 0, 0, nil, nil
     local reputation_bonuses
     local layout, item_positions = nil, {backpack = {}, equipment = {}}
+    local pickups = {}
     for line in raw:gmatch("([^\n]+)\n") do
         processed = processed + 1
         if processed > max_rows then error("The co-op view contains too many rows", 0) end
@@ -393,6 +407,8 @@ local function project(state, phase, character, path, raw, sequence)
                 view[name] = entry
             end
             items = items + 1
+        elseif row[1] == "pickup-payload" and #row == 3 and #pickups < 4 then
+            pickups[#pickups + 1] = {row[2], row[3]}
         elseif row[1] == "note" and #row >= 3 then
             note_count = note_count + 1
             local journal = view.JournalEntries
@@ -450,11 +466,18 @@ local function project(state, phase, character, path, raw, sequence)
         for index = 1, layout[key] do array[index] = positions[index] or {} end
         if count(array) ~= layout[key] then error("The stock co-op inventory layout failed readback", 0) end
     end
-    if type(SilverfishPreserveInventoryGrantPayloads) == "function" then
+    if type(SilverfishPreserveInventoryGrantPayloads) == "function" or #pickups > 0 then
         local path = view:GetFullName():match("^%S+ (.+)$")
         if not path then error("The staged inventory projection is unavailable", 0) end
-        local preserved, reason = SilverfishPreserveInventoryGrantPayloads(pawn:GetAddress(), old:GetAddress(), path)
-        if not preserved then error(reason, 0) end
+        if type(SilverfishPreserveInventoryGrantPayloads) == "function" then
+            local preserved, reason = SilverfishPreserveInventoryGrantPayloads(pawn:GetAddress(), old:GetAddress(), path)
+            if not preserved then error(reason, 0) end
+        end
+        for _, pickup in ipairs(pickups) do
+            local recovered, reason = SilverfishRestoreGuestViewPickupPayload(pawn:GetAddress(), old:GetAddress(),
+                path, pickup[1], pickup[2])
+            if not recovered then error(reason, 0) end
+        end
     end
     local selected = old.PlayerEquipIndex
     local projected_selection = layout.selected
@@ -624,6 +647,11 @@ end
 function guest_ui.memory_command(fields, state, phase, payload)
     local field_count = #fields
     local last = fields[field_count]
+    local pickups
+    if fields[2] == "native-guest-ui-read-memory" and field_count == 4 then
+        pickups = last:match("^pickups=([0-9A-F,]+)$")
+        if pickups and #pickups <= 131 then field_count = field_count - 1 end
+    end
     local refresh = last and last:match("^refresh=([a-f0-9]+)$")
     if refresh and #refresh == 32 and fields[2] == "native-guest-ui-project-memory" then
         field_count = field_count - 1
@@ -635,7 +663,7 @@ function guest_ui.memory_command(fields, state, phase, payload)
         error("Invalid resident co-op view request", 0)
     end
     if fields[2] == "native-guest-ui-read-memory" and payload == "" then
-        return "captured co-op guest view", capture(state, phase, fields[3])
+        return "captured co-op guest view", capture(state, phase, fields[3], pickups)
     end
     if fields[2] == "native-guest-ui-project-memory" and payload and #payload > 0 and #payload <= max_size
         and payload:sub(-1) == "\n" and not payload:find("[^\t\n -~]") then

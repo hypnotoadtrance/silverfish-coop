@@ -4308,6 +4308,7 @@ class Bridge:
 
     async def guest_ui_command(self, target: str, *, payload: bytes | None = None,
                                layout_sequence: str | None = None, refresh_epoch: str | None = None,
+                               pickup_guids: tuple[str, ...] = (),
                                timeout: float = 4) -> tuple[dict, bytes | None]:
         """Exchange one scoped stock view on the resident command ticket."""
         if self.local_bridge is None:
@@ -4324,6 +4325,10 @@ class Bridge:
         action = "native-guest-ui-read-memory" if payload is None else "native-guest-ui-project-memory"
         nonce = uuid.uuid4().hex
         fields = (nonce, action, target)
+        if pickup_guids:
+            if payload is not None or len(pickup_guids) > 4 or not all(valid_guid(guid) for guid in pickup_guids):
+                raise ValueError("Invalid resident pickup recovery")
+            fields += ("pickups=" + ",".join(pickup_guids),)
         if layout_sequence is not None:
             if payload is None or not re.fullmatch(r"[1-9][0-9]{0,15}", layout_sequence) or int(layout_sequence) >= 2**53:
                 raise ValueError("Invalid resident inventory layout sequence")

@@ -1190,10 +1190,11 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             else:
                 host.control.event("native_loot_claim_committed", revision=revision, **result["native_loot_claim"])
             native_pickup_audio.committed(host, pawn, operation_id, claimed["class_path"], credit=credit)
-            if deferred and credit is None and proof["status"] in ("claimed", "merged"):
+            if credit is None:
                 from .native_inventory_grant import with_pickup_row
 
-                return with_pickup_row(host, snapshot, result, character, area, merge.get("inventory_guid", guid))
+                row = snapshot if deferred and proof["status"] in ("claimed", "merged") else {}
+                return with_pickup_row(host, row, result, character, area, merge.get("inventory_guid", guid))
             return result
         if action == "seed":
             if not proof["lucky_looter"]:

@@ -166,10 +166,31 @@ async def verify_pickup_preview(host, guest, pawn):
         (point := frame["game"]["pawns"]["local"].get("location")) and math.dist(point, position) < 50)
     opened = await suite.submit(host_run, "native-loot-open", target=crate)
     assert opened["ok"] and opened["native_loot_roll"]["items"], opened
+    roll = opened["native_loot_roll"]
+    recover = any(row["class_path"] not in native_loot.CASH_RANGES for row in roll["items"])
     host_state, guest_state = await asyncio.gather(*(suite.wait(run, lambda frame:
         crate in frame.get("gameplay", {}).get(native_loot.STATE_KEY, {})) for run in (host_run, guest_run)))
-    pickup = await suite.claim_stock_crate_item(host, guest, pawn, crate, opened["native_loot_roll"],
-                                               host_state, guest_state, preview=True)
+    pickup = await suite.claim_stock_crate_item(host, guest, pawn, crate, roll,
+                                               host_state, guest_state, preview=True, recover=recover)
+    if recover:
+        receipt = pickup.pop("pickup_inventory_receipt")
+        assert receipt and type(receipt.get("revision")) is int, receipt
+        async with asyncio.timeout(4):
+            while True:
+                frame = await guest.bridge.command("fixture-stock-crate-transfer", "local-inventory-item",
+                                                   crate, receipt["guid"], update_status=False)
+                actual = frame["ack"]["message"]
+                if actual != "absent":
+                    assert actual == receipt["text"], frame
+                    break
+                await asyncio.sleep(.05)
+        events = await suite.resident_events(guest_run, guest_state)
+        assert not any(row["event"] == "native_pickup_inventory_applied" and row.get("guid") == receipt["guid"]
+                       for row in events)
+        pickup["backpack_recovered_without_fast_pickup_reply"] = True
+        pickup["pickup_revision_recovery_requested"] = any(
+            row["event"] == "native_pickup_inventory_recovery_requested" and row["revision"] == receipt["revision"]
+            for row in events)
     assert suite.campaign_save_hashes(host.campaign) == before
     return {**pickup, "rejected_preview_restored_same_actor": True, "checkpoint_unchanged": True}
 

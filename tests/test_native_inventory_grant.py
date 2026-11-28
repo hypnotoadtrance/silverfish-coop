@@ -13,6 +13,23 @@ PAWN = "exact enrolled pawn"
 
 
 class NativeInventoryGrantTests(unittest.IsolatedAsyncioTestCase):
+    def test_committed_pickup_advances_only_the_recipient_even_without_a_typed_row(self):
+        host = SimpleNamespace(zone_epoch=EPOCH, guest_pickup_revisions={})
+        outcome = {"claimed": GUID}
+        typed = {native_inventory_grant.PICKUP: {"guid": GUID, "text": "(Ammo=7)"}}
+        self.assertIs(native_inventory_grant.with_pickup_row(host, {}, outcome, CHARACTER, OBSERVATORY, GUID),
+                      outcome)
+        self.assertEqual(host.guest_pickup_revisions, {CHARACTER: 1})
+        native_inventory_grant.next_view_revision(host)
+        receipt = native_inventory_grant.with_pickup_row(host, typed, outcome, CHARACTER, OBSERVATORY, GUID)
+        self.assertEqual(receipt[native_inventory_grant.PICKUP]["previous_pickup"], 1)
+        self.assertEqual(receipt[native_inventory_grant.PICKUP]["revision"], 3)
+        self.assertEqual(host.guest_pickup_revisions, {CHARACTER: 3})
+        self.assertNotIn(native_inventory_grant.PICKUP, outcome)
+        self.assertIs(native_inventory_grant.with_pickup_row(host, typed, outcome, "host", OBSERVATORY, GUID),
+                      outcome)
+        self.assertEqual(host.guest_pickup_revisions, {CHARACTER: 3})
+
     async def test_host_settles_grant_once_and_rejects_conflicting_replay(self):
         frame = {"map": OBSERVATORY, "state": "hosting", "ack": {"message": "added"}}
         host = SimpleNamespace(

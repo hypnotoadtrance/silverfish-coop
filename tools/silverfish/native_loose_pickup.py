@@ -564,9 +564,9 @@ async def claim(host, bridge, character, requested, operation, *, local_input=Fa
                            escrow="memory" if proof.get("memory") else "disk",
                            bridge_reply_bytes=snapshot.get(native_loot.CLAIM_REPLY_BYTES), **row)
         native_pickup_audio.committed(host, pawn, operation, row["class_path"], credit=row.get("wallet_credit"))
-        if deferred and not is_cash:
+        if not is_cash:
             return native_inventory_grant.with_pickup_row(
-                host, snapshot, result, character, area, row.get("inventory_guid", row["guid"]))
+                host, snapshot if deferred else {}, result, character, area, row.get("inventory_guid", row["guid"]))
         return result
     finally:
         if host.native_checkpoint_unsafe:

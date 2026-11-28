@@ -407,6 +407,7 @@ class Host:
         self.gameplay_snapshots = gameplay_snapshot.HostSnapshots()
         self.guest_wallet_receipts = {}
         self.guest_inventory_grants = {}
+        self.guest_pickup_revisions = {}
         self.transitioning = False
         self.stock_photo_in_progress = False
         self.loading_zone: str | None = None
@@ -2175,6 +2176,8 @@ class Host:
         member = self.native_recipients().get(character) if self.native_guest else None
         if member and member["connected"] and current_world:
             pawn = member["pawn"]
+            if revision := self.guest_pickup_revisions.get(character):
+                gameplay[native_inventory_grant.PICKUP_REVISION] = revision
             gameplay[native_flashlight.GUEST_SUPPORT] = True
             if beams := native_flashlight.peer_frame(self, exclude=character):
                 gameplay[native_flashlight.GUEST_BEAMS] = beams
@@ -4766,6 +4769,7 @@ class Host:
                                   if row["map"] == scope[0] and row["claim_id"] is None)
         state = (door_flags, switch_flags, self.party.get(native_loot.STATE_KEY, {}),
                  game.get("native_wallet"), game.get(native_wallet.DEBT_STATUS), tuple(sorted(self.guest_wallet_receipts.items())),
+                 tuple(self.guest_pickup_revisions.items()),
                  self.world_loot.moving_ids(*scope), self.party.get(native_loose_pickup.STATE, {}),
                  game.get(native_loose_pickup.RESPAWN_HIDDEN, ()), self.gameplay_change_quest_sources, visible_drops)
         if scope == self.gameplay_change_scope and state != self.gameplay_change_state:

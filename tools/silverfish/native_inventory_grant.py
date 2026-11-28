@@ -21,6 +21,7 @@ RESULT = "native_inventory_grant"
 MAX_ITEM_BYTES = 8192
 PICKUP_TAG = "native-pickup-inventory-row"
 PICKUP = "native_pickup_inventory_row"
+PICKUP_REVISION = "native_pickup_inventory_revision"
 _STACK = re.compile(r"stack:([1-9][0-9]{0,9})")
 _TERMINAL = {
     "native_inventory_grant_refused_class",
@@ -40,11 +41,26 @@ def next_view_revision(host):
 def with_pickup_row(host, snapshot, result, character, area, guid):
     row = snapshot.get(PICKUP)
     epoch = getattr(host, "zone_epoch", None)
-    if character == "host" or not epoch or not row or row["guid"] != guid:
+    if character == "host" or not epoch:
+        return result
+    revisions = getattr(host, "guest_pickup_revisions", None)
+    if revisions is None:
+        revisions = host.guest_pickup_revisions = {}
+    previous = revisions.get(character, 0)
+    revision = revisions[character] = next_view_revision(host)
+    if not row or row["guid"] != guid:
         return result
     # Keep the item payload out of the durable replay receipt.
+    items = getattr(host, "guest_pickup_items", None)
+    if items is None:
+        items = host.guest_pickup_items = {}
+    recent = items.setdefault(character, {})
+    recent.pop(guid, None)
+    recent[guid] = revision
+    if len(recent) > 16:
+        del recent[next(iter(recent))]
     return {**result, PICKUP: {**row, "owner": character, "map": area, "epoch": epoch,
-                              "revision": next_view_revision(host)}}
+                              "revision": revision, "previous_pickup": previous}}
 
 
 def parse_ready(fields):

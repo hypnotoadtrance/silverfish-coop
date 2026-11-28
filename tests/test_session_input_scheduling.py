@@ -1625,6 +1625,7 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         host.stock_doors = native_stock_door.Interactions()
         host.world_loot = service.native_world_loot.Projection()
         host.guest_wallet_receipts = {}
+        host.guest_pickup_revisions = {}
         doors = native_stock_door.KEY
         switches = service.native_stock_switch.KEY
         host.last_game = {"state": "hosting", "map": OBSERVATORY, "sequence": 4,
@@ -1658,6 +1659,7 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         host.stock_doors = native_stock_door.Interactions()
         host.world_loot = service.native_world_loot.Projection()
         host.guest_wallet_receipts = {}
+        host.guest_pickup_revisions = {}
         host.party = {}
         loose = service.native_loose_pickup
         stock = {"state": "hosting", "map": OBSERVATORY}

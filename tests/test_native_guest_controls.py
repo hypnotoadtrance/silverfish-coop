@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, call, patch
 import uuid
 
-from tools.silverfish import native_guest_ui, party, runtime, service
+from tools.silverfish import native_guest_ui, native_inventory_grant, party, runtime, service
 
 
 class NativeGuestControlInvitationTests(unittest.IsolatedAsyncioTestCase):
@@ -429,6 +429,59 @@ class NativeGuestStockPickupViewTests(unittest.IsolatedAsyncioTestCase):
         await self.view.sync(self.client, True)
         self.client.bridge.command.assert_not_awaited()
         self.view.receive.assert_not_awaited()
+
+    async def test_pickup_snapshot_fills_a_gap_between_delivered_claim_replies(self):
+        client, view = self.client, self.view
+        scope = view.inventory_scope(client)
+        view.identity = scope[:3]
+        view.next_poll = 105.0
+        client.stock_interaction_scope = lambda: scope
+        client.gameplay = {native_inventory_grant.PICKUP_REVISION: 4}
+        present = AsyncMock(return_value={"pickup_inventory_result": "added"})
+        claim = {"guid": "A" * 32, "class_path": "/Game/Classes/Items/Item_Bandage.Item_Bandage_C",
+                 "claimed_by": str(self.character)}
+        row = dict(guid=claim["guid"], text="(Item=Bandage)", owner=str(self.character),
+                   map=self.area, epoch=self.epoch, previous_pickup=2, revision=4)
+        _, applied = await view.present_pickup(client, scope, "newer", claim, row, present)
+        self.assertTrue(applied)
+        self.assertEqual(view.pickup_revision, 4)
+        self.assertEqual(view.pickup_covered, 0)
+        clock = Mock(return_value=100.0)
+        with patch("tools.silverfish.native_guest_ui.time", SimpleNamespace(monotonic=clock)):
+            await view.sync(client, True)
+            client.gameplay_action.assert_not_awaited()
+            clock.return_value = 100.16
+            await view.sync(client, True)
+            self.release.set()
+            await view.request
+            await view.sync(client, True)
+        self.assertEqual(self.amount, 1)
+        client.control.event.assert_any_call("native_pickup_inventory_recovery_requested", revision=4)
+        view.receive.assert_awaited_once_with(client, {"capture": 1}, self.area, self.epoch, str(self.character),
+                                             refresh_stock=True)
+
+    async def test_delivered_pickup_covers_its_snapshot_notification(self):
+        client, view = self.client, self.view
+        scope = view.inventory_scope(client)
+        view.identity = scope[:3]
+        view.next_poll = 105.0
+        client.stock_interaction_scope = lambda: scope
+        client.gameplay = {native_inventory_grant.PICKUP_REVISION: 2}
+        present = AsyncMock(return_value={"pickup_inventory_result": "added"})
+        claim = {"guid": "A" * 32, "class_path": "/Game/Classes/Items/Item_Bandage.Item_Bandage_C",
+                 "claimed_by": str(self.character)}
+        row = dict(guid=claim["guid"], text="(Item=Bandage)", owner=str(self.character),
+                   map=self.area, epoch=self.epoch, previous_pickup=0, revision=2)
+        clock = Mock(return_value=100.0)
+        with patch("tools.silverfish.native_guest_ui.time", SimpleNamespace(monotonic=clock)):
+            await view.sync(client, True)
+            _, applied = await view.present_pickup(client, scope, "arrived", claim, row, present)
+            self.assertTrue(applied)
+            clock.return_value = 100.3
+            await view.sync(client, True)
+        self.assertEqual(view.pickup_covered, 2)
+        self.assertIsNone(view.request)
+        client.gameplay_action.assert_not_awaited()
 
     async def test_out_of_order_pickups_reject_old_rows_for_the_same_item_and_older_full_views(self):
         del self.view.receive

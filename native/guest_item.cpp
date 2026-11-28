@@ -3579,6 +3579,48 @@ namespace
         return 0;
     }
 
+    int restore_guest_view_pickup_payload(const Lua& lua)
+    {
+        constexpr std::string_view refused = "native_pickup_payload_recovery_unavailable";
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 5 ||
+            !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3) || !lua.is_string(4) || !lua.is_string(5))
+            return result(lua, false, refused);
+        const auto pawn = lua.get_integer(), save = lua.get_integer();
+        const std::string path{lua.get_string()}, guid{lua.get_string()}, text{lua.get_string()};
+        Context context;
+        if (!bind_local_inventory(context, pawn, save, false) || grant_scope.save.Get() != context.save ||
+            !path.starts_with("/Engine/Transient.") || path.size() > 256 || !parse_guid(guid, context.guid) ||
+            text.empty() || text.size() > max_inventory_item_text || text.front() != '(' || text.back() != ')' ||
+            !std::ranges::all_of(text, [](unsigned char c) { return 32 <= c && c <= 126; }))
+            return result(lua, false, refused);
+        auto* view = find<Unreal::UObject>(RC::to_wstring(path).c_str());
+        if (!live(view) || view == context.save || view->GetClassPrivate() != context.save->GetClassPrivate())
+            return result(lua, false, refused);
+        context.save = view;
+        Inventory inventory;
+        if (!locate(context, inventory).empty() || !inventory.item || !live(inventory.row_class(inventory.item)))
+            return result(lua, false, refused);
+        auto* payload = field<Unreal::FStructProperty>(inventory.type->GetStruct().Get(), payload_name);
+        if (!payload || payload->GetStruct().Get() != find<Unreal::UScriptStruct>(STR("/Script/StructUtils.InstancedStruct")))
+            return result(lua, false, refused);
+        using Value = std::unique_ptr<void, PropertyDeleter>;
+        Value row(inventory.type->AllocateAndInitializeValue(), {inventory.type});
+        if (!row) return result(lua, false, refused);
+        const auto source = RC::to_wstring(text);
+        const auto* tail = inventory.type->ImportText_Direct(source.c_str(), row.get(), view, Unreal::PPF_Delimited, nullptr);
+        if (tail != source.data() + source.size() || inventory.identity(row.get()) != context.guid ||
+            inventory.row_class(row.get()) != inventory.row_class(inventory.item) ||
+            inventory.ammo->GetPropertyValueInContainer(row.get()) != inventory.ammo->GetPropertyValueInContainer(inventory.item) ||
+            inventory_item_text(context, inventory, row.get()) != text)
+            return result(lua, false, refused);
+        auto* from = payload->ContainerPtrToValuePtr<void>(row.get());
+        auto* to = payload->ContainerPtrToValuePtr<void>(inventory.item);
+        payload->CopyCompleteValue(to, from);
+        if (!payload->Identical(to, from)) return result(lua, false, refused);
+        grant_scope.granted.insert(context.guid);
+        return result(lua, true, "exact pickup payload recovered");
+    }
+
     int fixture_copy_stock_weapon_payload(const Lua& lua)
     {
         constexpr std::string_view refused = "fixture_typed_weapon_payload_unavailable";
@@ -5129,6 +5171,7 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishExportDetachedInventoryItem", export_inventory_item<false>);
     lua.register_function("SilverfishImportGuestInventoryAddition", import_inventory_addition<false>);
     lua.register_function("SilverfishImportLocalInventoryPickup", import_inventory_addition<true>);
+    lua.register_function("SilverfishRestoreGuestViewPickupPayload", restore_guest_view_pickup_payload);
     lua.register_function("SilverfishArmInventoryGrants", arm_inventory_grants);
     lua.register_function("SilverfishReadInventoryGrant", read_inventory_grant);
     lua.register_function("SilverfishAcknowledgeInventoryGrant", acknowledge_inventory_grant);

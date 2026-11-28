@@ -79,6 +79,11 @@
             return valid_object(left) and valid_object(right) and left:GetAddress() == right:GetAddress()
         end
         assert(valid_object(crate) and same(crate:GetWorld(), state.world) and valid_object(api) and valid_object(class))
+        if mode == "local-inventory-item" and phase == "connected" then
+            local local_save, pawn = require("native_save_scope").bind_guest(state, phase)
+            local ok, text = SilverfishExportLocalInventoryItem(pawn:GetAddress(), local_save:GetAddress(), fields[5])
+            return ok and text or "absent"
+        end
         if mode == "state" then
             return table.concat({crate:GetFullName(), tostring(crate:HasAuthority()), tostring(crate.bReplicates),
                 tostring(crate.SpawnSalt), tostring(crate.Looted), tostring(crate.SpawnedValue)}, "|")
