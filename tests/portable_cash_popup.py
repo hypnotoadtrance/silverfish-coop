@@ -24,35 +24,64 @@ def cash_pickup_overlay(game, overlay):
         return script.replace(guard, guard[:-1] + ', os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1")')
 
     def wallet_fixture(script):
-        marker = "    local action = fields[2]\n    if action == \"wallet-guest-sync\""
+        marker = "function wallet.rows(state, phase, status_row)\n"
         assert script.count(marker) == 1
-        fixture = r"""    local action = fields[2]
-    if action == "fixture-shared-wallet-edit" and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
-        and os.getenv("SILVERFISH_COOP_HEADLESS") == "1" then
-        assert(state.map == "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P" and #fields == 4)
-        local delta = assert(integer(fields[4], -100, 100))
-        local key = FName("Player_Cash")
-        if phase == "connected" then
-            local save = assert(save_scope.bind_guest(state, phase))
-            if not guest or guest.save ~= save:GetAddress() then return "wallet not bound" end
-            local before = read_projected(save, key)
-            assert(write_projected(save, key, before + delta))
-            assert(wallet.project_guest(save, before))
-            assert(read_projected(save, key) == before + delta)
-            return ("%d %d"):format(before, before + delta)
-        end
-        local instance = game_instance(assert(host_pawn(state, phase)))
-        local before = read_cash(instance, key)
-        if fields[3] == "stock" then
-            instance:Give_PlayerCash(math.abs(delta), delta < 0)
-            assert(read_cash(instance, key) == before + delta)
-        else
-            write_cash(instance, key, before + delta)
-        end
+        fixture = r"""local fixture_bridge = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+    and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" and os.getenv("SILVERFISH_COOP_BRIDGE")
+local wallet_request = fixture_bridge and fixture_bridge .. "/portable-shared-wallet-command.tsv"
+local wallet_reply = fixture_bridge and fixture_bridge .. "/portable-shared-wallet-reply.tsv"
+local fixture_ticket, fixture_reply, next_fixture_check = nil, nil, 0
+
+local function edit_fixture_wallet(state, phase, kind, amount)
+    local delta = assert(integer(amount, -100, 100))
+    local key = FName("Player_Cash")
+    if phase == "connected" then
+        local save = assert(save_scope.bind_guest(state, phase))
+        if not guest or guest.save ~= save:GetAddress() then return "wallet not bound" end
+        local before = read_projected(save, key)
+        assert(write_projected(save, key, before + delta))
+        assert(wallet.project_guest(save, before))
+        assert(read_projected(save, key) == before + delta)
         return ("%d %d"):format(before, before + delta)
     end
+    local instance = game_instance(assert(host_pawn(state, phase)))
+    local before = read_cash(instance, key)
+    if kind == "stock" then
+        instance:Give_PlayerCash(math.abs(delta), delta < 0)
+        assert(read_cash(instance, key) == before + delta)
+    else
+        write_cash(instance, key, before + delta)
+    end
+    return ("%d %d"):format(before, before + delta)
+end
+
+local function poll_fixture_wallet(state, phase)
+    if not wallet_request or state.map ~= "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+        or (phase ~= "hosting" and phase ~= "connected") then return end
+    local now = os.clock()
+    if now < next_fixture_check then return end
+    next_fixture_check = now + .05
+    if not fixture_reply then
+        local input = io.open(wallet_request, "rb")
+        if not input then return end
+        local request = input:read(128)
+        input:close()
+        local ticket, kind, amount = (request or ""):match("^(%x+)\t([a-z]+)\t(%-?%d+)$")
+        if not token(ticket) or fixture_ticket == ticket or (kind ~= "flag" and kind ~= "stock") then return end
+        fixture_ticket = ticket
+        local ok, result = pcall(edit_fixture_wallet, state, phase, kind, amount)
+        fixture_reply = ticket .. (ok and "\tok\t" or "\terror\t") .. tostring(result):gsub("[\t\r\n]", " ") .. "|end"
+    end
+    local output = io.open(wallet_reply, "wb")
+    if not output then return end
+    local written = output:write(fixture_reply)
+    local closed = output:close()
+    -- Retain the reply on a write failure. The ticket has already consumed the edit.
+    if written and closed then fixture_reply = nil end
+end
+
 """
-        return script.replace(marker, fixture + '    if action == "wallet-guest-sync"')
+        return script.replace(marker, fixture + marker + "    poll_fixture_wallet(state, phase)\n", 1)
 
     with overlay(game, "native_authored_pickup.lua", enable), overlay(
         game, "native_authored_pickup_input_fixture.lua", allow_title_approach
@@ -60,7 +89,7 @@ def cash_pickup_overlay(game, overlay):
         yield
 
 
-async def verify_reported_wallet(host, guest, _pawn, submit, save_hashes):
+async def verify_reported_wallet(host, guest, _pawn, command, submit, save_hashes):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     checkpoint = save_hashes(host.campaign)
     start = await wait_resident_status(guest_run, lambda frame:
@@ -69,8 +98,8 @@ async def verify_reported_wallet(host, guest, _pawn, submit, save_hashes):
     initial = start["gameplay"]["shared_wallet"]
 
     async def edit(seat, kind, amount):
-        frame = await seat.bridge.command("fixture-shared-wallet-edit", kind, str(amount))
-        return frame["ack"]["message"]
+        reply = await command(seat.bridge, "portable-shared-wallet", f"{kind}\t{amount}", reply_end="|end")
+        return reply.removesuffix("|end")
 
     async with asyncio.timeout(8):
         while await edit(guest, "flag", 0) == "wallet not bound":

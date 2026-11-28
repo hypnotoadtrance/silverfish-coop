@@ -8762,7 +8762,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_placed_item, "crossroads", "stock_cash_popup",
          lambda host, guest, pawn: verify_stock_cash_popup(host, guest, pawn, portable_probe_command, campaign_save_hashes)),
         (stock_placed_item, "crossroads", "guest_reported_wallet",
-         lambda host, guest, pawn: verify_reported_wallet(host, guest, pawn, submit, campaign_save_hashes)),
+         lambda host, guest, pawn: verify_reported_wallet(
+             host, guest, pawn, portable_probe_command, submit, campaign_save_hashes)),
         (stock_crossroads_door, "crossroads", "stock_crossroads_door",
          lambda host, guest, pawn: verify_stock_crossroads_door(
              host, guest, pawn, lockpick=verify_stock_lockpicks if stock_interaction_feedback else None)),
