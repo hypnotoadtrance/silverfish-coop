@@ -42,7 +42,8 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_t
     performance = {}
     if profile:
         from live_stock_creator_smoke import verify_personal_time_shift
-        from portable_crossroads_profile import capture_rendered_frame, profile_world, verify_native_clock_dispatch
+        from portable_crossroads_profile import (capture_rendered_frame, profile_world, read_host_weather_observation,
+                                                 verify_native_clock_dispatch)
 
         observatory_clock = await verify_native_clock_dispatch(
             guest, guest_run, OBSERVATORY, initial["zone_epoch"], initial["game"]["pawns"]["local"]["name"], probe)
@@ -106,6 +107,10 @@ async def verify_weather_travel(host, guest, pawn, probe, *, profile=False, gc_t
         warning_started = time.time()
         await weather(host, "wet")
         wet = await applied(.55)
+        if profile:
+            host_wet = await read_host_weather_observation(host, probe, CROSSROADS, rain_intensity=.55)
+            if host_wet:
+                performance["crossroads_wet_host_observation"] = host_wet
         async with asyncio.timeout(5):
             while await weather(guest, "siren") == "0":
                 await asyncio.sleep(.12)

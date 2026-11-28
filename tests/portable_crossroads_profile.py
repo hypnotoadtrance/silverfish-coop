@@ -9,11 +9,12 @@ import time
 
 from portable_guest_world_start import verify_stock_clock, wait_resident_status
 from tools.silverfish import native_downed_markers, native_kill_volume, native_loot, native_package_handoff_journal
-from tools.silverfish import native_loose_pickup, native_stash, native_title_entry
+from tools.silverfish import native_loose_pickup, native_stash, native_title_entry, runtime
 from tools.silverfish.authored_loot import full_name
 from tools.silverfish.control import current_status, submit
 from tools.silverfish.runtime import MENU
-from tools.silverfish.title_handoff import _isolated_stock_title
+from tools.silverfish.title_handoff import DESCRIPTOR_FILE, TOKEN, _isolated_stock_title
+from tools.silverfish.title_session import STATUS_FILE as TITLE_SESSION_STATUS
 from tools.silverfish.travel import CROSSROADS
 
 
@@ -46,6 +47,33 @@ end
         local read = SilverfishReadNativeBridgeLifecycle
         local current = type(read) == "function" and read() or "missing"
         message = startup and (startup .. "," .. current) or "unavailable"
+    elseif action == "titleunmirror" and not capture then
+        local read = SilverfishReadNativeBridgeLifecycle
+        if not passive_title_expected then
+            message = "unavailable"
+        elseif role == "idle" and type(read) == "function" and read() == "ready" and not probe.title_status_window then
+            probe.title_status_window = {mirror = status_publication.mirror, status_file_attempts = 0}
+            status_publication.mirror = false
+            message = "armed"
+        else
+            message = "passive title observation not available"
+        end
+    elseif action == "titlemirror" and not capture then
+        local window = assert(probe.title_status_window, "no passive title observation window")
+        status_publication.mirror = window.mirror
+        probe.title_status_window = nil
+        message = tostring(window.status_file_attempts)
+    elseif (action == "hostweather" or action == "hostwet") and not capture then
+        local sample = SilverfishProfileHostWeather
+        if type(sample) == "function" then
+            local ok, result = pcall(function()
+                local state = inspect()
+                return sample(state, phase(state), action == "hostweather")
+            end)
+            message = ok and result or ("host weather parity failed: " .. tostring(result))
+        else
+            message = "unavailable"
+        end
     elseif action == "titleparity" and not capture then
         local sample = SilverfishProfileNativeTitleRows
         if type(sample) == "function" then
@@ -60,7 +88,9 @@ end
     elseif action == "gcrestore" then
 """)
     native_fast = "SilverfishMakeFastLocalBridgeCallback(fast_actions, dispatch_fast)" in source
-    code = "local native_fast_expected = " + ("true" if native_fast else "false") + "\n" + code
+    passive_title = "status_publication.command_attached = active" in source
+    code = (f"local native_fast_expected = {str(native_fast).lower()}\n"
+            f"local passive_title_expected = {str(passive_title).lower()}\n" + code)
     if native_fast:
         inspection = ("        pending.dispatched = true\n        SilverfishPublishLocalBridgeReply(pending.ticket,\n"
                       "            native_loot_actions.local_reply(fields, state, current_phase, status_row))")
@@ -108,6 +138,11 @@ end
                                               f'    status_publication.profile.keep_status_sample({sample_args})\n')
         else:
             status_code = status_code.replace(needle, call + needle)
+    status_file_write = '    local temporary = destination .. ".tmp"\n'
+    assert status_code.count(status_file_write) == 1
+    status_code = status_code.replace(status_file_write, """    local window = status_publication.profile.title_status_window
+    if window and destination == status_path then window.status_file_attempts = window.status_file_attempts + 1 end
+""" + status_file_write)
     status_code = status_code.replace(native_reply, 'published = ' + wrapper
                                       + '("status_native_reply", SilverfishPublishLocalBridgeReplyRows, '
                                         'pending.ticket, rows, periodic_due)')
@@ -572,23 +607,30 @@ return title
 """)
 
 
-async def read_native_title_parity(seat, probe, *, expected="ready"):
+async def read_native_title_parity(seat, probe, *, expected="ready", command_frame=None):
     deadline = time.monotonic() + 8
     while True:
         reply = await session_profile_request(seat, probe, "titleparity")
         if reply == "unavailable":
             return None
         if reply != "pending":
-            break
-        assert time.monotonic() < deadline, "No native title rows matched stock for the current menu"
+            if command_frame is None or reply.startswith("title parity failed"):
+                break
+            if int(reply.partition("\n")[0]) > command_frame["sequence"]:
+                break
+        assert time.monotonic() < deadline, "No newer native title rows matched stock for the current menu"
         await asyncio.sleep(.15)
     assert not reply.startswith("title parity failed"), reply
     sequence, emitted, *startup = reply.splitlines()
     sequence = int(sequence)
     report = native_title_entry.parse(emitted.split("\t"), "ready", MENU)
     assert report["state"] == expected, report
-    published = await seat.bridge.wait_for(lambda game: game["sequence"] >= sequence
-                                           and game.get(native_title_entry.KEY) == report, timeout=5)
+    if command_frame is None:
+        published = await seat.bridge.wait_for(lambda game: game["sequence"] >= sequence
+                                               and game.get(native_title_entry.KEY) == report, timeout=5)
+    else:
+        published = command_frame
+        assert published.get(native_title_entry.KEY) == report, published
     if expected == "ready":
         receipt, = startup
         captured_startup = native_title_entry.parse_startup(receipt.split("\t"), {
@@ -604,7 +646,7 @@ async def read_native_title_parity(seat, probe, *, expected="ready"):
             "worker_startup_ready": expected == "ready"}
 
 
-async def verify_title_stack_readiness(seat, probe, original):
+async def verify_title_stack_readiness(seat, probe, original, *, offer_changed=None):
     fixture = "native-title-settings-widget-fixture"
     mounted = await seat.bridge.command(fixture, "mount")
     assert mounted["ack"]["message"] == "title_settings_fixture_mounted", mounted
@@ -612,7 +654,10 @@ async def verify_title_stack_readiness(seat, probe, original):
     try:
         covered = await seat.bridge.command(fixture, "cover")
         assert covered["ack"]["message"] == "title_settings_fixture_stale_read_write_blocked_removed", covered
-        shadowed = await read_native_title_parity(seat, probe, expected="waiting")
+        if offer_changed:
+            await offer_changed("waiting_title")
+        shadowed = await read_native_title_parity(seat, probe, expected="waiting",
+                                                  command_frame=covered if offer_changed else None)
         assert shadowed and shadowed["title"] == covered[native_title_entry.KEY]
         title, baseline = shadowed["title"], original["title"]
         assert title["menu_stack"] == baseline["menu_stack"] + 1, shadowed
@@ -621,10 +666,56 @@ async def verify_title_stack_readiness(seat, probe, original):
         current = seat.bridge.snapshot() or {}
         menu_covered = current.get(native_title_entry.KEY, {}).get("reason") == "stock_menu_below_dialog"
         operation = "uncover" if covered is not None or menu_covered else "remove"
-        await seat.bridge.command(fixture, operation)
-    returned = await read_native_title_parity(seat, probe)
+        uncovered = await seat.bridge.command(fixture, operation)
+    if offer_changed:
+        await offer_changed("offered")
+    returned = await read_native_title_parity(seat, probe, command_frame=uncovered if offer_changed else None)
     assert returned and returned["title"] == original["title"] and returned["sequence"] > shadowed["sequence"], returned
     return {"covered": shadowed, "returned": returned}
+
+
+async def verify_passive_title_status(seat, probe, original):
+    directory = seat.bridge.directory
+    status_path = directory / "status.tsv"
+    descriptor = directory / DESCRIPTOR_FILE
+    generations = []
+
+    async def offer_changed(expected):
+        async with asyncio.timeout(5):
+            while True:
+                try:
+                    status = runtime.read_json(directory / TITLE_SESSION_STATUS)
+                    fields = descriptor.read_text(encoding="ascii").split("\t", 3) if descriptor.exists() else ()
+                except (FileNotFoundError, PermissionError):
+                    pass
+                else:
+                    if status.get("state") == expected:
+                        if expected == "waiting_title":
+                            if not fields:
+                                return
+                        elif len(fields) == 4 and TOKEN.fullmatch(fields[1]) and fields[1] not in generations:
+                            generations.append(fields[1])
+                            return
+                await asyncio.sleep(.1)
+
+    await offer_changed("offered")
+    armed = await session_profile_request(seat, probe, "titleunmirror")
+    if armed == "unavailable":
+        return None
+    assert armed == "armed", armed
+    try:
+        previous_file = (status_path.stat().st_mtime_ns, status_path.read_bytes()) if status_path.exists() else None
+        proof = await verify_title_stack_readiness(seat, probe, original, offer_changed=offer_changed)
+        current_file = (status_path.stat().st_mtime_ns, status_path.read_bytes()) if status_path.exists() else None
+        assert current_file == previous_file, "A periodic status file changed during passive observation"
+        assert not (directory / "status.tsv.tmp").exists()
+    finally:
+        attempted = await session_profile_request(seat, probe, "titlemirror")
+    assert attempted == "0", attempted
+    assert len(generations) == 2, generations
+    assert proof["returned"]["sequence"] > proof["covered"]["sequence"] > original["sequence"]
+    return {**proof, "pid": seat.bridge.process.pid, "withdrawn_and_new_offer": True,
+            "status_file_attempts": int(attempted), "status_file_present_before_window": previous_file is not None}
 
 
 def instrument_zone_walls(source):
@@ -1536,7 +1627,100 @@ async def read_world_scene(command, host):
     return result
 
 
+
+def instrument_host_weather(source):
+    if "SilverfishReadNativeHostWeather" not in source:
+        return source
+    declaration = "\nfunction view.observe(state, phase)\n"
+    branch = "        if report then return append_storm(report, { world = state.world, day = day }) end\n"
+    stop = "\nreturn view\n"
+    assert all(source.count(anchor) == 1 for anchor in (declaration, branch, stop))
+    source = source.replace(declaration, "\nlocal last_native_host_weather\n" + declaration)
+    source = source.replace(branch, """        if report then
+            last_native_host_weather = report
+            return append_storm(report, { world = state.world, day = day })
+        end
+""")
+    return source.replace(stop, r"""
+
+function SilverfishProfileHostWeather(state, phase, timed)
+    local read = assert(SilverfishReadNativeHostWeather, "missing native host weather reader")
+    local profile = assert(profiles[state.map], "no authored weather profile")
+    local pawn, world = state.local_pawn.pawn, state.world
+    local world_address, pawn_address = world:GetAddress(), pawn:GetAddress()
+    local actual, day = read(world_address, pawn_address, profile)
+    assert(actual and valid(day), "native reader refused the live authored host weather: " .. tostring(day))
+    local current = context(state, phase)
+    assert(same(day, current.day), "native reader returned a different authored day actor")
+    local stock = observe_lua(state, phase)
+    local names = {"map", "actor", "sun_visible"}
+    for _, key in ipairs(names) do
+        assert(stock[key] == actual[key], "native host weather differs from stock: " .. key)
+    end
+    local values = {"pitch", "yaw", "roll", "sun_x", "sun_y", "sun_z", "sun_intensity", "game_seconds",
+        "sky_r", "sky_g", "sky_b", "fog_density", "fog_falloff", "cloud_bottom_km", "cloud_height_km",
+        "cloud_density_offset", "rain_intensity", "rain_x", "rain_y", "rain_z"}
+    for _, key in ipairs(values) do
+        assert(type(stock[key]) == "number" and type(actual[key]) == "number"
+            and math.abs(stock[key] - actual[key]) <= .00001,
+            "native host weather differs from stock: " .. key .. " " .. tostring(actual[key]) .. " / " .. tostring(stock[key]))
+    end
+    local wrong_profile = {}
+    for key, value in pairs(profile) do wrong_profile[key] = value end
+    wrong_profile.day = profile.day .. "_Missing"
+    assert(read(world_address + 1, pawn_address, profile) == nil
+        and read(world_address, pawn_address + 1, profile) == nil
+        and read(world_address, pawn_address, wrong_profile) == nil, "native host weather accepted another scope")
+    local published = last_native_host_weather
+    if not published or published.map ~= state.map or published.actor ~= actual.actor
+        or math.abs(published.rain_intensity - actual.rain_intensity) > .001 then return "pending" end
+    local count, native_ms, lua_ms, native_kib, lua_kib = 0, 0, 0, 0, 0
+    if timed then
+        count = 32
+        native_ms, lua_ms, native_kib, lua_kib = SilverfishProfileCrossroadsCompare(count,
+            function() return view.observe(state, phase) end, function() return observe_lua(state, phase) end)
+    end
+    return ("%d,%d,%.9g,%.3f,%.3f,%.3f,%.3f"):format(
+        count, #names + #values, actual.rain_intensity, native_ms, lua_ms, native_kib, lua_kib)
+end
+
+return view
+""")
+
+
+async def read_host_weather_observation(host, probe, area, *, rain_intensity=None):
+    action = "hostweather" if rain_intensity is None else "hostwet"
+    deadline = time.monotonic() + 8
+    while True:
+        reply = await session_profile_request(host, probe, action)
+        if reply == "unavailable":
+            return None
+        if reply != "pending":
+            break
+        assert time.monotonic() < deadline, "No ordinary native host weather publication for this authored state"
+        await asyncio.sleep(.15)
+    assert not reply.startswith("host weather parity failed"), reply
+    count, fields, rain, native_ms, lua_ms, native_kib, lua_kib = map(float, reply.split(","))
+    assert int(fields) == 23 and int(count) == (32 if rain_intensity is None else 0), reply
+    if rain_intensity is not None:
+        assert math.isclose(rain, rain_intensity, abs_tol=.001), reply
+
+    def report(frame):
+        seen = frame.get("game", {}).get("native_world_view", {})
+        return (seen.get("map") == area and seen.get("mode") == "sample"
+                and math.isclose(seen.get("rain_intensity", -1), rain, abs_tol=.001))
+
+    await wait_resident_status(host.campaign / "run", report, timeout=8)
+    result = {"compared_fields": int(fields), "rain_intensity": rain, "matched_stock_values": True,
+              "wrong_world_pawn_and_profile_refused": True, "ordinary_native_publication": True}
+    if count:
+        result.update(passes_per_reader=int(count), native_ms=native_ms, lua_ms=lua_ms,
+                      native_heap_growth_kib=native_kib, lua_heap_growth_kib=lua_kib)
+    return result
+
+
 def instrument_weather_status(source):
+    source = instrument_host_weather(source)
     previous, boundary, status = source.partition("function view.status(state, phase)")
     anchor = "local actual = readback(current, frame, lease.saved_seconds)"
     if not boundary or status.count(anchor) != 1:
@@ -2690,6 +2874,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
     collector_modes = await read_collector_modes(host, guest, probe)
     session_census = await read_session_census(host, guest, probe, area)
     world_scene = await read_world_scene(command, host)
+    native_host_weather = await read_host_weather_observation(host, probe, area)
     if area == CROSSROADS and session_census:
         assert all(sample["prior_travel_map_refused"] for sample in session_census.values()), session_census
     scheduler = {}
@@ -3221,6 +3406,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False, host_mainte
             "native_bridge_lifecycle": bridge_lifecycle,
             "native_session_census": session_census,
             "world_scene_comparison": world_scene,
+            "native_host_weather_comparison": native_host_weather,
             "idle": idle, "guest_walking": moving,
             "guest_max_displacement_cm": displacement,
             "transport_idle": traffic(before, after_idle), "transport_guest_walking": traffic(before_movement, after_movement),

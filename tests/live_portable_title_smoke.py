@@ -599,31 +599,41 @@ def stash_memory_overlays(probes: ExitStack, game: Path, *, large: bool = False)
     return overlays
 
 
+def installed_status_guard(text):
+    template = "if {} and not status_publication.mirror and not file_command then return end"
+    for publication in ("published", "status_publication.memory_live"):
+        gate = template.format(publication)
+        if text.count(gate) == 1:
+            return gate, publication
+    raise ValueError("The replica lacks the installed status publication guard")
+
+
 def compact_crate_status_overlay(game: Path):
     """Exercise installed memory publication without disabling any portable isolation flags."""
     def patch_script(text):
-        original_gate = ("    local compact_crates = resident_title and status_publication.installed\n"
-                         "        and not status_publication.mirror and status_publication.memory_live")
-        original_mirror = "if status_publication.memory_live and not status_publication.mirror and not file_command then return end"
-        if text.count(original_gate) != 1 or text.count(original_mirror) != 1:
+        compact_gate = ("    local compact_crates = resident_title and status_publication.installed\n"
+                        "        and not status_publication.mirror and status_publication.memory_live")
+        existing_gate = "    local compact_crates = status_publication.compact()"
+        if existing_gate not in text:
+            existing_gate = compact_gate
+        if text.count(existing_gate) != 1:
             raise ValueError("The replica lacks the exact installed crate diagnostic gate")
-        # Keep the real HEADLESS environment and the full title/exit mirror.
+        status_guard, _ = installed_status_guard(text)
         override = ("    local mirror_crate_status = status_publication.mirror\n"
                     '        and current_phase ~= "hosting" and current_phase ~= "connected"')
-        text = text.replace(original_gate, override + "\n" + original_gate.replace("status_publication.mirror", "mirror_crate_status"))
-        return text.replace(original_mirror, original_mirror.replace("status_publication.mirror", "mirror_crate_status"))
+        text = text.replace(existing_gate, override + "\n" + compact_gate.replace(
+            "status_publication.mirror", "mirror_crate_status"))
+        return text.replace(status_guard, status_guard.replace("status_publication.mirror", "mirror_crate_status"))
 
     return portable_main_overlay(game, patch_script)
 
 
 def nonmirrored_startup_overlay(game: Path):
     def patch_script(text):
-        gate = "if status_publication.memory_live and not status_publication.mirror and not file_command then return end"
-        if text.count(gate) != 1:
-            raise ValueError("The replica lacks the exact installed status publication guard")
-        guard = ("if status_publication.memory_live and not file_command\n"
-                 '        and (not status_publication.mirror or current_phase == "hosting" or current_phase == "connected")'
-                 " then return end")
+        gate, publication = installed_status_guard(text)
+        guard = (f"if {publication} and not file_command\n"
+                 "        and (not status_publication.mirror or status_publication.memory_live\n"
+                 '            and (current_phase == "hosting" or current_phase == "connected")) then return end')
         return text.replace(gate, guard)
 
     return portable_main_overlay(game, patch_script)
@@ -9579,7 +9589,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             if crossroads_profile:
                 from portable_crossroads_profile import (
                     read_collector_modes, read_native_bridge_lifecycle, read_native_title_parity, read_session_title,
-                    verify_title_stack_readiness,
+                    verify_passive_title_status, verify_title_stack_readiness,
                 )
 
                 proof["initial_title_bridge_lifecycle"] = await read_native_bridge_lifecycle(
@@ -9596,8 +9606,12 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 if any(title_rows):
                     assert all(title_rows), title_rows
                     proof["initial_native_title_rows"] = dict(zip(("host", "guest"), title_rows, strict=True))
-                    proof["stock_title_under_dialog"] = await verify_title_stack_readiness(
-                        first, portable_probe_command, title_rows[0])
+                    passive_title = await verify_passive_title_status(first, portable_probe_command, title_rows[0])
+                    if passive_title:
+                        proof["initial_passive_title_status"] = passive_title
+                    else:
+                        proof["stock_title_under_dialog"] = await verify_title_stack_readiness(
+                            first, portable_probe_command, title_rows[0])
             for campaign, checks in resident_campaigns.items():
                 if proof["sessions"]:
                     # A fresh loopback port also preserves the stock first-contact trust exercise.
@@ -9634,6 +9648,12 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     assert reopened["campaign_id"] == session["campaign_id"]
                     assert reopened["revision"] > session["revision"]
                     proof["sessions"].append(dict(reopened, resident_campaign="loki_reopened"))
+            if "initial_passive_title_status" in proof:
+                latest = proof["sessions"][-1]
+                detached = await verify_passive_title_status(
+                    second, portable_probe_command, latest["returned_native_title_rows"]["guest"])
+                assert detached and detached["pid"] == latest["guest_pid"], detached
+                proof["detached_passive_title_status"] = detached
             assert len({row["campaign_id"] for row in proof["sessions"]}) == len(resident_campaigns) + int(stock_unequip)
             if manage_saves:
                 # A menu failure must not prevent independent gameplay checks on this pair.
