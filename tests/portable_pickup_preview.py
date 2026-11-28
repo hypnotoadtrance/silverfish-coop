@@ -21,9 +21,25 @@ def pickup_preview_overlay(game, overlay, *, projected_drops, track_drop_motion=
 
 
 def instrument_drop_press(source):
-    anchor = "        return pickup_fixture.press_world_loot(state, pawn, actor, actor.Box, function()"
-    assert source.count(anchor) == 1
-    return source.replace(anchor, anchor + "\n            SilverfishPickupPreviewFixturePressed()")
+    module = "local projection = {}\n"
+    press = "            local ok, status = SilverfishProbeNativeInteractInput(pawn:GetAddress(), true)"
+    taken = '            return "world-loot:" .. epoch .. ":" .. id .. ":" .. tostring(sequence)'
+    assert all(source.count(anchor) == 1 for anchor in (module, press, taken))
+    return (source.replace(module, module + "local preview_fixture\n")
+            .replace(press, """            preview_fixture = {id = id, started = os.clock(), collision = actor:GetActorEnableCollision()}
+""" + press)
+            .replace(taken, """            if preview_fixture and preview_fixture.id == id then
+                local active, seen_epoch, seen_id, name = SilverfishReadNativeGuestDropProjection(item.slot)
+                local path = active and seen_epoch == epoch and seen_id == id and name:match("^%S+ (.+)$")
+                local actor = path and StaticFindObject(path)
+                if valid(actor) and actor:GetFullName() == name then
+                    SilverfishPickupPreviewFixtureProjected(id, actor.bHidden,
+                        preview_fixture.collision and actor:GetActorEnableCollision(),
+                        (os.clock() - preview_fixture.started) * 1000)
+                end
+                preview_fixture = nil
+            end
+""" + taken))
 
 
 def instrument_drop_motion(source):
@@ -57,9 +73,9 @@ async def read_preview(guest, target):
 
 
 async def verified_drop_preview(guest, identity):
-    meshes, collision, restored, latency = await read_preview(guest, identity)
-    assert meshes > 0 and collision == 1 and restored == 0 and 0 <= latency < 100, (meshes, collision, restored, latency)
-    return {"hidden_meshes": meshes, "delay_ms": latency, "collision_preserved": True}
+    hidden, collision, restored, latency = await read_preview(guest, identity)
+    assert hidden == 1 and collision == 1 and restored == 0 and 0 <= latency < 100, (hidden, collision, restored, latency)
+    return {"actor_hidden": True, "delay_ms": latency, "collision_preserved": True}
 
 
 def instrument_preview(source):
@@ -108,7 +124,11 @@ def instrument_preview(source):
 local function preview_pressed()
     preview_probe.pressed = os.clock()
 end
-SilverfishPickupPreviewFixturePressed = preview_pressed
+SilverfishPickupPreviewFixtureProjected = function(target, hidden, collision, latency)
+    preview_probe.target, preview_probe.meshes = target, hidden and 1 or 0
+    preview_probe.collision_kept, preview_probe.rolled_back = collision, false
+    preview_probe.latency = latency
+end
 """)
     anchor = '        return stock_input_fixture.press_world_loot(state, pawn, actor, actor.Box, function()'
     insert(anchor, anchor + "\n            preview_pressed()")
