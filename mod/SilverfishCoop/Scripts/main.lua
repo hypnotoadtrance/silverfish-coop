@@ -353,14 +353,29 @@ function status_publication.find_player_pawns(world, driver, map, statics)
     return pawns
 end
 
-local function inspect()
+local function inspect(force_lua)
     local world = current_world()
-    local state = { map = "", clients = 0, server = false, pawns = {}, guests = {} }
     if not valid(world) then
         status_publication.player_pawns = nil
-        return state
+        return { map = "", clients = 0, server = false, pawns = {}, guests = {} }
     end
 
+    local read_health = not vitals.active()
+    if not force_lua and resident_title and status_publication.installed and not leaving
+        and (role == "host" or role == "client") and type(SilverfishObserveNativeSession) == "function" then
+        local observed = SilverfishObserveNativeSession(world, role, role == "host" and expected_map or "", read_health)
+        if observed then
+            if observed.connection_timeout ~= connection_timeout_seconds then
+                local driver = world.NetDriver
+                driver.ConnectionTimeout = connection_timeout_seconds
+                observed.connection_timeout = driver.ConnectionTimeout
+            end
+            status_publication.player_pawns = nil
+            return observed
+        end
+    end
+
+    local state = { map = "", clients = 0, server = false, pawns = {}, guests = {} }
     state.world = world
     state.map = map_package(world)
     local driver = world.NetDriver
@@ -382,7 +397,6 @@ local function inspect()
         status_publication.gameplay_statics = StaticFindObject(gameplay_statics_path)
     end
     local statics = status_publication.gameplay_statics
-    local read_health = not vitals.active()
     local known_pawns = role == "client" and state.server and {}
     if not observe_session_controllers(state, statics, connections, read_health, known_pawns) then
         state.controller, state.local_pawn = nil, nil
@@ -1422,6 +1436,26 @@ function status_publication.steady(state, current_phase)
         and same_object(published.world, state.world) and same_object(published.pawn, pawn)
 end
 
+function status_publication.session_row(state, current_phase)
+    return status_row("session", role, current_phase, state.map, state.clients, state.server and 1 or 0)
+end
+
+function status_publication.pawn_row(details, health)
+    return status_row("pawn", details.slot or details.kind, details.name, health or "-",
+        details.x, details.y, details.z, details.controller, details.max_health or "-")
+end
+
+function status_publication.restore_session_rows(rows, state, current_phase, local_health)
+    for index, marker in ipairs(rows) do
+        if marker == -1 then
+            rows[index] = status_publication.session_row(state, current_phase)
+        elseif type(marker) == "number" then
+            local details = state.pawns[marker]
+            rows[index] = status_publication.pawn_row(details, marker == 1 and local_health or details.health)
+        end
+    end
+end
+
 local function write_status(state, current_phase, failure, fields, pending, crate_diagnostic)
     local compact_crates = status_publication.compact()
     local pawn = state.local_pawn and state.local_pawn.pawn
@@ -1439,11 +1473,16 @@ local function write_status(state, current_phase, failure, fields, pending, crat
         acknowledged_message = "native_loot_crate_diagnostic_scope_changed"
     end
     sequence = sequence + 1
+    local census_token = not fields and not pending and not failure and not crate_diagnostic
+        and status_publication.steady(state, current_phase)
+        and resident_title and status_publication.installed and status_publication.memory_live
+        and type(SilverfishPublishLocalBridgeStatusRows) == "function" and state.native_session_token
+    local census_local_health
     local rows = {
         status_row("schema", 1),
         status_row("seq", sequence),
         status_row("ack", acknowledged_id, acknowledged_result, acknowledged_message),
-        status_row("session", role, current_phase, state.map, state.clients, state.server and 1 or 0),
+        census_token and -1 or status_publication.session_row(state, current_phase),
         status_row("native-save-scope", native_save_scope.selected() or "-"),
         status_row("native-network-timeout", state.connection_timeout or "-"),
     }
@@ -1496,7 +1535,7 @@ local function write_status(state, current_phase, failure, fields, pending, crat
         end
     end
     local viewed_save = native_save_scope.guest_vitals_save(state, current_phase)
-    for _, details in ipairs(state.pawns) do
+    for pawn_index, details in ipairs(state.pawns) do
         if finite(details.x) and finite(details.y) and finite(details.z) then
             local personal_save
             if details == state.local_pawn then
@@ -1513,8 +1552,12 @@ local function write_status(state, current_phase, failure, fields, pending, crat
                     native_save_scope.vitals_for_status(details, personal_save)
             end
             local health = details == state.local_pawn and viewed_health or details.health
-            rows[#rows + 1] = status_row("pawn", details.slot or details.kind, details.name, health or "-",
-                details.x, details.y, details.z, details.controller, details.max_health or "-")
+            if census_token then
+                rows[#rows + 1] = pawn_index
+                if pawn_index == 1 then census_local_health = health end
+            else
+                rows[#rows + 1] = status_publication.pawn_row(details, health)
+            end
             if finite(food) or finite(regen) or finite(stim) then
                 rows[#rows + 1] = status_row("native-guest-vitals", details.name, finite(food) and food or "-",
                     finite(regen) and regen or "-", finite(stim) and stim or "-",
@@ -1787,7 +1830,17 @@ local function write_status(state, current_phase, failure, fields, pending, crat
     if reply_in_native then
         status_publication.memory_live = published
     elseif join_in_native then
-        status_publication.memory_live = SilverfishPublishLocalBridgeStatusRows(rows)
+        if census_token then
+            published, frame = SilverfishPublishLocalBridgeStatusRows(rows, census_token, census_local_health,
+                status_publication.mirror)
+            if published == nil then
+                status_publication.restore_session_rows(rows, state, current_phase, census_local_health)
+                published = SilverfishPublishLocalBridgeStatusRows(rows)
+            end
+            status_publication.memory_live = published
+        else
+            status_publication.memory_live = SilverfishPublishLocalBridgeStatusRows(rows)
+        end
     else
         status_publication.memory_live = type(SilverfishPublishLocalBridgeStatus) == "function"
             and SilverfishPublishLocalBridgeStatus(frame)

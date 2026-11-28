@@ -1,5 +1,6 @@
 #include "local_bridge.hpp"
 #include "local_catalog_ticket.hpp"
+#include "session_observation.hpp"
 
 #include <algorithm>
 #include <array>
@@ -7,7 +8,6 @@
 #include <chrono>
 #include <cctype>
 #include <clocale>
-#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdint>
@@ -17,6 +17,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -28,9 +29,6 @@
 #include <LuaType/LuaUObject.hpp>
 #include <LuaType/LuaUWorld.hpp>
 #include <Unreal/AActor.hpp>
-#include <Unreal/CoreUObject/UObject/Class.hpp>
-#include <Unreal/CoreUObject/UObject/UnrealType.hpp>
-#include <Unreal/FWeakObjectPtr.hpp>
 #include <Unreal/Hooks/Hooks.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectHashTables.hpp>
@@ -258,98 +256,40 @@ namespace
         return 1;
     }
 
-    template <typename Property>
-    Property* pawn_status_field(RC::Unreal::UClass* type, const RC::Unreal::TCHAR* name)
+    bool valid_lua_object(lua_State* stack, int index, const char* metatable)
     {
-        auto* field = type ? RC::Unreal::CastField<Property>(type->GetPropertyByNameInChain(name)) : nullptr;
-        return field && field->GetArrayDim() == 1 ? field : nullptr;
+        if (!luaL_testudata(stack, index, metatable)) return false;
+        lua_getfield(stack, index, "IsValid");
+        if (!lua_iscfunction(stack, -1))
+        {
+            lua_pop(stack, 1);
+            return false;
+        }
+        lua_pushvalue(stack, index);
+        const bool live = lua_pcall(stack, 1, 1, 0) == LUA_OK && lua_toboolean(stack, -1);
+        lua_pop(stack, 1);
+        return live;
     }
+
+    namespace observation = silverfish::session_observation;
 
     int read_session_pawn(const Lua& lua)
     {
-        namespace Unreal = RC::Unreal;
         auto* stack = lua.get_lua_state();
-        if (!Unreal::IsInGameThreadRaw() || !Unreal::UnrealInitializer::ShouldUseHashTables() ||
-            lua_gettop(stack) != 3 || !lua_isboolean(stack, 3) ||
-            !luaL_testudata(stack, 1, "UWorld") || !luaL_testudata(stack, 2, "AActor")) return 0;
-        const bool read_health = lua_toboolean(stack, 3);
-        // Reuse UE4SS's own object-lifetime check before dereferencing the wrapper.
-        lua_getfield(stack, 2, "IsValid");
-        if (!lua_iscfunction(stack, -1)) return 0;
-        lua_pushvalue(stack, 2);
-        if (lua_pcall(stack, 1, 1, 0) != LUA_OK || !lua_toboolean(stack, -1)) return 0;
-        lua_pop(stack, 1);
+        if (!RC::Unreal::IsInGameThreadRaw() || lua_gettop(stack) != 3 || !lua_isboolean(stack, 3) ||
+            !luaL_testudata(stack, 1, "UWorld") || !valid_lua_object(stack, 2, "AActor")) return 0;
         auto* pawn = lua.get_userdata<RC::LuaType::AActor>(2, true).get_remote_cpp_object();
         auto* world = lua.get_userdata<RC::LuaType::UWorld>(1, true).get_remote_cpp_object();
-        if (!pawn || !world || pawn->GetWorld() != world) return 0;
-
-        struct Schema
+        observation::Pawn values{};
+        if (!observation::read_pawn(world, pawn, lua_toboolean(stack, 3), values)) return 0;
+        lua.set_number(values.x);
+        lua.set_number(values.y);
+        lua.set_number(values.z);
+        lua.set_number(values.max_health);
+        if (values.health)
         {
-            Unreal::FWeakObjectPtr pawn_class, save_class;
-            Unreal::FBoolProperty* destroyed{};
-            Unreal::FByteProperty* role{};
-            Unreal::FDoubleProperty* maximum{};
-            Unreal::FObjectProperty* save{};
-            Unreal::FDoubleProperty* health{};
-        };
-        static Schema schema;
-        const auto loaded_class = [](const Unreal::TCHAR* path) {
-            return Unreal::Cast<Unreal::UClass>(
-                Unreal::FUObjectHashTables::StaticFindObjectByPath(nullptr, path, false, true));
-        };
-        auto* pawn_class = static_cast<Unreal::UClass*>(schema.pawn_class.Get());
-        if (!pawn_class)
-        {
-            pawn_class = loaded_class(STR("/Game/Classes/Player/Player_FP.Player_FP_C"));
-            schema = {};
-            if (!pawn_class) return 0;
-            schema.pawn_class = pawn_class;
-            schema.destroyed = pawn_status_field<Unreal::FBoolProperty>(pawn_class, STR("bActorIsBeingDestroyed"));
-            schema.role = pawn_status_field<Unreal::FByteProperty>(pawn_class, STR("Role"));
-            schema.maximum = pawn_status_field<Unreal::FDoubleProperty>(pawn_class, STR("MaxHealth"));
-            schema.save = pawn_status_field<Unreal::FObjectProperty>(pawn_class, STR("Save"));
-        }
-        constexpr auto excluded = static_cast<Unreal::EObjectFlags>(Unreal::RF_ClassDefaultObject |
-            Unreal::RF_ArchetypeObject | Unreal::RF_BeginDestroyed | Unreal::RF_FinishDestroyed);
-        if (pawn->GetClassPrivate() != pawn_class || pawn->HasAnyFlags(excluded) || !schema.destroyed ||
-            schema.destroyed->GetPropertyValueInContainer(pawn) || !schema.role || !schema.maximum) return 0;
-        const auto role = schema.role->GetPropertyValueInContainer(pawn);
-        // A guest can observe a simulated pawn without a replicated Controller.
-        if (role < 1 || role > 3) return 0;
-        const auto point = pawn->K2_GetActorLocation();
-        const auto maximum = schema.maximum->GetPropertyValueInContainer(pawn);
-        if (!std::isfinite(point.X()) || !std::isfinite(point.Y()) || !std::isfinite(point.Z()) ||
-            !std::isfinite(maximum)) return 0;
-
-        Unreal::UObject* save{};
-        double health{};
-        if (read_health)
-        {
-            auto* save_class = static_cast<Unreal::UClass*>(schema.save_class.Get());
-            if (!save_class)
-            {
-                save_class = loaded_class(STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"));
-                schema.save_class = save_class;
-                schema.health = pawn_status_field<Unreal::FDoubleProperty>(save_class, STR("PlayerHealth"));
-            }
-            if (!save_class || !schema.save || schema.save->GetPropertyClass().Get() != save_class || !schema.health)
-                return 0;
-            save = schema.save->GetObjectPropertyValue(schema.save->ContainerPtrToValuePtr<void>(pawn));
-            if (save)
-            {
-                if (save->GetClassPrivate() != save_class || save->HasAnyFlags(excluded) || save->IsUnreachable()) return 0;
-                health = schema.health->GetPropertyValueInContainer(save);
-                if (!std::isfinite(health)) save = nullptr;
-            }
-        }
-        lua.set_number(point.X());
-        lua.set_number(point.Y());
-        lua.set_number(point.Z());
-        lua.set_number(maximum);
-        if (save)
-        {
-            lua.set_number(health);
-            RC::LuaType::auto_construct_object(lua, save);
+            lua.set_number(*values.health);
+            RC::LuaType::auto_construct_object(lua, values.save);
         }
         else
         {
@@ -357,6 +297,132 @@ namespace
             lua_pushnil(stack);
         }
         return 6;
+    }
+
+    // Keep only wire values for the current game-thread observation. UObject
+    // pointers belong to the synchronous census and the existing Lua adapter.
+    struct SessionPawnRow
+    {
+        int guest_slot;
+        std::string name, controller;
+        double x, y, z, maximum;
+        std::optional<double> health;
+    };
+
+    struct SessionRows
+    {
+        bool hosting;
+        int clients;
+        std::string map;
+        std::vector<SessionPawnRow> pawns;
+    };
+
+    thread_local lua_Integer session_token{};
+    thread_local std::optional<SessionRows> session_rows;
+
+    std::string pawn_slot(int guest_slot)
+    {
+        if (guest_slot == 0) return "local";
+        if (guest_slot == 1) return "guest";
+        return "guest" + std::to_string(guest_slot);
+    }
+
+    int observe_native_session(const Lua& lua)
+    {
+        if (!RC::Unreal::IsInGameThreadRaw()) return 0;
+        session_rows.reset();
+        auto* stack = lua.get_lua_state();
+        if (lua_gettop(stack) != 4 || lua_type(stack, 2) != LUA_TSTRING ||
+            lua_type(stack, 3) != LUA_TSTRING || !lua_isboolean(stack, 4) ||
+            !valid_lua_object(stack, 1, "UWorld")) return 0;
+        const auto field = [stack](int index) {
+            std::size_t size{};
+            const auto* text = lua_tolstring(stack, index, &size);
+            return std::string_view{text, size};
+        };
+        const auto seat = field(2);
+        if (seat != "host" && seat != "client") return 0;
+        const bool hosting = seat == "host";
+        auto* world = lua.get_userdata<RC::LuaType::UWorld>(1, true).get_remote_cpp_object();
+        auto observed = observation::observe(world, hosting ? observation::Seat::host : observation::Seat::guest,
+            field(3), lua_toboolean(stack, 4));
+        if (!observed) return 0;
+
+        const auto set_text = [stack](const char* key, std::string_view text) {
+            lua_pushlstring(stack, text.data(), text.size());
+            lua_setfield(stack, -2, key);
+        };
+        const auto set_flag = [stack](const char* key, bool value) {
+            lua_pushboolean(stack, value);
+            lua_setfield(stack, -2, key);
+        };
+        const auto set_integer = [stack](const char* key, lua_Integer value) {
+            lua_pushinteger(stack, value);
+            lua_setfield(stack, -2, key);
+        };
+        const auto set_number = [stack](const char* key, double value) {
+            lua_pushnumber(stack, value);
+            lua_setfield(stack, -2, key);
+        };
+        const auto set_object = [&lua, stack](const char* key, RC::Unreal::UObject* object) {
+            if (!object) return;
+            RC::LuaType::auto_construct_object(lua, object);
+            lua_setfield(stack, -2, key);
+        };
+
+        SessionRows rows{hosting, observed->clients, std::move(observed->map), {}};
+        rows.pawns.reserve(observed->pawns.size());
+        lua_createtable(stack, 0, 11);
+        const int state = lua_gettop(stack);
+        set_text("map", rows.map);
+        set_flag("listening", true);
+        set_flag("server", !hosting);
+        set_integer("clients", rows.clients);
+        set_number("connection_timeout", observed->connection_timeout);
+        lua_pushvalue(stack, 1);
+        lua_setfield(stack, state, "world");
+        set_object("controller", observed->controller);
+        lua_createtable(stack, static_cast<int>(observed->pawns.size()), 0);
+        const int pawns = lua_gettop(stack);
+        lua_createtable(stack, static_cast<int>(observed->pawns.size()) - 1, 0);
+        const int guests = lua_gettop(stack);
+        int index = 0;
+        for (auto& pawn : observed->pawns)
+        {
+            lua_createtable(stack, 0, 12);
+            set_object("pawn", pawn.actor);
+            set_text("name", pawn.name);
+            set_text("controller", pawn.controller_name);
+            if (pawn.guest_slot) set_object("controller_object", pawn.controller);
+            else
+            {
+                lua_getfield(stack, state, "controller");
+                lua_setfield(stack, -2, "controller_object");
+            }
+            set_object("save", pawn.save);
+            set_number("x", pawn.x);
+            set_number("y", pawn.y);
+            set_number("z", pawn.z);
+            set_number("max_health", pawn.max_health);
+            if (pawn.health) set_number("health", *pawn.health);
+            set_text("kind", pawn.guest_slot ? "guest" : "local");
+            lua_pushvalue(stack, -1);
+            if (pawn.guest_slot)
+            {
+                lua_rawseti(stack, guests, pawn.guest_slot);
+                set_text("slot", pawn_slot(pawn.guest_slot));
+            }
+            else lua_setfield(stack, state, "local_pawn");
+            lua_rawseti(stack, pawns, ++index);
+            rows.pawns.push_back({pawn.guest_slot, std::move(pawn.name), std::move(pawn.controller_name),
+                pawn.x, pawn.y, pawn.z, pawn.max_health, pawn.health});
+        }
+        lua_setfield(stack, state, "guests");
+        lua_setfield(stack, state, "pawns");
+        session_rows.emplace(std::move(rows));
+        if (session_token == (std::numeric_limits<lua_Integer>::max)()) session_token = 0;
+        set_integer("native_session_token", ++session_token);
+        return 1;
     }
 
     void clear()
@@ -495,6 +561,19 @@ namespace
         lua_remove(stack, -2);
     }
 
+    std::string_view number_field(double value, std::array<char, 64>& buffer)
+    {
+        auto size = std::snprintf(buffer.data(), buffer.size(), LUA_NUMBER_FMT, static_cast<LUAI_UACNUMBER>(value));
+        if (size <= 0 || static_cast<std::size_t>(size) >= buffer.size() - 2) return {};
+        // Match Lua's stock presentation for integral floats, including negative zero.
+        if (buffer[std::strspn(buffer.data(), "-0123456789")] == '\0')
+        {
+            buffer[size++] = lua_getlocaledecpoint();
+            buffer[size++] = '0';
+        }
+        return {buffer.data(), std::size_t(size)};
+    }
+
     std::string_view number_field(lua_State* stack, int index, std::array<char, 64>& buffer)
     {
         if (lua_isinteger(stack, index))
@@ -504,16 +583,18 @@ namespace
             if (size > 0 && static_cast<std::size_t>(size) < buffer.size()) return {buffer.data(), std::size_t(size)};
             return {};
         }
-        auto size = std::snprintf(buffer.data(), buffer.size(), LUA_NUMBER_FMT,
-            static_cast<LUAI_UACNUMBER>(lua_tonumber(stack, index)));
-        if (size <= 0 || static_cast<std::size_t>(size) >= buffer.size() - 2) return {};
-        // Match Lua's stock presentation for integral floats, including negative zero.
-        if (buffer[std::strspn(buffer.data(), "-0123456789")] == '\0')
+        return number_field(lua_tonumber(stack, index), buffer);
+    }
+
+    void append_status_field(std::string& row, std::string_view field)
+    {
+        const auto start = row.size();
+        row.append(field);
+        for (std::size_t index = start; index < row.size(); ++index)
         {
-            buffer[size++] = lua_getlocaledecpoint();
-            buffer[size++] = '0';
+            auto& byte = row[index];
+            if (std::iscntrl(static_cast<unsigned char>(byte))) byte = ' ';
         }
-        return {buffer.data(), std::size_t(size)};
     }
 
     template<bool reuse, bool stack_numbers = true>
@@ -550,13 +631,7 @@ namespace
                     const auto* text = lua_tolstring(stack, index, &length);
                     field = {text, length};
                 }
-                const auto start = row.size();
-                row.append(field);
-                for (std::size_t field_index = start; field_index < row.size(); ++field_index)
-                {
-                    auto& byte = row[field_index];
-                    if (std::iscntrl(static_cast<unsigned char>(byte))) byte = ' ';
-                }
+                append_status_field(row, field);
                 break;
             }
             default:
@@ -857,7 +932,7 @@ namespace
         return 0;
     }
 
-    int publish_status_frame(const Lua& lua, std::shared_ptr<const std::string> snapshot)
+    bool publish_status_snapshot(std::shared_ptr<const std::string> snapshot)
     {
         bool published{};
         {
@@ -871,7 +946,12 @@ namespace
                 if (published) ++status_revision;
             }
         }
-        lua.set_bool(published);
+        return published;
+    }
+
+    int publish_status_frame(const Lua& lua, std::shared_ptr<const std::string> snapshot)
+    {
+        lua.set_bool(publish_status_snapshot(std::move(snapshot)));
         return 1;
     }
 
@@ -883,7 +963,52 @@ namespace
             ? std::make_shared<const std::string>(frame) : nullptr);
     }
 
-    std::shared_ptr<const std::string> join_status_rows(lua_State* stack, int index)
+    bool append_session_row(std::string& frame, const SessionRows& rows, lua_Integer marker,
+        lua_State* stack, int local_health_index)
+    {
+        if (marker == -1)
+        {
+            frame.append(rows.hosting ? "session\thost\thosting\t" : "session\tclient\tconnected\t");
+            append_status_field(frame, rows.map);
+            frame.push_back('\t');
+            frame.append(std::to_string(rows.clients));
+            frame.append(rows.hosting ? "\t0" : "\t1");
+            return true;
+        }
+        if (marker < 1 || static_cast<std::uint64_t>(marker) > rows.pawns.size()) return false;
+        const auto& pawn = rows.pawns[static_cast<std::size_t>(marker - 1)];
+        frame.append("pawn\t");
+        frame.append(pawn_slot(pawn.guest_slot));
+        frame.push_back('\t');
+        append_status_field(frame, pawn.name);
+        frame.push_back('\t');
+        std::array<char, 64> buffer;
+        if (!pawn.guest_slot)
+        {
+            frame.append(lua_isnil(stack, local_health_index) ? "-" : number_field(stack, local_health_index, buffer));
+        }
+        else frame.append(pawn.health ? number_field(*pawn.health, buffer) : "-");
+        for (const double value : {pawn.x, pawn.y, pawn.z})
+        {
+            frame.push_back('\t');
+            frame.append(number_field(value, buffer));
+        }
+        frame.push_back('\t');
+        append_status_field(frame, pawn.controller);
+        frame.push_back('\t');
+        frame.append(number_field(pawn.maximum, buffer));
+        return true;
+    }
+
+    const SessionRows* scoped_session_rows(lua_State* stack)
+    {
+        if (!RC::Unreal::IsInGameThreadRaw() || !session_rows || !lua_isinteger(stack, 2) ||
+            lua_tointeger(stack, 2) != session_token ||
+            (!lua_isnil(stack, 3) && lua_type(stack, 3) != LUA_TNUMBER)) return nullptr;
+        return &*session_rows;
+    }
+
+    std::shared_ptr<const std::string> join_status_rows(lua_State* stack, int index, const SessionRows* native_rows = nullptr)
     {
         const auto count = lua_rawlen(stack, index);
         if (count > reply_limit + 1) return {};
@@ -892,6 +1017,14 @@ namespace
         for (std::size_t row_index = 1; row_index <= count; ++row_index)
         {
             lua_rawgeti(stack, index, static_cast<lua_Integer>(row_index));
+            if (native_rows && lua_isinteger(stack, -1))
+            {
+                const auto marker = lua_tointeger(stack, -1);
+                lua_pop(stack, 1);
+                if (row_index != 1) frame.push_back('\n');
+                if (!append_session_row(frame, *native_rows, marker, stack, 3) || frame.size() > reply_limit) return {};
+                continue;
+            }
             std::size_t size{};
             const auto* row = lua_type(stack, -1) == LUA_TSTRING ? lua_tolstring(stack, -1, &size) : nullptr;
             const std::size_t separator = row_index != 1;
@@ -910,8 +1043,30 @@ namespace
     int publish_status_rows(const Lua& lua)
     {
         auto* stack = lua.get_lua_state();
-        if (lua_gettop(stack) != 1 || lua_type(stack, 1) != LUA_TTABLE) return 0;
-        return publish_status_frame(lua, join_status_rows(stack, 1));
+        if (lua_type(stack, 1) != LUA_TTABLE) return 0;
+        const auto count = lua_gettop(stack);
+        if (count == 1) return publish_status_frame(lua, join_status_rows(stack, 1));
+        if (count != 4 || !lua_isboolean(stack, 4)) return 0;
+        const auto* native_rows = scoped_session_rows(stack);
+        auto frame = native_rows ? join_status_rows(stack, 1, native_rows) : nullptr;
+        if (!frame) return 0;
+        const bool published = publish_status_snapshot(frame);
+        lua.set_bool(published);
+        if (published && !lua_toboolean(stack, 4)) return 1;
+        // The diagnostic mirror and a detached worker use the same bytes.
+        lua.set_string(*frame);
+        return 2;
+    }
+
+    int format_native_session_status_rows(const Lua& lua)
+    {
+        auto* stack = lua.get_lua_state();
+        if (lua_gettop(stack) != 3 || lua_type(stack, 1) != LUA_TTABLE) return 0;
+        const auto* native_rows = scoped_session_rows(stack);
+        const auto frame = native_rows ? join_status_rows(stack, 1, native_rows) : nullptr;
+        if (!frame) return 0;
+        lua.set_string(*frame);
+        return 1;
     }
 
     int publish_reply_rows(const Lua& lua)
@@ -1467,6 +1622,7 @@ namespace silverfish::local_bridge
     {
         lua.register_function("SilverfishFindObjectByPath", find_object_by_path);
         lua.register_function("SilverfishReadNativeSessionPawn", read_session_pawn);
+        lua.register_function("SilverfishObserveNativeSession", observe_native_session);
         lua.register_function("SilverfishTakeLocalBridgeCommand", take);
         lua.register_function("SilverfishClaimLocalBridgeCommand", claim_command);
         lua.register_function("SilverfishMakeFastLocalBridgeCallback", make_fast_command_callback);
@@ -1495,6 +1651,7 @@ namespace silverfish::local_bridge
         if (timing_fixture_enabled())
         {
             lua.register_function("SilverfishReadFastLocalBridgeProfile", read_fast_profile);
+            lua.register_function("SilverfishFormatNativeSessionStatusRows", format_native_session_status_rows);
             lua.register_function("SilverfishBridgeProfileStamp", profile_stamp);
             register_early_engine_tick_profile();
             lua.register_function("SilverfishBeginEngineTickProfile", begin_engine_tick_profile);
