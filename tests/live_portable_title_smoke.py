@@ -4014,16 +4014,23 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str, hinged=None
             for run in (host_run, guest_run):
                 await wait_resident_status(run, lambda f:
                     f["game"].get(native_stock_door.KEY, {}).get(hinged, {}).get("locked") is False)
-            assert any(row["time_unix"] >= started_at and row["actor"] == hinged
-                       and row["message"] == "You picked the lock!" for row in await resident_events(guest_run, frame)
-                       if row["event"] == "native_stock_door_lockpick_feedback_played")
+            feedback_event = "native_stock_door_lockpick_feedback_played"
         else:
             for seat in (host, guest):
                 lock = await seat.bridge.command("fixture-stock-lockpick-locker", "read")
                 assert lock["ack"]["message"] == "unlocked", lock["ack"]
-            assert any(row["time_unix"] >= started_at and row["actor"] == crate
-                       and row["message"] == "You picked the lock!" for row in await resident_events(guest_run, frame)
-                       if row["event"] == "native_loot_lockpick_feedback_played")
+            feedback_event = "native_loot_lockpick_feedback_played"
+        events = [row for row in await resident_events(guest_run, frame) if row["time_unix"] >= started_at]
+        feedback_index, = [index for index, row in enumerate(events) if row["event"] == feedback_event
+                           and row["actor"] == crate and row["message"] == "You picked the lock!"]
+        sent_index, = [index for index, row in enumerate(events) if row["event"] == "guest_interaction_sent"
+                       and row.get("action") == native_loot.LOCKPICK]
+        received_index, = [index for index, row in enumerate(events) if row["event"] == "guest_interaction_received"
+                           and row.get("operation_id") == events[sent_index]["operation_id"]]
+        if hinged:
+            assert sent_index < received_index < feedback_index, (sent_index, received_index, feedback_index)
+        else:
+            assert feedback_index < sent_index < received_index, (feedback_index, sent_index, received_index)
         rows = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
         expected = [result["remaining"]] if result["remaining"] else []
         assert [row["quantity"] for row in rows if row["guid"] == guid] == expected, rows
@@ -4040,6 +4047,9 @@ async def verify_stock_lockpicks(host: Seat, guest: Seat, pawn: str, hinged=None
                     await asyncio.sleep(.12)
         proofs.append({"class_path": item["class_path"], "slot": slot, "units": units, "stack_offset": int(stack_offset),
                        "remaining": result["remaining"], "result_roundtrip_ms": receipt["milliseconds"],
+                       "popup_before_report": feedback_index < sent_index,
+                       "popup_to_report_ms": round((events[sent_index]["time_unix"] -
+                                                    events[feedback_index]["time_unix"]) * 1000, 1),
                        "press_to_ack_ms": round((time.monotonic() - started) * 1000)})
     if not hinged:
         roll = await submit(guest_run, "native-loot-open", target=crate)

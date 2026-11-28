@@ -184,3 +184,50 @@ constructed(late)
 assert(visible_sites()[site] == late:GetFullName() and world_scans == 4)
 os.time, os.clock = real_time, real_clock
 print("Stock stash snapshots and site discovery preserve ownership, pages, and world lifecycle")
+
+local stash_save = package.loaded.native_host_save
+package.loaded.native_host_save = nil
+local host_save = require("native_host_save")
+stash_save.canonical_host = host_save.canonical_host
+local classes, class_reads = {}, 0
+local original_find = StaticFindObject
+function StaticFindObject(path)
+    if classes[path] then class_reads = class_reads + 1; return classes[path] end
+    return original_find(path)
+end
+local function stock_object(value, path)
+    classes[path] = classes[path] or object()
+    value.GetClass = function() return classes[path] end
+    value.GetFullName = value.GetFullName or function() return path end
+    return value
+end
+local function authority() return true end
+local function current_world() return world end
+local controller = stock_object(object({Pawn = host, HasAuthority = authority, IsLocalController = authority,
+    GetWorld = current_world}), "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C")
+host.Controller, host.HasAuthority, host.GetWorld = controller, authority, current_world
+stock_object(host, "/Game/Classes/Player/Player_FP.Player_FP_C")
+stock_object(instance, "/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C")
+local save_path = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
+local items = {GetArrayNum = function() return 0 end}
+local restored = stock_object(object({InstanceSeed = 42, PlayerBackpack = items, PlayerEquipment = items, GameRules = {}}),
+    save_path)
+stock.InstanceSeed, stock.PlayerBackpack, stock.PlayerEquipment, stock.GameRules = 42, items, items, {}
+stock_object(stock, save_path)
+world.GetFullName = function() return "World " .. map .. ".Observitory_P" end
+world.OwningGameInstance = instance
+state.local_pawn, state.controller = {pawn = host}, controller
+statics.GetGameInstance = function() return world.OwningGameInstance end
+statics.DoesSaveGameExist = function() return false end
+statics.SaveGameToSlot = function() return true end
+statics.LoadGameFromSlot = function() return restored end
+host_save.capture(state, "hosting", "SFCoop_" .. token)
+local _, observed = stash.rows(state, "hosting", row)
+local function status_row(...) return table.concat({...}, "\t") end
+local function save_row(context) return host_save.rows(state, "hosting", status_row, context)[1] end
+local full, before = save_row(), class_reads
+assert(save_row(observed) == full and class_reads == before)
+instance.SaveSlot_Ref, host.Save = restored, restored
+local changed = save_row(observed)
+assert(class_reads > before and changed ~= full and changed:find("\tchanged\t") and changed == save_row())
+print("Host status reuses qualified stash ownership and rechecks a replaced canonical save")

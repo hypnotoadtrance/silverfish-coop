@@ -84,7 +84,7 @@ NATIVE_RUNTIME_RETIRING = "native_runtime_retiring"
 NATIVE_RUNTIME_RETIREMENT_WAIT = 130.0
 NOTHING_VOLUME = f"KillVolume_BP_C {NOTHING}.Nothing_P:PersistentLevel.KillVolume_BP_C_0"
 _TIMED_INTERACTIONS = (frozenset({"native-loot-inspect", "native-loot-open", "native-loot-claim", native_crate_outcome.REPORT,
-                                  native_authored_pickup.ACTION, native_loose_pickup.CLAIM})
+                                  native_authored_pickup.ACTION, native_loose_pickup.CLAIM, native_loot.LOCKPICK})
                        if os.environ.get("SILVERFISH_COOP_TITLE_FIXTURES") == "1" else frozenset())
 _NATIVE_REQUESTS_PER_PASS = 3
 _REQUEST_HANDLER_ERRORS = (AttributeError, LookupError, TypeError)
@@ -6384,10 +6384,17 @@ class Client:
             target = "@".join((epoch, *(row[key] for key in ("crate", "guid", "unlocked", "quantity", "spent"))))
             crate = row["crate"]
             hinged = native_loot.lockpick_door(crate, area)
-            if row["unlocked"] == "1" and not hinged:
+            unlocked = row["unlocked"] == "1"
+            if unlocked and not hinged:
                 self.pending_lockpick_unlocks.add(crate)
-            started = time.monotonic()
             try:
+                # The stock container attempt already finished on this seat.
+                # Hinged doors apply their unlock through the host's result.
+                if not hinged:
+                    await self.show_lockpick_feedback(crate, unlocked, hinged=False)
+                    if self.stock_interaction_scope() != scope:
+                        return
+                started = time.monotonic()
                 result = await self.gameplay_action(native_loot.LOCKPICK, operation, target)
                 elapsed = round(1000 * (time.monotonic() - started))
                 proof = result.get(native_loot.LOCKPICK_RESULT, {})
@@ -6398,21 +6405,24 @@ class Client:
                         await self.cancel_gameplay_snapshot()
                         if self.stock_interaction_scope() == scope:
                             self.gameplay.setdefault(native_loot.VEHICLE_LOCKS, {})[crate] = False
-                    if self.stock_interaction_scope() == scope:
-                        feedback = "picked" if row["unlocked"] == "1" else "broken"
-                        command = "native-stock-door-lockpick-feedback" if hinged else "native-loot-lockpick-feedback"
-                        event = "native_stock_door_lockpick_feedback" if hinged else "native_loot_lockpick_feedback"
-                        try:
-                            view = await self.bridge.command(command, crate, feedback, timeout=1, update_status=False)
-                        except (OSError, RuntimeError, TimeoutError) as error:
-                            self.control.event(event + "_unavailable", actor=crate, reason=str(error))
-                        else:
-                            self.control.event(event + "_played", actor=crate, message=view["ack"]["message"])
+                    if hinged and self.stock_interaction_scope() == scope:
+                        await self.show_lockpick_feedback(crate, unlocked, hinged=True)
                 self.control.event("native_guest_lockpick", sequence=sequence, milliseconds=elapsed, **result)
             except (ValueError, OSError, RuntimeError) as error:
                 self.control.event("native_guest_lockpick_rejected", sequence=sequence, reason=str(error))
             finally:
                 self.pending_lockpick_unlocks.discard(crate)
+
+    async def show_lockpick_feedback(self, crate: str, unlocked: bool, *, hinged: bool) -> None:
+        action = "native-stock-door-lockpick-feedback" if hinged else "native-loot-lockpick-feedback"
+        event = action.replace("-", "_")
+        try:
+            view = await self.bridge.command(action, crate, "picked" if unlocked else "broken",
+                                             timeout=1, update_status=False)
+        except (OSError, RuntimeError) as error:
+            self.control.event(event + "_unavailable", actor=crate, reason=str(error))
+        else:
+            self.control.event(event + "_played", actor=crate, message=view["ack"]["message"])
 
     async def service_broker_input(self, active: bool) -> None:
         if not self.invite.get("native_broker_input"):

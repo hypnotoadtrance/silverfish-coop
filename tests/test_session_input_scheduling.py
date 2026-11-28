@@ -12,7 +12,8 @@ from tools.silverfish import (
     native_player_avatar, native_stock_door, native_world_loot,
     runtime, service,
 )
-from tools.silverfish.travel import OBSERVATORY, PLAYTEST_MAPS
+from tools.silverfish.authored_loot import full_name
+from tools.silverfish.travel import CROSSROADS, OBSERVATORY, PLAYTEST_MAPS
 
 
 class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
@@ -22,6 +23,56 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         client = service.Client(control, transport, {"character_id": "guest"}, Mock())
         self.addAsyncCleanup(client.cancel_gameplay_snapshot)
         return client
+
+    async def test_container_lockpick_feedback_uses_the_local_stock_result_once(self):
+        for hinged, unlocked, error in ((False, True, None), (False, False, None),
+                                        (False, True, ValueError("interaction_refused")),
+                                        (False, False, TimeoutError()), (True, True, None)):
+            with self.subTest(hinged=hinged, unlocked=unlocked, error=type(error).__name__):
+                client = self.guest(AsyncMock())
+                area = CROSSROADS if hinged else OBSERVATORY
+                crate = full_name(area, "Door_Wood_04_BP_C_1719" if hinged else "LootLocker_Small_BP_C_0")
+                epoch, pawn, guid = "a" * 32, "Player_FP_C guest", "B" * 32
+                scope = ("c" * 32, epoch, area, pawn)
+                client.stock_interaction_scope = Mock(return_value=scope)
+                client.bridge.input_namespace = uuid.NAMESPACE_OID
+                client.bridge.command = AsyncMock(return_value={"ack": {"message": "stock alert"}})
+                report_started, release = asyncio.Event(), asyncio.Event()
+
+                async def settle(*_args):
+                    report_started.set()
+                    await release.wait()
+                    if error is not None:
+                        raise error
+                    return {native_loot.LOCKPICK_RESULT: {"map": area, "crate": crate, "guid": guid,
+                                                          "locked": not unlocked, "remaining": 1}}
+
+                client.gameplay_action = AsyncMock(side_effect=settle)
+                fields = ("loot-lockpick", area, crate, pawn, "1", guid, str(int(unlocked)), "2", "1")
+                client.last_game = {native_loot.LOCKPICK_INPUTS: [native_loot.parse_lockpick(fields)]}
+                inputs = [("\t".join(fields) + "\n").encode("ascii")]
+                command = "native-stock-door-lockpick-feedback" if hinged else "native-loot-lockpick-feedback"
+                feedback = "picked" if unlocked else "broken"
+                task = asyncio.create_task(client.service_lockpick_results(scope, inputs))
+                try:
+                    await asyncio.wait_for(report_started.wait(), .5)
+                    if hinged:
+                        client.bridge.command.assert_not_awaited()
+                    else:
+                        client.bridge.command.assert_awaited_once_with(
+                            command, crate, feedback, timeout=1, update_status=False)
+                    self.assertEqual(client.pending_lockpick_unlocks, {crate} if unlocked and not hinged else set())
+                finally:
+                    release.set()
+                    await asyncio.wait_for(task, .5)
+
+                await client.service_lockpick_results(scope, inputs)
+                client.bridge.command.assert_awaited_once_with(command, crate, feedback, timeout=1, update_status=False)
+                client.gameplay_action.assert_awaited_once_with(native_loot.LOCKPICK, ANY, "@".join(
+                    (epoch, crate, guid, str(int(unlocked)), "2", "1")))
+                expected = {crate: False} if unlocked and not hinged and error is None else None
+                self.assertEqual(client.gameplay.get(native_loot.VEHICLE_LOCKS), expected)
+                self.assertFalse(client.pending_lockpick_unlocks)
 
     async def test_reload_input_is_collected_while_a_shot_waits(self):
         for visit_changed in (False, True):

@@ -857,6 +857,17 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
         return {"rows_per_path": int(calls), "native_ms": float(native_ms), "lua_ms": float(lua_ms),
                 "native_cycles": int(native_cycles), "lua_cycles": int(lua_cycles), "all_rows_matched": True}
 
+    async def compare_status_reuse(seat):
+        reply = await command(seat, "rowreuse")
+        if reply == "unavailable":
+            return None
+        assert not reply.startswith("status row reuse comparison failed"), reply
+        rows, passes, cached_ms, uncached_ms, cached_kib, uncached_kib = map(float, reply.split(","))
+        assert rows > 0 and passes > 0 and cached_kib < uncached_kib, reply
+        return {"sample_rows": int(rows), "passes_per_formatter": int(passes), "all_rows_matched": True,
+                "cached_ms": cached_ms, "uncached_ms": uncached_ms,
+                "cached_heap_growth_kib": cached_kib, "uncached_heap_growth_kib": uncached_kib}
+
     async def compare_switch_reads(seat):
         reply = await command(seat, "switchreader")
         if reply == "unavailable":
@@ -939,6 +950,18 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
         assert all(sample["seconds"] >= 5 for sample in samples), samples
         coarse = {"coarse_guest_walking": dict(zip(seats, samples, strict=True)),
                   "coarse_guest_displacement_cm": coarse_displacement}
+        status_reuse = await asyncio.gather(*(command(seat, "rowcacheoff") for seat in seats.values()))
+        if status_reuse != ["unavailable", "unavailable"]:
+            assert status_reuse == ["rowcacheoff", "rowcacheoff"], status_reuse
+            try:
+                await arm("coarse")
+                uncached_displacement = await walk(2)
+                uncached_status = await asyncio.gather(*(read(seat) for seat in seats.values()))
+            finally:
+                restored = await asyncio.gather(*(command(seat, "rowcacheon") for seat in seats.values()))
+                assert restored == ["rowcacheon", "rowcacheon"], restored
+            coarse["uncached_status_walking"] = dict(zip(seats, uncached_status, strict=True))
+            coarse["uncached_status_displacement_cm"] = uncached_displacement
         baseline_world = await asyncio.gather(*(command(seat, "coarseraw") for seat in seats.values()))
         if baseline_world != ["unavailable", "unavailable"]:
             assert baseline_world == ["armed", "armed"], baseline_world
@@ -1048,6 +1071,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
                         "native_ms": native_ms, "lua_ms": lua_ms, "native_heap_growth_kib": native_kib,
                         "lua_heap_growth_kib": lua_kib, "all_observations_matched": True}}
     rows = await asyncio.gather(*(compare_rows(seat) for seat in seats.values()))
+    reused_rows = await asyncio.gather(*(compare_status_reuse(seat) for seat in seats.values()))
     switches = await asyncio.gather(*(compare_switch_reads(seat) for seat in seats.values()))
     lean = await asyncio.gather(*(compare_lean_reader(seat, probe) for seat in seats.values()))
     journal = {}
@@ -1099,6 +1123,7 @@ async def profile_world(host, guest, area, probe, *, gc_trial=False):
             "transport_idle": traffic(before, after_idle), "transport_guest_walking": traffic(before_movement, after_movement),
             "pawn_replication_rates": pawn_rates,
             "row_format_comparison": dict(zip(seats, rows, strict=True)),
+            "status_row_reuse_comparison": dict(zip(seats, reused_rows, strict=True)),
             "switch_reader_comparison": dict(zip(seats, switches, strict=True)),
             "lean_reader_comparison": dict(zip(seats, lean, strict=True)),
             "zone_walls": {seat: frame["game"]["native_zone_wall"]

@@ -8,6 +8,9 @@ local gc_window_us = 12000000
 local gc_pause, gc_step_multiplier = 120, 160
 local stock_receipts = {}
 local long_interval_limit = 5
+local cached_format = SilverfishFormatLocalStatusRow
+local uncached_format = SilverfishFormatLocalStatusRowUncached
+local last_status_sample
 
 local function record(active, tag, wall_ms, cycles)
     local rows = active.rows[tag]
@@ -85,7 +88,7 @@ end
 local function count_status_bytes(active)
     local rows = active.status_sample
     if not rows then return end
-    active.status_sample = nil
+    last_status_sample, active.status_sample = rows, nil
     local sizes = {}
     for _, row in ipairs(rows) do
         for line in row:gmatch("[^\n]+") do
@@ -383,6 +386,41 @@ local function compare_rows()
         lua_first + lua_second, native_first_cycles + native_second_cycles, lua_first_cycles + lua_second_cycles)
 end
 
+local function compare_status_reuse()
+    if type(uncached_format) ~= "function" then return "unavailable" end
+    local samples = {}
+    for _, row in ipairs(assert(last_status_sample)) do
+        if #row > 0 then
+            local fields = {}
+            for field in (row .. "\t"):gmatch("([^\t]*)\t") do fields[#fields + 1] = field end
+            assert(cached_format(table.unpack(fields)) == uncached_format(table.unpack(fields)))
+            samples[#samples + 1] = fields
+        end
+    end
+    local rounds = 32
+    local function measure(format)
+        local heap, start = collectgarbage("count"), stamp()
+        for _ = 1, rounds do
+            for _, fields in ipairs(samples) do format(table.unpack(fields)) end
+        end
+        return (stamp() - start) / 1000, collectgarbage("count") - heap
+    end
+    local running = collectgarbage("isrunning")
+    collectgarbage("stop")
+    local ok, result = pcall(function()
+        local cached_first, cached_heap_first = measure(cached_format)
+        local uncached_first, uncached_heap_first = measure(uncached_format)
+        local uncached_second, uncached_heap_second = measure(uncached_format)
+        local cached_second, cached_heap_second = measure(cached_format)
+        return ("%d,%d,%.3f,%.3f,%.3f,%.3f"):format(#samples, rounds * 2,
+            cached_first + cached_second, uncached_first + uncached_second,
+            cached_heap_first + cached_heap_second, uncached_heap_first + uncached_heap_second)
+    end)
+    if running then collectgarbage("restart") end
+    if not ok then error(result, 0) end
+    return result
+end
+
 local function retain_long_interval(active, elapsed, cycles, heap_delta)
     local entries = active.long_intervals
     local index = #entries + 1
@@ -554,6 +592,16 @@ LoopInGameThreadWithDelay(50, function()
     elseif action == "rows" and not capture then
         local ok, value = pcall(compare_rows)
         if ok then message = value else message = "status rows comparison failed: " .. tostring(value) end
+    elseif action == "rowreuse" and not capture then
+        local ok, value = pcall(compare_status_reuse)
+        if ok then message = value else message = "status row reuse comparison failed: " .. tostring(value) end
+    elseif (action == "rowcacheoff" or action == "rowcacheon") and not capture then
+        if type(uncached_format) == "function" then
+            SilverfishFormatLocalStatusRow = action == "rowcacheoff" and uncached_format or cached_format
+            message = action
+        else
+            message = "unavailable"
+        end
     elseif action == "lean" and not capture then
         local ok, value = pcall(SilverfishProfileLocalLean)
         if ok then message = value else message = "lean reader comparison failed: " .. tostring(value) end

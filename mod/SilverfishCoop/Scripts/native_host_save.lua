@@ -198,7 +198,27 @@ function host_save.restored_save(state, phase, expected_pawn)
     end
 end
 
-function host_save.rows(state, phase, status_row)
+local function status_host(state, phase, observed)
+    if observed and observed.state == state and observed.world == state.world and observed.map == state.map
+        and observed.controller == state.controller and phase == "hosting" and state.listening and not state.server then
+        local world, controller = state.world, state.controller
+        local instance, pawn, save = observed.instance, observed.pawn, observed.save
+        -- Reuse the exact class and map checks from this status build. Stock callbacks
+        -- can change live bindings while other rows are being collected.
+        if valid(world) and valid(controller) and valid(pawn) and valid(instance)
+            and controller:IsLocalController() and controller:HasAuthority() and pawn:HasAuthority()
+            and same(controller:GetWorld(), world) and same(pawn:GetWorld(), world)
+            and same(state.local_pawn and state.local_pawn.pawn, pawn)
+            and same(controller.Pawn, pawn) and same(pawn.Controller, controller)
+            and same(world.OwningGameInstance, instance)
+            and same(instance.SaveSlot_Ref, save) and same(pawn.Save, save) then
+            return instance, pawn
+        end
+    end
+    return host_save.canonical_host(state, phase)
+end
+
+function host_save.rows(state, phase, status_row, observed_host)
     if not receipt then return {} end
     local kind, pawn_name = receipt.kind, receipt.pawn or ""
     if kind == "prepared" then
@@ -208,7 +228,7 @@ function host_save.rows(state, phase, status_row)
                 kind = "changed"
             end
         elseif phase == "hosting" then
-            local instance, pawn = host_save.canonical_host(state, phase)
+            local instance, pawn = status_host(state, phase, observed_host)
             instance = instance or owner(state)
             receipt.arrival_seen = receipt.arrival_seen or os.time()
             if instance and not prepared_owner_matches(instance) then
@@ -224,7 +244,7 @@ function host_save.rows(state, phase, status_row)
     elseif phase ~= "hosting" or state.map ~= receipt.map then
         return {}
     else
-        local instance, pawn = host_save.canonical_host(state, phase)
+        local instance, pawn = status_host(state, phase, observed_host)
         if not instance or receipt.instance ~= instance:GetAddress() or receipt.save ~= instance.SaveSlot_Ref:GetAddress()
             or receipt.pawn ~= pawn:GetFullName() then
             kind = "changed"

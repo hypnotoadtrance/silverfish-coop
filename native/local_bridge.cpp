@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -190,6 +191,40 @@ namespace
         return 1;
     }
 
+    constexpr lua_Integer status_row_slots = 1024;
+    constexpr std::size_t status_row_reuse_limit = 512;
+    char status_row_cache_key;
+
+    void push_status_row(lua_State* stack, std::string_view row)
+    {
+        // Lua already interns strings up to 40 bytes. Keep longer recurring rows per
+        // Lua VM with a bounded array, and compare all bytes before reusing a match.
+        if (row.size() <= 40 || row.size() > status_row_reuse_limit)
+        {
+            lua_pushlstring(stack, row.data(), row.size());
+            return;
+        }
+        if (lua_rawgetp(stack, LUA_REGISTRYINDEX, &status_row_cache_key) != LUA_TTABLE)
+        {
+            lua_pop(stack, 1);
+            lua_createtable(stack, status_row_slots, 0);
+            lua_pushvalue(stack, -1);
+            lua_rawsetp(stack, LUA_REGISTRYINDEX, &status_row_cache_key);
+        }
+        const auto slot = 1 + static_cast<lua_Integer>(std::hash<std::string_view>{}(row) % status_row_slots);
+        std::size_t size{};
+        const auto* existing = lua_rawgeti(stack, -1, slot) == LUA_TSTRING ? lua_tolstring(stack, -1, &size) : nullptr;
+        if (!existing || std::string_view{existing, size} != row)
+        {
+            lua_pop(stack, 1);
+            lua_pushlstring(stack, row.data(), row.size());
+            lua_pushvalue(stack, -1);
+            lua_rawseti(stack, -3, slot);
+        }
+        lua_remove(stack, -2);
+    }
+
+    template<bool reuse>
     int format_status_row(const Lua& lua)
     {
         auto* stack = lua.get_lua_state();
@@ -222,7 +257,10 @@ namespace
                 return 0;
             }
         }
-        lua.set_string(row);
+        if constexpr (reuse)
+            push_status_row(stack, row);
+        else
+            lua.set_string(row);
         return 1;
     }
 
@@ -874,7 +912,7 @@ namespace silverfish::local_bridge
         lua.register_function("SilverfishTakeLocalBridgeCommand", take);
         lua.register_function("SilverfishClaimLocalBridgeCommand", claim_command);
         lua.register_function("SilverfishLocalBridgeStashBodyLimit", stash_body_limit);
-        lua.register_function("SilverfishFormatLocalStatusRow", format_status_row);
+        lua.register_function("SilverfishFormatLocalStatusRow", format_status_row<true>);
         lua.register_function("SilverfishPublishLocalBridgeReply", publish);
         lua.register_function("SilverfishPublishLocalBridgeStatus", publish_status);
         lua.register_function("SilverfishPublishLocalBridgeStatusRows", publish_status_rows);
@@ -894,7 +932,11 @@ namespace silverfish::local_bridge
         lua.register_function("SilverfishReadLocalNativeZoneHeartbeat", read_zone_heartbeat);
         lua.register_function("SilverfishReadLocalNativeZoneRoster", read_zone_roster);
         lua.register_function("SilverfishReadLocalGuestInteractionLease", read_guest_interaction_lease);
-        if (timing_fixture_enabled()) lua.register_function("SilverfishBridgeProfileStamp", profile_stamp);
+        if (timing_fixture_enabled())
+        {
+            lua.register_function("SilverfishBridgeProfileStamp", profile_stamp);
+            lua.register_function("SilverfishFormatLocalStatusRowUncached", format_status_row<false>);
+        }
     }
 
     void stop()

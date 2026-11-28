@@ -14,6 +14,33 @@ int main()
     using namespace std::chrono_literals;
     auto& lua = RC::LuaMadeSimple::new_state();
     auto* stack = lua.get_lua_state();
+    const std::string repeated = "native-loot" + std::string(96, 'x');
+    push_status_row(stack, repeated);
+    push_status_row(stack, repeated);
+    assert(lua_gettop(stack) == 2 && lua_tostring(stack, 1) == lua_tostring(stack, 2));
+
+    const auto bucket = std::hash<std::string_view>{}(repeated) % status_row_slots;
+    std::string collision;
+    for (int i = 0; i < status_row_slots * 32; ++i)
+    {
+        auto row = "native-door" + std::string(96, 'x') + std::to_string(i);
+        if (std::hash<std::string_view>{}(row) % status_row_slots == bucket)
+        {
+            collision = std::move(row);
+            break;
+        }
+    }
+    assert(!collision.empty());
+    push_status_row(stack, collision);
+    push_status_row(stack, repeated);
+    assert(lua_gettop(stack) == 4 && std::string_view(lua_tostring(stack, 1)) == repeated);
+    assert(std::string_view(lua_tostring(stack, 3)) == collision && std::string_view(lua_tostring(stack, 4)) == repeated);
+    const std::string oversized_row(status_row_reuse_limit + 1, 'y');
+    push_status_row(stack, oversized_row);
+    push_status_row(stack, oversized_row);
+    assert(lua_gettop(stack) == 6 && lua_tostring(stack, 5) != lua_tostring(stack, 6));
+    lua_settop(stack, 0);
+
     assert(take(lua) == 1 && !lua_toboolean(stack, 1));
     lua_settop(stack, 0);
     assert(SilverfishBridgeOpenV1() == 1 && SilverfishBridgeEnableStatusV1() == 1);

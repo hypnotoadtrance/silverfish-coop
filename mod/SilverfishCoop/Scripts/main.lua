@@ -1548,7 +1548,8 @@ local function write_status(state, current_phase, failure, fields, pending, crat
         if vitals_ok and vitals_row then rows[#rows + 1] = vitals_row end
         for _, row in ipairs(wallet.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_inventory.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
-        for _, row in ipairs(native_stash.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        local stash_rows, observed_host = native_stash.rows(state, current_phase, status_row)
+        for _, row in ipairs(stash_rows) do rows[#rows + 1] = row end
         for _, row in ipairs(native_stash_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_inventory_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_bag_projection.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1685,7 +1686,9 @@ local function write_status(state, current_phase, failure, fields, pending, crat
             rows[#rows + 1] = status_row("native-broker-position", proof.map, proof.pawn, proof.target, proof.point,
                 proof.x, proof.y, proof.z)
         end
-        for _, row in ipairs(native_host_save.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_host_save.rows(state, current_phase, status_row, observed_host)) do
+            rows[#rows + 1] = row
+        end
         if last_world_flush and last_world_flush.map == state.map then
             local proof = last_world_flush
             rows[#rows + 1] = status_row("native-world-flush", proof.map, proof.state, proof.antfarm, proof.explosives,

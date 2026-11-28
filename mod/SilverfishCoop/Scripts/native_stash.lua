@@ -136,7 +136,7 @@ local function selected_sites(state, phase)
             prefix = state.map .. "." .. leaf .. ":PersistentLevel."}
         watch_site_construction()
     end
-    return current_sites(site_cache), pawn, combined
+    return current_sites(site_cache), pawn, combined, instance, save
 end
 
 local function close_to(pawn, actor)
@@ -368,7 +368,7 @@ function stash.command(fields, state, phase)
 end
 
 function stash.rows(state, phase, row)
-    local available, _, combined = selected_sites(state, phase)
+    local available, pawn, combined, instance, save = selected_sites(state, phase)
     if not available then return {} end
     local rows = {row("native-stash-setting", state.map, combined and 1 or 0)}
     if type(SilverfishReadLiveNativeStashCensus) == "function" then
@@ -409,7 +409,8 @@ function stash.rows(state, phase, row)
         end
         rows[#rows + 1] = row("native-stash-move", table.unpack(fields))
     end
-    return rows
+    return rows, {state = state, world = state.world, map = state.map, controller = state.controller,
+        instance = instance, pawn = pawn, save = save}
 end
 
 function stash.reset()
