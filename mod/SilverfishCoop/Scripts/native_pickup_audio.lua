@@ -7,6 +7,8 @@ local attenuation_path = "/Game/Assets/Sounds/SoundClasses/SmallSound_Attenuatio
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local zero_rotation = { Pitch = 0, Yaw = 0, Roll = 0 }
 local world, visit, seen, history
+local cash_classes = {}
+for _, entry in ipairs(require("authored_cash_catalog")) do cash_classes[entry.class] = true end
 
 local function valid(object)
     return object and object:IsValid()
@@ -38,6 +40,14 @@ local function cue_at(path, pawn, point, loaded_only)
     if not valid(attenuation) or not valid(statics) then return false end
     statics:PlaySoundAtLocation(pawn, sound, point, zero_rotation, 1, 1, 0, attenuation, nil, pawn, nil)
     return true
+end
+
+function audio.preview_item(class, pawn, x, y, z)
+    -- The caller has the native pickup preview lease. Cash uses the shared receipt.
+    if not cash_classes[class] then
+        return cue_at(class, pawn, {X = x, Y = y, Z = z}, true)
+    end
+    return false
 end
 
 function audio.command(fields, state, phase, loaded_only)

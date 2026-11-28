@@ -7492,7 +7492,8 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
             timings["projection_to_first_world_item_ms"] = round((min(first_views.values()) - started) / 1000, 2)
         timings["projection_timing"] = await crate_projection_timing(guest, guest_state, crate, roll["id"],
                                                                      received["sequence"], pressed_us, first_views)
-        timings["stock_crate_pickup"] = await claim_stock_crate_item(host, guest, pawn, crate, roll, host_state, guest_state)
+        timings["stock_crate_pickup"] = await claim_stock_crate_item(host, guest, pawn, crate, roll, host_state,
+                                                                     guest_state, timing=True)
     assert save_fingerprints() == before
     return {
         "local_bridge": {"host": host_state["local_bridge"], "guest": guest_state["local_bridge"]},
@@ -7514,7 +7515,8 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_
     }
 
 
-async def claim_stock_crate_item(host, guest, pawn, crate, roll, host_state, guest_state, *, preview=False, recover=False):
+async def claim_stock_crate_item(host, guest, pawn, crate, roll, host_state, guest_state, *, preview=False, recover=False,
+                                 timing=False):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     selected = min(roll["items"], key=lambda item: item["class_path"] in native_loot.CASH_RANGES)
     guid = selected["guid"]
@@ -7541,7 +7543,12 @@ async def claim_stock_crate_item(host, guest, pawn, crate, roll, host_state, gue
                 picked = await submit(guest_run, native_loot.CLAIM, target=f"{guid}@{crate}")
                 assert picked["ok"], picked
             else:
+                if timing:
+                    request_us = time.monotonic_ns() // 1000
+                    wall_offset_us = (time.time_ns() - time.monotonic_ns()) / 1000
                 picked = await guest.bridge.command(native_world_loot.FIXTURE, identity, timeout=5)
+                if timing:
+                    command_return_us = time.monotonic_ns() // 1000
         except RuntimeError as error:
             if not str(error).startswith("world_loot_fixture_focus_unavailable:"):
                 raise
@@ -7565,6 +7572,20 @@ async def claim_stock_crate_item(host, guest, pawn, crate, roll, host_state, gue
                 "present_on_both_seats_before_pickup": True, "removed_from_both_seats_after_pickup": True}
     if recover:
         evidence["pickup_inventory_receipt"] = picked.get(native_inventory_grant.PICKUP)
+    if timing:
+        from portable_crossroads_profile import crate_pickup_timing
+        assert not recover, "Pickup timing requires stock Interact"
+        assert await portable_probe_command(guest.bridge, "portable-crate", "pickuptiming") == "written"
+        trace = guest.bridge.directory / "portable-crate-pickup-timing.tsv"
+        rows = [line.split("\t") for line in trace.read_text(encoding="ascii").splitlines()]
+        async with asyncio.timeout(3):
+            while True:
+                events = await resident_events(guest_run, guest_state)
+                if any(row["event"] == "local_interaction" and row.get("operation_id") == receipt["operation_id"]
+                       for row in events):
+                    break
+                await asyncio.sleep(.02)
+        evidence["timing"] = crate_pickup_timing(rows, identity, receipt, events, request_us, command_return_us, wall_offset_us)
     return evidence
 
 
@@ -8834,8 +8855,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             from portable_crossroads_profile import (
                 instrument_anomaly_work, instrument_avatar_appearance, instrument_avatar_gait, instrument_avatar_lean,
                 instrument_avatar_observer, instrument_crate_frame_timing, instrument_crate_input_timing,
-                instrument_crate_outcome_timing, instrument_crate_probe_timing, instrument_crate_status_timing,
-                instrument_death_poll,
+                instrument_crate_outcome_timing, instrument_crate_pickup_input_timing,
+                instrument_crate_pickup_inventory_timing, instrument_crate_pickup_timing, instrument_crate_probe_timing,
+                instrument_crate_status_timing, instrument_death_poll,
                 instrument_flashlight_scope,
                 instrument_guest_status_binding, instrument_host_drop_context, instrument_inline_crate_scan,
                 instrument_input_mappings, instrument_journal_context,
@@ -8862,7 +8884,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             if stock_crate_ring:
                 for game in games:
                     probes.enter_context(portable_script_overlay(game, "native_guest_drop_projection.lua",
-                        lambda script: instrument_crate_frame_timing(instrument_crate_loot_presentation(script))))
+                        lambda script: instrument_crate_pickup_timing(
+                            instrument_crate_frame_timing(instrument_crate_loot_presentation(script)))))
+                    probes.enter_context(portable_script_overlay(game, "native_inventory_grant.lua",
+                                                                  instrument_crate_pickup_inventory_timing))
                     probes.enter_context(portable_script_overlay(game, "native_loot_actions.lua",
                         lambda script: instrument_crate_outcome_timing(instrument_crate_host_action(script))))
                     probes.enter_context(portable_script_overlay(game, "native_loot_crate_input.lua",
@@ -8876,9 +8901,13 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(portable_script_overlay(game, "native_avatar_character_view.lua",
                                                              instrument_avatar_appearance))
                 probes.enter_context(portable_script_overlay(game, "native_roster.lua", instrument_ready_roster))
+            def input_overlay(source):
+                if stock_crate_ring:
+                    source = instrument_crate_pickup_input_timing(source)
+                return instrument_input_mappings(source)
+
             proof["crossroads_input_overlays"] = [
-                probes.enter_context(portable_script_overlay(game, "players.lua", instrument_input_mappings))
-                for game in games
+                probes.enter_context(portable_script_overlay(game, "players.lua", input_overlay)) for game in games
             ]
             proof["crossroads_npc_overlays"] = [
                 probes.enter_context(portable_script_overlay(game, "native_npc_barter_identity.lua", instrument_npc_class_discovery))

@@ -1126,7 +1126,8 @@ namespace
             lua.set_string(lease.epoch);
             lua.set_string(lease.id);
             lua.set_integer(press);
-            return 3;
+            lua.set_bool(lease.preview_press == press);
+            return 4;
         }
         return 0;
     }

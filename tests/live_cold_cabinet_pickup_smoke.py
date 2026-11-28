@@ -106,6 +106,12 @@ def source_with_probe(name: str, before: bytes, *, combined: bool = False) -> by
         command = "pcall(actions.command, fields, state, phase"
         anchors = {**anchors, command:
                    "pcall(cabinet_probe.timed, 'command:' .. fields[2], actions.command, fields, state, phase"}
+    if name == "native_guest_drop_projection.lua" and 'if ok and played == true then return target .. ":heard" end' in text:
+        played = 'if ok and played == true then return target .. ":heard" end'
+        anchors = {**anchors, played: 'if ok and played == true then\n'
+                   "                    cabinet_probe.mark('local-pickup-sound', id)\n"
+                   '                    return target .. ":heard"\n'
+                   "                end"}
     if name == "players.lua" and "elseif SilverfishEnqueueLocalBridgeInput(record) ~= true then" in text:
         staged = "pending_interactions = {world = pawn:GetWorld(), expires = now(pawn) + 1.5, lines = {record}}"
         anchors = {staged: staged + "\n        else\n"
@@ -227,14 +233,28 @@ def summarize(trace: Path, *, resident: bool = False, combined_operation: str | 
                 raise ValueError("A presentation command escaped its bridge tick")
             return tick, command
 
-        retire_name, sound_name = "native-world-loot-retire", "native-sound-pickup"
-        if combined_operation is None:
+        retire_name, sound_name = native_world_loot.RETIRE, "native-sound-pickup"
+        local_cues = [row for row in entries if row["label"] == "local-pickup-sound"]
+        acknowledgments = [row for row in entries if row["label"].startswith("presentation-ack:")]
+        if local_cues:
+            sound, = local_cues
+            if not stock["start"] <= sound["stop"] <= queued["start"]:
+                raise ValueError("The local stock cue did not precede submission of its exact press")
+            retire, retire_command = presentation_command(retire_name)
+            wanted = "presentation-ack:accepted:stock world loot retired"
+            if (len(acknowledgments) != 1 or acknowledgments[0]["label"] != wanted
+                    or not retire_command["stop"] <= acknowledgments[0]["start"] <= retire["stop"]
+                    or sum(row["label"] == "presentation-short" for row in entries) != 1
+                    or any(row["label"] in {"bridge:" + JOINT_PRESENTATION, "bridge:" + sound_name} for row in entries)):
+                raise ValueError("A locally played pickup cue must be followed by exactly one compact retirement ACK")
+            ack = acknowledgments[0]
+            presentation_edges = (retire["start"], retire_command["stop"], ack["start"])
+        elif combined_operation is None:
             retire, retire_command = presentation_command(retire_name)
             sound, sound_command = presentation_command(sound_name)
             presentation_edges = (retire["start"], retire["stop"], sound["start"])
         else:
             joint, joint_command = presentation_command(JOINT_PRESENTATION)
-            acknowledgments = [row for row in entries if row["label"].startswith("presentation-ack:")]
             wanted = "presentation-ack:accepted:retired|" + combined_operation
             if len(acknowledgments) != 1 or acknowledgments[0]["label"] != wanted:
                 raise ValueError(f"The joint pickup ACK did not prove both effects: {acknowledgments}")
@@ -252,7 +272,7 @@ def summarize(trace: Path, *, resident: bool = False, combined_operation: str | 
             return round((stop - start) * 1000, 3)
 
         presentation = [row["elapsed_ms"] for row in frames
-                        if row["start"] < sound["stop"] + .06 and row["stop"] > stock["start"] - .06]
+                        if row["start"] < max(sound["stop"], retire["stop"]) + .06 and row["stop"] > stock["start"] - .06]
         if not presentation:
             raise ValueError("Missing frame samples around the measured presentation")
         previews = [row for row in entries if row["label"] == "local-mesh-hidden"]
@@ -268,12 +288,17 @@ def summarize(trace: Path, *, resident: bool = False, combined_operation: str | 
                        stock_f_to_claim_tick_end_ms=ms(enclosing["stop"], stock["start"]),
                        claim_to_retire_ms=ms(retire["start"], enclosing["stop"]),
                        max_presentation_frame_ms=max(presentation), stock_f_to_sound_ms=ms(sound["stop"], stock["start"]))
-        if combined_operation is None:
-            summary.update(retire_to_sound_ms=ms(sound["start"], retire["stop"]),
+        if local_cues:
+            summary.update(sound_path="early", sound_to_input_ms=ms(queued["start"], sound["stop"]),
+                           retire_command_ms=retire_command["elapsed_ms"], retire_tick_ms=retire["elapsed_ms"],
+                           stock_f_to_retire_ack_ms=ms(ack["start"], stock["start"]),
+                           retire_ack=ack["label"].removeprefix("presentation-ack:"), retire_short_receipt=True)
+        elif combined_operation is None:
+            summary.update(sound_path="separate", retire_to_sound_ms=ms(sound["start"], retire["stop"]),
                            retire_command_ms=retire_command["elapsed_ms"], retire_tick_ms=retire["elapsed_ms"],
                            sound_command_ms=sound_command["elapsed_ms"], sound_tick_ms=sound["elapsed_ms"])
         else:
-            summary.update(joint_command_ms=joint_command["elapsed_ms"], joint_tick_ms=joint["elapsed_ms"],
+            summary.update(sound_path="combined", joint_command_ms=joint_command["elapsed_ms"], joint_tick_ms=joint["elapsed_ms"],
                            stock_f_to_joint_ack_ms=ms(ack["start"], stock["start"]),
                            joint_ack=ack["label"].removeprefix("presentation-ack:"),
                            joint_short_receipt=any(row["label"] == "presentation-short" for row in entries))
@@ -475,7 +500,9 @@ async def verify_resident_pickup(host, guest, guest_pawn: str, source: tuple[dic
         records = await resident_events(host_run, host_state)
         claim, = [row for row in records if row["event"] == "native_loot_claim_accepted" and row.get("guid") == guid]
         receipt = claim["operation_id"]
-        played, = [row for row in records if row["event"] == "native_pickup_sound_played" and row.get("operation_id") == receipt]
+        sound_receipts = [row for row in records if row["event"] == "native_pickup_sound_played"
+                          and row.get("operation_id") == receipt]
+        played, = sound_receipts
         inventory = (await submit_ok(picker_run, "native-inventory-list"))["native_inventory"]
         if current_item["class_path"] in native_loot.CASH_RANGES:
             credit = claim["wallet_credit"]
@@ -496,10 +523,13 @@ async def verify_resident_pickup(host, guest, guest_pawn: str, source: tuple[dic
             received = {"inventory": row}
         assert save_fingerprints() == before
         timings = summarize(trace, resident=True, combined_operation=receipt if combined else None) if trace else None
+        if timings and timings["sound_path"] == "early":
+            assert played["time_unix"] <= claim["time_unix"], (played, claim)
         return {"cabinet": crate, "stock_class": current_item["class_path"], "guid": guid, "projection": identity,
                 "operation": receipt, "claimed_by": claim["claimed_by"], **received,
                 "bridge_reply_bytes": claim.get("bridge_reply_bytes"), "native_claim_unix": claim["time_unix"],
-                "sound_receipt_unix": played["time_unix"], "timings": timings, "trace": str(trace) if trace else None,
+                "sound_receipt_unix": played["time_unix"], "host_sound_receipt_count": len(sound_receipts),
+                "timings": timings, "trace": str(trace) if trace else None,
                 "both_projected_views_retired": True, "saves_unchanged_after_pickup": True}
 
     pickup = await pick_up(CABINET, roll, item)

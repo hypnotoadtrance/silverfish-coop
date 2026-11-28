@@ -17,7 +17,8 @@ function measure.mark(label, identity)
 end
 
 function measure.acknowledge(fields, result, message)
-    if deadline and target and fields[2] == "native-world-loot-present-claim"
+    local action = fields[2]
+    if deadline and target and (action == "native-world-loot-present-claim" or action == "native-world-loot-retire")
         and fields[4] == target and fields[1] ~= acknowledged_ticket then
         acknowledged_ticket = fields[1]
         local label = ("presentation-ack:" .. result .. ":" .. message):gsub("[\r\n\t]", " ")

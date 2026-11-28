@@ -15,7 +15,7 @@ local pawn = {IsValid = function() return true end, GetAddress = function() retu
     GetFullName = function() return "local pawn" end}
 local state = {map = area, world = world, listening = true, server = true, local_pawn = {pawn = pawn}}
 
-local active, reject = {}, true
+local active, reject, preview_started = {}, true, false
 StaticFindObject = function() return world end
 local set_physics
 SilverfishSetNativeWorldLootPhysics = function(...) return set_physics(...) end
@@ -28,7 +28,7 @@ end
 SilverfishReadNativeGuestDropProjection = function(slot) return table.unpack(active[slot] or {}) end
 SilverfishTakeNativeGuestDropProjectionPress = function()
     for _, item in pairs(active) do
-        if item[3] == good then return epoch, good, item[5] end
+        if item[3] == good then return epoch, good, item[5], preview_started end
     end
 end
 
@@ -115,6 +115,18 @@ assert(play_count == 1 and loads == 1)
 assert(projection.command(frame, state, "connected") == "stock world loot synchronized")
 assert(present(other_operation, "connected") == "retired|" .. other_operation)
 assert(play_count == 2 and loads == 1)
+
+assert(projection.command(frame, state, "connected") == "stock world loot synchronized")
+preview_started = true
+assert(projection.take_press(pawn) == "world-loot:" .. epoch .. ":" .. good .. ":1:heard")
+assert(play_count == 3 and loads == 1)
+loaded[attenuation] = nil
+assert(projection.take_press(pawn) == "world-loot:" .. epoch .. ":" .. good .. ":1")
+assert(play_count == 3 and loads == 1)
+LoadAsset(attenuation)
+preview_started = false
+assert(projection.take_press(pawn) == "world-loot:" .. epoch .. ":" .. good .. ":1")
+assert(play_count == 3 and loads == 2)
 local grant = require("native_inventory_grant")
 local apply = grant.project_pickup
 local guid = string.rep("A", 32)
@@ -144,16 +156,16 @@ state.controller = pawn.Controller
 local cash_command = {"request", "native-sound-pickup", area, epoch,
     cash_operation .. "|" .. cash.class .. "|cash|" .. cash.cash_min}
 assert(audio.command(cash_command, state, "connected", true) == cash_operation)
-assert(play_count == 2 and loads == 1)
+assert(play_count == 3 and loads == 2)
 state.server = false
 assert(projection.command(frame, state, "hosting") == "stock world loot synchronized")
 blocked = true
 local host_operation = string.rep("1", 32)
 assert(present(host_operation, "hosting") == "world_loot_retirement_pending|" .. host_operation)
-assert(play_count == 3 and loads == 1)
+assert(play_count == 4 and loads == 2)
 assert(audio.command({"request", "native-sound-pickup", area, epoch, cue(host_operation)}, state, "hosting")
     == host_operation)
-assert(play_count == 3)
+assert(play_count == 4)
 print("Pickup presentation uses loaded assets on both seats and the effects can complete independently")
 
 blocked = false

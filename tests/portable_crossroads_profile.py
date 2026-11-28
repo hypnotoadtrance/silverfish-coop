@@ -484,7 +484,7 @@ def instrument_crate_outcome_timing(source):
 
 def instrument_crate_frame_timing(source):
     anchor = "function projection.frame_reply(fields, state, phase, row)\n"
-    return _crate_timing_overlay(source, ((anchor, anchor + """    local timing = SilverfishPortableCrateTiming
+    return _crate_timing_overlay(source, ((anchor, anchor + """    local timing = SilverfishPortableCrateTiming or SilverfishPortableCratePickupTiming
     if timing and phase == "connected" and timing.map == state.map then
         local started = SilverfishBridgeProfileStamp()
         local ids = {}
@@ -498,7 +498,7 @@ def instrument_crate_frame_timing(source):
 
 def instrument_crate_status_timing(source):
     anchor = "local function write_status(state, current_phase, failure, fields, pending, crate_diagnostic)\n"
-    return _crate_timing_overlay(source, ((anchor, anchor + """    local timing = SilverfishPortableCrateTiming
+    return _crate_timing_overlay(source, ((anchor, anchor + """    local timing = SilverfishPortableCrateTiming or SilverfishPortableCratePickupTiming
     if timing and current_phase == "connected" and timing.map == state.map then
         timing.push("status", state.map, sequence + 1, SilverfishBridgeProfileStamp(), fields and fields[2] or "-")
     end
@@ -510,7 +510,7 @@ def instrument_crate_probe_timing(source):
     modes = '        and mode ~= "discovered" then return end\n'
     motion = '    if mode == "motion" then\n'
     return _crate_timing_overlay(source, (
-        (modes, modes.replace('then return end', 'and mode ~= "timing" then return end')),
+        (modes, modes.replace('then return end', 'and mode ~= "timing" and mode ~= "pickuptiming" then return end')),
         (press, press + r'''        if mode == "coldpress" and pressed_us then
             local rows = {}
             local package_name = map:match("^(.*)%.[^.]+$")
@@ -533,11 +533,211 @@ def instrument_crate_probe_timing(source):
             output:write(table.concat(timing.rows, "\n"), "\n")
             output:close()
             SilverfishPortableCrateTiming = nil
+            SilverfishPortableCratePickupArmed = true
+            return "written"
+        end)
+    elseif mode == "pickuptiming" then
+        ok, result = pcall(function()
+            local timing = assert(SilverfishPortableCratePickupTiming, "The stock crate pickup timing probe is inactive")
+            local output = assert(io.open(mailbox .. "/portable-crate-pickup-timing.tsv", "wb"))
+            output:write(table.concat(timing.rows, "\n"), "\n")
+            output:close()
+            SilverfishPortableCratePickupTiming = nil
             return "written"
         end)
     elseif mode == "motion" then
 '''),
     ))
+
+
+def instrument_crate_pickup_timing(source):
+    probe = """            local ok, status = SilverfishProbeNativeInteractInput(pawn:GetAddress(), true)
+            local present, current_epoch, current_id, current_actor, after = SilverfishReadNativeGuestDropProjection(item.slot)
+"""
+    native_press = """    local epoch, id, sequence, preview = SilverfishTakeNativeGuestDropProjectionPress(pawn:GetAddress())
+"""
+    serial = '            local target = "world-loot:" .. epoch .. ":" .. id .. ":" .. tostring(sequence)\n'
+    sound = "                local ok, played = pcall(pickup_audio.preview_item, item.class, pawn, item.x, item.y, item.visual_z)\n"
+    sound_marks = ()
+    if sound in source:
+        sound_marks = ((sound, """                local sound_start = stamp and timing.id == id and timing.sequence == sequence and stamp()
+""" + sound + """                if sound_start then
+                    timing.push("sound", id, sequence, sound_start, stamp(), ok and played == true and 1 or 0)
+                end
+"""),)
+    else:
+        native_press = native_press.replace(", preview = ", " = ")
+        serial = serial.replace("local target =", "return")
+    present = "    local typed = #fields == 11 and phase == \"connected\"\n"
+    retire = "    local removed, outcome = pcall(retire, state, phase, epoch, id)\n"
+    import_pickup = "            ok, inventory = pcall(inventory_grant.project_pickup, state, phase, audio_epoch, table.unpack(fields, 8, 11))\n"
+    reply = "    return reply\nend\n\nfunction projection.command"
+    return _crate_timing_overlay(source, (
+        (probe, r'''            local timing
+            if phase == "connected" and SilverfishPortableCratePickupArmed and not SilverfishPortableCratePickupTiming then
+                local rows = {}
+                local function push(...)
+                    if #rows < 128 then rows[#rows + 1] = table.concat({...}, "\t") end
+                end
+                timing = {map = state.map, epoch = epoch, id = id, actor = actor, pawn = pawn:GetAddress(),
+                    rows = rows, push = push}
+                SilverfishPortableCratePickupTiming = timing
+            end
+            local pressed = timing and SilverfishBridgeProfileStamp()
+''' + probe + '''            if timing then
+                if ok and status == "stock_started_consumed" and current_id == id and type(after) == "number" and after > before then
+                    SilverfishPortableCratePickupArmed = nil
+                    timing.sequence = after
+                    timing.push("press", state.map, epoch, id, after, pressed, SilverfishBridgeProfileStamp())
+                else
+                    SilverfishPortableCratePickupTiming = nil
+                end
+            end
+'''),
+        (native_press, """    local timing = SilverfishPortableCratePickupTiming
+    local stamp = timing and timing.pawn == pawn:GetAddress() and SilverfishBridgeProfileStamp
+    local drain_start = stamp and stamp()
+""" + native_press),
+        (serial, """            if stamp and timing.id == id and timing.epoch == epoch and timing.sequence == sequence then
+                timing.push("drain", id, sequence, drain_start, stamp(), valid(timing.actor) and timing.actor.bHidden and 1 or 0)
+            end
+""" + serial),
+        *sound_marks,
+        (present, present + """    local timing = SilverfishPortableCratePickupTiming
+    local stamp = timing and phase == "connected" and timing.map == state.map and timing.id == id
+        and timing.epoch == epoch and SilverfishBridgeProfileStamp
+    local presentation_start = stamp and stamp()
+"""),
+        (retire, retire + "    local retirement_return = stamp and stamp()\n"),
+        (import_pickup, """            if stamp then timing.inventory_guid, timing.audio_epoch = fields[8], audio_epoch end
+""" + import_pickup + """            if stamp then timing.inventory_guid, timing.audio_epoch = nil, nil end
+"""),
+        (reply, """    if stamp then
+        timing.push("present", id, fields[1], presentation_start, retirement_return, stamp(), status,
+            heard ~= "" and 1 or 0, typed and reply:match("[^|]+$") or "-")
+    end
+""" + reply),
+    ))
+
+
+def instrument_crate_pickup_input_timing(source):
+    anchor = "local function write_interaction(pawn, pickup_source, pressed_component, projected_actor)\n"
+    helper = r'''local function enqueue_crate_pickup_trace(record)
+    local timing = SilverfishPortableCratePickupTiming
+    if not timing then return SilverfishEnqueueLocalBridgeInput(record) end
+    local input, epoch, item, serial, suffix = record:match("^interact\t(%d+)\tworld%-loot:(%x+):(%x+):(%d+)([:a-z]*)\n$")
+    if epoch ~= timing.epoch or item ~= timing.id or tonumber(serial) ~= timing.sequence
+        or (suffix ~= "" and suffix ~= ":heard") then return SilverfishEnqueueLocalBridgeInput(record) end
+    local start = SilverfishBridgeProfileStamp()
+    local ok = SilverfishEnqueueLocalBridgeInput(record)
+    timing.push("enqueue", item, serial, input, start, SilverfishBridgeProfileStamp(), ok == true and 1 or 0,
+        suffix == ":heard" and 1 or 0)
+    return ok
+end
+
+'''
+    return _crate_timing_overlay(source, (
+        (anchor, helper + anchor),
+        ("elseif SilverfishEnqueueLocalBridgeInput(record) ~= true then", "elseif enqueue_crate_pickup_trace(record) ~= true then"),
+        ("if SilverfishEnqueueLocalBridgeInput(pending.lines[1]) ~= true then",
+         "if enqueue_crate_pickup_trace(pending.lines[1]) ~= true then"),
+    ))
+
+
+def instrument_crate_pickup_inventory_timing(source):
+    anchor = "    local ok, outcome = SilverfishImportLocalInventoryPickup(pawn:GetAddress(), save:GetAddress(),\n"
+    refresh = "    view.refresh_projected(state, phase, epoch)\n"
+    return _crate_timing_overlay(source, (
+        (anchor, """    local timing = SilverfishPortableCratePickupTiming
+    local stamp = timing and timing.map == state.map and timing.audio_epoch == epoch and timing.inventory_guid == guid
+        and SilverfishBridgeProfileStamp
+    local import_start = stamp and stamp()
+""" + anchor),
+        ("    if not ok then return end\n", """    local import_return = stamp and stamp()
+    if not ok then
+        if stamp then timing.push("inventory", timing.id, guid, import_start, import_return, 0, "refused") end
+        return
+    end
+"""),
+        (refresh, refresh + """    if stamp then timing.push("inventory", timing.id, guid, import_start, import_return, stamp(), outcome) end
+"""),
+    ))
+
+
+def crate_pickup_timing(rows, identity, receipt, guest_events, request_us, command_return_us, wall_offset_us):
+    press, = (row for row in rows if row[0] == "press" and row[3] == identity)
+    serial, pressed, verified = map(int, press[4:])
+    assert request_us <= pressed <= verified <= command_return_us, press
+    drain, = (row for row in rows if row[:3] == ["drain", identity, str(serial)])
+    enqueue, = (row for row in rows if row[:3] == ["enqueue", identity, str(serial)] and row[6] == "1")
+    native_stamps = {
+        "stock_input_verified": verified,
+        "native_drain_start": int(drain[3]), "native_drain_return": int(drain[4]),
+        "input_enqueue_start": int(enqueue[4]), "input_enqueue_return": int(enqueue[5]),
+    }
+    values = list(native_stamps.values())
+    assert pressed <= min(values) and values == sorted(values), native_stamps
+    presentations, imports = ([row for row in rows if row[:2] == [kind, identity]]
+                              for kind in ("present", "inventory"))
+    for index, row in enumerate(presentations, 1):
+        native_stamps.update({
+            f"presentation_{index}_start": int(row[3]), f"presentation_{index}_retire_return": int(row[4]),
+            f"presentation_{index}_reply": int(row[5]),
+        })
+    success = [row for row in imports if row[6] in {"added", "present", "merged"}]
+    if success:
+        inventory = success[0]
+        assert inventory[2] == receipt.get("inventory_guid", receipt["guid"]), inventory
+        native_stamps.update(inventory_import_start=int(inventory[3]), inventory_import_return=int(inventory[4]),
+                             inventory_view_refresh_return=int(inventory[5]))
+    operation = receipt["operation_id"]
+    events = [row for row in guest_events if row.get("operation_id") == operation]
+    sent = [row for row in events if row["event"] == "guest_interaction_sent"]
+    received = [row for row in events if row["event"] == "guest_interaction_received" and row["ok"]]
+    applied = [row for row in events if row["event"] == "native_pickup_inventory_applied"]
+    cues = [row for row in events if row["event"] == "native_pickup_sound_played"]
+    finished, = (row for row in events if row["event"] == "local_interaction")
+    assert sent and received and len(cues) <= 1, events
+    attempts = [row for row in rows if row[:3] == ["sound", identity, str(serial)]]
+    assert len(attempts) <= 1, attempts
+    early_sound = bool(attempts and attempts[0][5] == "1")
+    assert early_sound == (enqueue[7] == "1"), (attempts, enqueue)
+    if attempts:
+        sound_start, sound_return = map(int, attempts[0][3:5])
+        assert native_stamps["native_drain_return"] <= sound_start <= sound_return <= native_stamps["input_enqueue_start"]
+        native_stamps.update(pickup_sound_attempt_start=sound_start, pickup_sound_attempt_return=sound_return)
+    if early_sound:
+        cue, = cues
+        assert cue["time_unix"] <= sent[0]["time_unix"] <= receipt["time_unix"], (cue, sent[0], receipt)
+        assert all(row[7] == "0" for row in presentations), presentations
+
+    def local_ms(stamp):
+        return round((stamp - pressed) / 1000, 3)
+
+    def worker_ms(event):
+        return round((event["time_unix"] * 1_000_000 - wall_offset_us - pressed) / 1000, 3)
+
+    return {
+        "operation_id": operation, "projection_identity": identity, "native_input_sequence": serial,
+        "worker_input_sequence": int(enqueue[3]), "locally_hidden_on_native_drain_return": drain[5] == "1",
+        "press_to_native_stage_ms": {label: local_ms(stamp) for label, stamp in native_stamps.items()},
+        "press_to_worker_stage_ms": {
+            "guest_request_sent": worker_ms(sent[0]), "host_claim_accepted": worker_ms(receipt),
+            "guest_claim_reply": worker_ms(received[-1]),
+            **({"guest_pickup_sound_receipt": worker_ms(cues[0])} if cues else {}),
+            **({"guest_inventory_receipt": worker_ms(applied[0])} if applied else {}),
+            "guest_interaction_finished": worker_ms(finished),
+        },
+        "local_backpack_import": success[0][6] if success else "unobserved",
+        "pickup_sound": {"path": "early" if early_sound else "fallback" if cues else "unobserved",
+                         "early_attempted": bool(attempts), "worker_cues": len(cues)},
+        "presentations": [{"retirement": row[6], "audio_receipt": row[7] == "1", "inventory": row[8]}
+                          for row in presentations],
+        "world_frames": [{"start_ms": local_ms(int(row[4])), "included_item": identity in row[5].split("|")}
+                         for row in rows if row[0] == "frame"],
+        "status_frames": [{"start_ms": local_ms(int(row[3])), "action": row[4]}
+                          for row in rows if row[0] == "status"],
+    }
 
 
 def instrument_loose_discovery(source):
@@ -1275,7 +1475,9 @@ def read_comparison(raw):
     assert not slow_intervals or slow_intervals[0]["elapsed_ms"] == float(elapsed)
     native_interval = {}
     if engine_tick:
-        fields = [int(value) for value in engine_tick.split(",")]
+        header, *phase_rows = engine_tick.split(";")
+        fields = [int(value) for value in header.split(",")]
+        viewport, fields = fields[11:], fields[:11]
         count, longest = fields[:2]
         assert count > 10, engine_tick
         native_interval = {"engine_tick_intervals": count, "max_interval_ms": longest / 1000}
@@ -1295,6 +1497,33 @@ def read_comparison(raw):
                                    engine_tick_cycles_in_max_interval=engine_cycles,
                                    between_ticks_cycles_in_max_interval=between_cycles,
                                    lua_scheduler_inside_pre_bracket=inside, lua_scheduler_outside_pre_bracket=outside)
+            if viewport:
+                covered, unpaired, viewport_outside = viewport
+                assert min(viewport) >= 0 and covered + unpaired <= count, engine_tick
+                peaks = {}
+                for phase, row in zip(("interval", "pre_tick", "engine_tick"), phase_rows, strict=True):
+                    (sequence, wall, pre_wall, engine_wall, between_wall, cpu, pre_cpu, engine_cpu, between_cpu,
+                     calls, viewport_wall, viewport_cpu) = map(int, row.split(","))
+                    assert 1 <= sequence <= count and 0 <= pre_wall <= wall <= longest, engine_tick
+                    assert min(engine_wall, between_wall, pre_cpu, engine_cpu, between_cpu) >= 0, engine_tick
+                    assert pre_wall + engine_wall + between_wall == wall, engine_tick
+                    assert pre_cpu + engine_cpu + between_cpu == cpu, engine_tick
+                    assert calls >= -1 and 0 <= viewport_wall <= engine_wall, engine_tick
+                    assert 0 <= viewport_cpu <= engine_cpu and (calls > 0 or viewport_wall == viewport_cpu == 0), engine_tick
+                    assert calls <= 0 or covered > 0, engine_tick
+                    assert calls != -1 or unpaired > 0, engine_tick
+                    peaks[phase] = dict(sequence=sequence, interval_ms=wall / 1000, pre_tick_ms=pre_wall / 1000,
+                                        engine_tick_ms=engine_wall / 1000, between_ticks_ms=between_wall / 1000,
+                                        thread_cycles=cpu, pre_tick_cycles=pre_cpu, engine_tick_cycles=engine_cpu,
+                                        between_ticks_cycles=between_cpu, viewport_tick_calls=calls)
+                    if calls > 0:
+                        peaks[phase].update(viewport_tick_ms=viewport_wall / 1000, viewport_tick_cycles=viewport_cpu)
+                assert peaks["interval"]["interval_ms"] == longest / 1000, engine_tick
+                assert peaks["pre_tick"]["pre_tick_ms"] >= peaks["interval"]["pre_tick_ms"], engine_tick
+                assert peaks["engine_tick"]["engine_tick_ms"] >= peaks["interval"]["engine_tick_ms"], engine_tick
+                native_interval.update(viewport_observed_intervals=covered, viewport_unpaired_intervals=unpaired,
+                                       viewport_called_outside_engine_bracket=viewport_outside, phase_peaks=peaks)
+            assert bool(viewport) == bool(phase_rows), engine_tick
     return {"seconds": float(duration), "timings": totals, "status_sections": status_peaks,
             "native_engine_tick": native_interval,
             "longest_intervals_over_16ms": slow_intervals, "skipped_observer_updates": skipped_observers,

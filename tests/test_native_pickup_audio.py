@@ -193,6 +193,24 @@ class HostPickupPresentationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.control.event.call_args_list, [self.played])
         self.assertEqual(self.cues.frame(self.game, self.audio_epoch)["cues"][0][0], self.operation)
 
+    async def test_local_preview_is_not_replayed_and_other_seats_still_get_the_cue(self):
+        target = f"world-loot:{self.projection_epoch}:{self.identity}:42"
+        self.assertEqual(loot.target_parts(target + ":heard"), loot.target_parts(target))
+        self.assertIsNone(loot.target_parts(target.rsplit(":", 1)[0] + ":heard"))
+        self.bridge.command.return_value = {"ack": {"message": "stock world loot retired"}}
+        self.playback.remember_preview(self.control, OBSERVATORY, self.audio_epoch,
+                                       self.control.generation, self.operation)
+        await self.retire()
+        await self.pending_sound()
+        self.bridge.command.assert_awaited_once_with(loot.RETIRE, self.projection_epoch, self.identity, timeout=3)
+        self.assertEqual(self.control.event.call_args_list, [self.played])
+        frame = self.cues.frame(self.game, self.audio_epoch)
+        guest = Playback()
+        args, _ = guest.prepare(self.game, frame, self.audio_epoch, "guest-session")
+        self.assertEqual(args, [self.args])
+        args, _ = self.playback.prepare(self.game, frame, self.audio_epoch, "new-session")
+        self.assertEqual(args, [self.args])
+
     async def test_short_retirement_receipts_remove_only_the_verified_item(self):
         other = "c" * 32
         game = dict(self.game, **{loot.KEY: {self.identity: {}, other: {}}})

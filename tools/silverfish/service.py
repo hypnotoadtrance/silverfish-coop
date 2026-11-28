@@ -4678,6 +4678,9 @@ class Host:
                 try:
                     if world_loot := native_world_loot.target_parts(target):
                         action, claim = self.world_loot.claim_target(self.last_game, world_loot)
+                        if target.endswith(":heard"):
+                            self.pickup_playback.remember_preview(
+                                self.control, self.last_game["map"], self.zone_epoch, self.control.generation, operation_id)
                         if action == native_world_loot.ENEMY_CLAIM:
                             result = await native_enemy_loot.claim(self, bridge, "host", claim, operation_id)
                         elif action == native_stock_enemy_drops.CLAIM:
@@ -7623,6 +7626,8 @@ class Client:
         if loot := native_world_loot.target_parts(target):
             action, claim = self.world_loot.claim_target(self.last_game, loot)
             source = self.world_loot.items.get(loot[1])
+            if target.endswith(":heard"):
+                self.pickup_playback.remember_preview(self.control, scope[2], scope[1], scope[0], operation)
             result = await self.claim_world_loot(scope, operation, loot, action, claim)
             cue = result.pop(native_pickup_audio.KEY, None)
             if self.stock_interaction_scope() == scope:

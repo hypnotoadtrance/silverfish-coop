@@ -293,19 +293,35 @@ namespace
         ULONG64 cycles{};
     };
 
+    struct EngineInterval
+    {
+        std::int64_t sequence{}, micros{}, pre_micros{}, engine_micros{}, between_micros{};
+        ULONG64 cycles{}, pre_cycles{}, engine_cycles{}, between_cycles{};
+        std::int64_t viewport_calls{}, viewport_micros{};
+        ULONG64 viewport_cycles{};
+    };
+
     struct EngineTickProfile
     {
         bool active{};
         TickMark early, late, post;
-        std::int64_t count{}, longest{}, pre_micros{}, engine_micros{}, between_micros{};
-        ULONG64 interval_cycles{}, pre_cycles{}, engine_cycles{}, between_cycles{};
+        std::int64_t count{};
+        EngineInterval longest, longest_pre_tick, longest_engine_tick;
         std::int64_t scheduler_inside{}, scheduler_outside{};
+        RC::Unreal::UGameViewportClient* viewport{};
+        TickMark viewport_start;
+        bool viewport_unpaired{};
+        std::int64_t viewport_calls{}, viewport_micros{};
+        ULONG64 viewport_cycles{};
+        std::int64_t viewport_frames{}, viewport_unpaired_frames{}, viewport_outside{};
     };
 
     thread_local EngineTickProfile engine_profile;
     Hooks::GlobalCallbackId engine_profile_early = Hooks::ERROR_ID;
     Hooks::GlobalCallbackId engine_profile_late = Hooks::ERROR_ID;
     Hooks::GlobalCallbackId engine_profile_post = Hooks::ERROR_ID;
+    Hooks::GlobalCallbackId viewport_profile_pre = Hooks::ERROR_ID;
+    Hooks::GlobalCallbackId viewport_profile_post = Hooks::ERROR_ID;
     constexpr auto engine_profile_owner = STR("SilverfishCoopNative");
 
     TickMark tick_mark()
@@ -325,22 +341,71 @@ namespace
         const auto [early, late, post] = std::tuple{sample.early, sample.late, sample.post};
         if (early.micros > 0 && late.micros >= early.micros && post.micros >= late.micros && now.micros >= post.micros)
         {
-            const auto interval = now.micros - early.micros;
-            ++sample.count;
-            if (interval > sample.longest)
+            EngineInterval interval{++sample.count, now.micros - early.micros, late.micros - early.micros,
+                post.micros - late.micros, now.micros - post.micros, now.cycles - early.cycles,
+                late.cycles - early.cycles, post.cycles - late.cycles, now.cycles - post.cycles};
+            if (sample.viewport_unpaired || sample.viewport || sample.viewport_micros > interval.engine_micros ||
+                sample.viewport_cycles > interval.engine_cycles)
             {
-                sample.longest = interval;
-                sample.pre_micros = late.micros - early.micros;
-                sample.engine_micros = post.micros - late.micros;
-                sample.between_micros = now.micros - post.micros;
-                sample.interval_cycles = now.cycles - early.cycles;
-                sample.pre_cycles = late.cycles - early.cycles;
-                sample.engine_cycles = post.cycles - late.cycles;
-                sample.between_cycles = now.cycles - post.cycles;
+                ++sample.viewport_unpaired_frames;
+                interval.viewport_calls = -1;
             }
+            else if (sample.viewport_calls > 0)
+            {
+                ++sample.viewport_frames;
+                interval.viewport_calls = sample.viewport_calls;
+                interval.viewport_micros = sample.viewport_micros;
+                interval.viewport_cycles = sample.viewport_cycles;
+            }
+            if (interval.micros > sample.longest.micros) sample.longest = interval;
+            if (!sample.longest_pre_tick.sequence || interval.pre_micros > sample.longest_pre_tick.pre_micros)
+                sample.longest_pre_tick = interval;
+            if (!sample.longest_engine_tick.sequence || interval.engine_micros > sample.longest_engine_tick.engine_micros)
+                sample.longest_engine_tick = interval;
         }
         sample.early = now;
         sample.late = sample.post = {};
+        sample.viewport = nullptr;
+        sample.viewport_start = {};
+        sample.viewport_unpaired = false;
+        sample.viewport_calls = sample.viewport_micros = 0;
+        sample.viewport_cycles = 0;
+    }
+
+    void begin_viewport_tick(RC::Unreal::UGameViewportClient* viewport)
+    {
+        auto& sample = engine_profile;
+        if (!sample.active) return;
+        if (sample.late.micros <= 0 || sample.post.micros > 0)
+        {
+            ++sample.viewport_outside;
+            return;
+        }
+        if (!viewport || sample.viewport)
+        {
+            sample.viewport_unpaired = true;
+            return;
+        }
+        sample.viewport = viewport;
+        sample.viewport_start = tick_mark();
+    }
+
+    void end_viewport_tick(RC::Unreal::UGameViewportClient* viewport)
+    {
+        auto& sample = engine_profile;
+        if (!sample.active || sample.late.micros <= 0 || sample.post.micros > 0) return;
+        const auto now = tick_mark();
+        const auto start = sample.viewport_start;
+        if (!viewport || sample.viewport != viewport || start.micros < sample.late.micros ||
+            now.micros < start.micros || now.cycles < start.cycles)
+        {
+            sample.viewport_unpaired = true;
+            return;
+        }
+        sample.viewport = nullptr;
+        ++sample.viewport_calls;
+        sample.viewport_micros += now.micros - start.micros;
+        sample.viewport_cycles += now.cycles - start.cycles;
     }
 
     void register_early_engine_tick_profile()
@@ -353,13 +418,16 @@ namespace
             {false, false, engine_profile_owner, STR("Measure before the diagnostic Lua schedule")});
     }
 
+    void unregister_tick_profile_hook(Hooks::GlobalCallbackId& hook)
+    {
+        if (hook != Hooks::ERROR_ID) Hooks::UnregisterCallback(hook);
+        hook = Hooks::ERROR_ID;
+    }
+
     void stop_engine_tick_profile()
     {
-        for (auto* hook : {&engine_profile_early, &engine_profile_late, &engine_profile_post})
-        {
-            if (*hook != Hooks::ERROR_ID) Hooks::UnregisterCallback(*hook);
-            *hook = Hooks::ERROR_ID;
-        }
+        for (auto* hook : {&engine_profile_early, &engine_profile_late, &engine_profile_post,
+                          &viewport_profile_pre, &viewport_profile_post}) unregister_tick_profile_hook(*hook);
     }
 
     int begin_engine_tick_profile(const Lua& lua)
@@ -379,6 +447,17 @@ namespace
             {
                 stop_engine_tick_profile();
                 return 0;
+            }
+            viewport_profile_pre = Hooks::RegisterGameViewportClientTickPreCallback(
+                [](auto&, RC::Unreal::UGameViewportClient* viewport, float) { begin_viewport_tick(viewport); },
+                {false, false, engine_profile_owner, STR("Begin diagnostic viewport tick")});
+            viewport_profile_post = Hooks::RegisterGameViewportClientTickPostCallback(
+                [](auto&, RC::Unreal::UGameViewportClient* viewport, float) { end_viewport_tick(viewport); },
+                {false, false, engine_profile_owner, STR("End diagnostic viewport tick")});
+            if (viewport_profile_pre == Hooks::ERROR_ID || viewport_profile_post == Hooks::ERROR_ID)
+            {
+                unregister_tick_profile_hook(viewport_profile_pre);
+                unregister_tick_profile_hook(viewport_profile_post);
             }
         }
         engine_profile = {};
@@ -405,18 +484,40 @@ namespace
         auto& sample = engine_profile;
         if (lua.get_stack_size() != 0 || !sample.active) return 0;
         sample.active = false;
+        const auto& peak = sample.longest;
         lua.set_integer(sample.count);
-        lua.set_integer(sample.longest);
-        lua.set_integer(sample.pre_micros);
-        lua.set_integer(sample.engine_micros);
-        lua.set_integer(sample.between_micros);
-        lua.set_integer(static_cast<std::int64_t>(sample.interval_cycles));
-        lua.set_integer(static_cast<std::int64_t>(sample.pre_cycles));
-        lua.set_integer(static_cast<std::int64_t>(sample.engine_cycles));
-        lua.set_integer(static_cast<std::int64_t>(sample.between_cycles));
+        lua.set_integer(peak.micros);
+        lua.set_integer(peak.pre_micros);
+        lua.set_integer(peak.engine_micros);
+        lua.set_integer(peak.between_micros);
+        lua.set_integer(static_cast<std::int64_t>(peak.cycles));
+        lua.set_integer(static_cast<std::int64_t>(peak.pre_cycles));
+        lua.set_integer(static_cast<std::int64_t>(peak.engine_cycles));
+        lua.set_integer(static_cast<std::int64_t>(peak.between_cycles));
         lua.set_integer(sample.scheduler_inside);
         lua.set_integer(sample.scheduler_outside);
-        return 11;
+        std::string phases = std::to_string(sample.viewport_frames);
+        const auto append = [&phases](auto value) { phases += ','; phases += std::to_string(value); };
+        append(sample.viewport_unpaired_frames);
+        append(sample.viewport_outside);
+        for (const auto* interval : std::array<const EngineInterval*, 3>{&peak, &sample.longest_pre_tick, &sample.longest_engine_tick})
+        {
+            phases += ';';
+            phases += std::to_string(interval->sequence);
+            append(interval->micros);
+            append(interval->pre_micros);
+            append(interval->engine_micros);
+            append(interval->between_micros);
+            append(interval->cycles);
+            append(interval->pre_cycles);
+            append(interval->engine_cycles);
+            append(interval->between_cycles);
+            append(interval->viewport_calls);
+            append(interval->viewport_micros);
+            append(interval->viewport_cycles);
+        }
+        lua.set_string(phases);
+        return 12;
     }
 
     int enqueue_input(const Lua& lua)

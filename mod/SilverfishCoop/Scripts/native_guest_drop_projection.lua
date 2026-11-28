@@ -94,12 +94,17 @@ end
 
 function projection.take_press(pawn)
     if not valid(pawn) or type(SilverfishTakeNativeGuestDropProjectionPress) ~= "function" then return end
-    local epoch, id, sequence = SilverfishTakeNativeGuestDropProjectionPress(pawn:GetAddress())
+    local epoch, id, sequence, preview = SilverfishTakeNativeGuestDropProjectionPress(pawn:GetAddress())
     if not identifier(epoch) or not identifier(id) then return end
     local item = world_items[id]
     if item and item.epoch == epoch and same(item.pawn, pawn) then
         if math.type(sequence) == "integer" and sequence > 0 then
-            return "world-loot:" .. epoch .. ":" .. id .. ":" .. tostring(sequence)
+            local target = "world-loot:" .. epoch .. ":" .. id .. ":" .. tostring(sequence)
+            if preview and not item.error and not item.moving then
+                local ok, played = pcall(pickup_audio.preview_item, item.class, pawn, item.x, item.y, item.visual_z)
+                if ok and played == true then return target .. ":heard" end
+            end
+            return target
         end
         return
     end
@@ -110,7 +115,7 @@ function projection.take_press(pawn)
 end
 
 function projection.cancel_preview(state, phase, target)
-    local epoch, id, press = target:match("^world%-loot:([0-9a-f]+):([0-9a-f]+):(%d+)$")
+    local epoch, id, press = (target:gsub(":heard$", "")):match("^world%-loot:([0-9a-f]+):([0-9a-f]+):(%d+)$")
     local pawn = epoch and local_pawn(state, phase)
     if not pawn or type(SilverfishCancelNativeWorldLootPreview) ~= "function"
         or not identifier(epoch) or not identifier(id) then return end

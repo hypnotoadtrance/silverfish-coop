@@ -69,17 +69,25 @@ class Playback:
         self.seen = deque(maxlen=2 * MAX_CUES)
         self.pending = set()
 
+    def _set_scope(self, generation, area, epoch):
+        scope = generation, area, epoch
+        if scope != self.scope:
+            self.scope = scope
+            self.seen.clear()
+            self.pending = set()
+
+    def remember_preview(self, control, area, epoch, generation, operation):
+        """Remember a stock cue played by this seat before reporting the claim."""
+        self._set_scope(generation, area, epoch)
+        self.acknowledge(control, area, {operation: None}, operation)
+
     def prepare(self, game, frame, epoch, generation):
         if not isinstance(frame, dict) or game.get("state") not in {"hosting", "connected"}:
             return [], {}
         area = game.get("map")
         if (frame.get("map"), frame.get("epoch")) != (area, epoch) or not valid_id(epoch):
             return [], {}
-        scope = generation, area, epoch
-        if scope != self.scope:
-            self.scope = scope
-            self.seen.clear()
-            self.pending = set()
+        self._set_scope(generation, area, epoch)
         origin = game.get("pawns", {}).get("local", {}).get("location")
         listener_position_available = valid_position(origin)
         cues = frame.get("cues")
