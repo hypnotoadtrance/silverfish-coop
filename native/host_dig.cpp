@@ -935,7 +935,12 @@ namespace
     {
         auto* actor = preview.actor.Get();
         preview = {};
-        if (authority(actor)) static_cast<U::AActor*>(actor)->K2_DestroyActor();
+        if (authority(actor))
+        {
+            auto* hole = static_cast<U::AActor*>(actor);
+            hole->SetActorHiddenInGame(true);
+            hole->K2_DestroyActor();
+        }
     }
 
     void preview_hole(U::AActor* actor)
@@ -1074,6 +1079,8 @@ namespace
         {
             if (local_guest_dig.frame && frame.PreviousFrame() == local_guest_dig.frame)
             {
+                if (!local_guest_dig.contact && Clock::now() < local_guest_dig.expires)
+                    local_guest_dig.contact = local_contact(*local_guest_dig.frame);
                 call.PreventOriginalFunctionCall();
                 return;
             }

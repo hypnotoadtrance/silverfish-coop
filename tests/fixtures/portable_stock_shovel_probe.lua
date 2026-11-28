@@ -146,8 +146,12 @@
             local holes = {}
             for _, hole in ipairs(FindAllOf("DigHole_BP_C") or {}) do
                 if valid(hole) and same(hole:GetWorld(), state.world) and not hole:IsActorBeingDestroyed() then
-                    local at = hole:K2_GetActorLocation()
-                    holes[#holes+1] = string.format("%d,%0.3f,%0.3f,%0.3f", hole:GetLocalRole(), at.X, at.Y, at.Z)
+                    local role = hole:GetLocalRole()
+                    -- Destroyed local previews can remain in UObject enumeration with ROLE_None.
+                    if role == 1 or role == 3 then
+                        local at = hole:K2_GetActorLocation()
+                        holes[#holes+1] = string.format("%d,%0.3f,%0.3f,%0.3f", role, at.X, at.Y, at.Z)
+                    end
                 end
             end
             table.sort(holes)

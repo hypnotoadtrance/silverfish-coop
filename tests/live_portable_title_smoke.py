@@ -8524,9 +8524,13 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, pawn: verify_stock_crossroads_door(
              host, guest, pawn, lockpick=verify_stock_lockpicks if stock_interaction_feedback else None)),
         (stock_critters, "crossroads", "stock_critters", verify_stock_critters),
-        (stock_shovel, "crossroads", "stock_shovel", lambda host, guest, pawn: verify_stock_shovel(
-            host, guest, pawn, loot=stock_shovel_loot, quest=stock_shovel_quest, host_quest=stock_shovel_host_quest,
-            open_package=missing_contact_open_check)),
+        (stock_shovel, "shovel_loot" if stock_shovel_loot and stock_shovel_quest else "crossroads",
+         "stock_shovel", lambda host, guest, pawn: verify_stock_shovel(
+             host, guest, pawn, loot=stock_shovel_loot, quest=stock_shovel_quest and not stock_shovel_loot,
+             host_quest=stock_shovel_host_quest and not stock_shovel_loot, open_package=missing_contact_open_check)),
+        (stock_shovel_loot and stock_shovel_quest, "crossroads", "stock_shovel_quest",
+         lambda host, guest, pawn: verify_stock_shovel(
+             host, guest, pawn, quest=True, host_quest=stock_shovel_host_quest, open_package=missing_contact_open_check)),
         (missing_contact_untracked_check, "missing_contact_untracked", "stock_untracked_package",
          lambda host, guest, pawn: verify_stock_shovel(host, guest, pawn, quest=True,
             open_package=missing_contact_untracked_check, open_package_quest=False)),
@@ -9195,7 +9199,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 exit_actions = ("prompt", "confirm") if campaign in {
                     "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_shot_view", "tutorial_dock_buckshot",
                     "tutorial_dock_melee", "tutorial_dock_late_join", "dock_population", "stock_melee_family",
-                    "crossroads", "crossroads_anomaly", "discovered_overlap", "quarry_photo", "buried_placements",
+                    "crossroads", "crossroads_anomaly", "discovered_overlap", "quarry_photo", "buried_placements", "shovel_loot",
                     "authored_quest_placement",
                     "crossroads_dead_drop", "metro_dead_drop", "flood_town_dead_drop",
                     "lab_east_wing_acid", "lab_terminal", "oil_lamps", "shopkeep", "simmi", "stock_board_offers", "missing_contact_untracked",
@@ -9716,8 +9720,8 @@ if __name__ == "__main__":
         parser.error("Use --tutorial-dock-shot-view with --tutorial-dock-combat and --stock-npc-override")
     if args.stock_shovel_loot and not args.stock_shovel:
         parser.error("Use --stock-shovel-loot with --stock-shovel")
-    if args.stock_shovel_quest and (not args.stock_shovel or args.stock_shovel_loot):
-        parser.error("Use --stock-shovel-quest with --stock-shovel alone")
+    if args.stock_shovel_quest and not args.stock_shovel:
+        parser.error("Use --stock-shovel-quest with --stock-shovel")
     if args.stock_shovel_host_quest and not args.stock_shovel_quest:
         parser.error("Use --stock-shovel-host-quest with --stock-shovel-quest")
     resident_check_options.add("stock_cooked_meal")
