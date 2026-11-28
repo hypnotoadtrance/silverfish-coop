@@ -256,7 +256,7 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
                 client.bridge.interactions.side_effect = lambda: take(pickup_inputs)
                 reports, opened = asyncio.Queue(), asyncio.Queue()
                 release = {crate: asyncio.Event() for crate in (first, second)}
-                pickup_sent, cancelled = asyncio.Event(), asyncio.Event()
+                pickup_sent, crate_report_sent, cancelled = (asyncio.Event() for _ in range(3))
                 pickup = f"loose:{area}.Observitory_P:PersistentLevel.Item_Test_C_1"
 
                 async def handle(action, operation, target, **_kwargs):
@@ -264,6 +264,12 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual((operation, target), ("pick-up", pickup))
                         pickup_sent.set()
                         return {}
+                    if action == service.native_crate_outcome.REPORT:
+                        outcome = service.native_crate_outcome.decode_report(target, area)
+                        self.assertEqual((outcome["crate"], outcome["epoch"]), (other, epoch))
+                        crate_report_sent.set()
+                        return {"native_loot_roll": service.native_crate_outcome.observed_roll(
+                            other, area, client.invite["character_id"], operation, outcome)}
                     self.assertEqual(action, native_loot.LOCKPICK)
                     crate = target.split("@")[1]
                     reports.put_nowait(crate)
@@ -274,22 +280,28 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
                         raise
                     return {native_loot.LOCKPICK_RESULT: {"map": area, "crate": crate, "guid": guid, "locked": False}}
 
+                open_stock_crate = client.open_stock_crate
+
                 async def open_crate(visit, operation, crate, sequence, outcome):
+                    result = await open_stock_crate(visit, operation, crate, sequence, outcome) if crate == other else {}
                     opened.put_nowait((visit, crate, sequence))
-                    return {}
+                    return result
 
                 client.gameplay_action = AsyncMock(side_effect=handle)
                 client.open_stock_crate = AsyncMock(side_effect=open_crate)
                 workers = [asyncio.create_task(run()) for run in (client.run_stock_crates, client.run_stock_interactions)]
                 try:
                     self.assertEqual(await asyncio.wait_for(reports.get(), .5), first)
+                    inline_result = (f"native-loot-outcome-reply\t1\t5\tconnected\t{area}\t{other}\t5\taccepted\trolled\n"
+                                     "loot-traits\t0\tnone\t0\n").encode("ascii")
                     crate_inputs.extend((input_row("loot-crate-open", area, first, pawn, "2"),
                                          input_row("loot-lockpick", area, second, pawn, "3", guid, "1", "1", "1"),
                                          input_row("loot-crate-open", area, second, pawn, "4"),
-                                         input_row("loot-crate-open", area, other, pawn, "5")))
+                                         input_row("loot-crate-open", area, other, pawn, "5") + inline_result))
                     pickup_inputs.append(("pick-up", pickup))
                     await asyncio.wait_for(feedback_started.wait(), .5)
                     self.assertEqual(await asyncio.wait_for(opened.get(), .5), (scope, other, 5))
+                    self.assertTrue(crate_report_sent.is_set())
                     await asyncio.wait_for(pickup_sent.wait(), .5)
                     self.assertTrue(reports.empty())
                     self.assertTrue(opened.empty())
